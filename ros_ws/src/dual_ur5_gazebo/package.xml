@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>dual_ur5_gazebo</name>
+  <version>0.1.0</version>
+  <description>Dual UR5 Gazebo scene with configurable object poses.</description>
+
+  <maintainer email="you@example.com">Dual UR5 Team</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <depend>gazebo_msgs</depend>
+  <depend>gazebo_ros</depend>
+  <depend>geometry_msgs</depend>
+  <depend>rospy</depend>
+  <depend>tf</depend>
+  <depend>xacro</depend>
+
+  <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>ur_description</exec_depend>
+
+  <export/>
+</package>

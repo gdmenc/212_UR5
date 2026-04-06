@@ -1,0 +1,5 @@
+.git
+**/__pycache__
+ros_ws/build
+ros_ws/devel
+ros_ws/log

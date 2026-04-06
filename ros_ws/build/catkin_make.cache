@@ -1,0 +1,2 @@
+dual_ur5_gazebo
+-DCATKIN_DEVEL_PREFIX=/workspace/ros_ws/devel -DCMAKE_INSTALL_PREFIX=/workspace/ros_ws/install -G Unix Makefiles

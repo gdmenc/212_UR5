@@ -1,0 +1,23 @@
+<launch>
+  <arg name="world" default="$(find dual_ur5_gazebo)/worlds/base.world"/>
+  <arg name="scene_config" default="$(find dual_ur5_gazebo)/config/scene.yaml"/>
+  <arg name="paused" default="false"/>
+  <arg name="gui" default="true"/>
+  <arg name="verbose" default="false"/>
+  <arg name="use_sim_time" default="true"/>
+
+  <include file="$(find gazebo_ros)/launch/empty_world.launch">
+    <arg name="world_name" value="$(arg world)"/>
+    <arg name="paused" value="$(arg paused)"/>
+    <arg name="gui" value="$(arg gui)"/>
+    <arg name="verbose" value="$(arg verbose)"/>
+    <arg name="use_sim_time" value="$(arg use_sim_time)"/>
+  </include>
+
+  <node pkg="dual_ur5_gazebo"
+        type="spawn_scene.py"
+        name="spawn_scene"
+        output="screen">
+    <param name="scene_config" value="$(arg scene_config)"/>
+  </node>
+</launch>

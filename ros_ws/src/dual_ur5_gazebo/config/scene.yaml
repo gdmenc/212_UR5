@@ -1,0 +1,54 @@
+units: m
+
+robots:
+  ur5_left:
+    namespace: /ur5_left
+    prefix: left_
+    pose:
+      x: -0.65
+      y: 0.35
+      z: 0.0
+      roll: 0.0
+      pitch: 0.0
+      yaw_deg: -90.0
+
+  ur5_right:
+    namespace: /ur5_right
+    prefix: right_
+    pose:
+      x: 0.65
+      y: 0.35
+      z: 0.0
+      roll: 0.0
+      pitch: 0.0
+      yaw_deg: -90.0
+
+objects:
+  table:
+    model: table
+    pose:
+      x: 0.0
+      y: 0.0
+      z: 0.0
+
+  bowl:
+    model: bowl
+    pose:
+      x: 0.0
+      y: 0.0
+      z: 0.785
+
+  cup:
+    model: cup
+    pose:
+      x: 0.22
+      y: -0.18
+      z: 0.81
+
+  microwave:
+    model: microwave
+    pose:
+      x: -0.35
+      y: -0.2
+      z: 0.8
+      yaw_deg: 180.0
