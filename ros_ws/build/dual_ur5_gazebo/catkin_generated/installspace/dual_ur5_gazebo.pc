@@ -1,8 +1,0 @@
-prefix=/workspace/ros_ws/install
-
-Name: dual_ur5_gazebo
-Description: Description of dual_ur5_gazebo
-Version: 0.1.0
-Cflags: 
-Libs: -L${prefix}/lib 
-Requires: 
