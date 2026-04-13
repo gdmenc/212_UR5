@@ -24,7 +24,7 @@
         <pose>0 0 0 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.2 0.2 0.02</size>
+            <size>10 10 0.02</size>
           </box>
         </geometry>
         <material>
@@ -35,7 +35,7 @@
         <pose>0 0 0 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.2 0.2 0.02</size>
+            <size>10 10 0.02</size>
           </box>
         </geometry>
         <drake:proximity_properties>
