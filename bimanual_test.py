@@ -1,50 +1,18 @@
 from pydrake.all import ModelVisualizer, DiagramBuilder, MeshcatVisualizer, Simulator, StartMeshcat
+from pydrake.multibody.parsing import PackageMap
 
 from manipulation.station import LoadScenario, MakeHardwareStation
 from manipulation.utils import RenderDiagram
 
 def main():
+    package_map = PackageMap()
+    package_map.Add("ur_description", "/Users/gdmen/MIT/sp26/2.12/212_UR5/ur_description")
+
     # Start the visualizer.
     meshcat = StartMeshcat()
 
-    scenario_data = """
-    directives:
-    - add_model:
-        name: ur_left
-        file: ur_description/urdf/ur5e.urdf
-    - add_weld:
-        parent: world
-        child: ur_left::base_link
-    - add_model:
-        name: wsg_left
-        file: package://drake_models/wsg_50_description/sdf/schunk_wsg_50_with_tip.sdf
-    - add_weld:
-        parent: ur_left::ur_ee_fixed_joint_parent
-        child: wsg_left::body
-        X_PC:
-            translation: [0, 0, 0.09]
-            rotation: !Rpy { deg: [90, 0, 90]}
-    - add_model:
-        name: ur_right
-        file: ur_description/urdf/ur5e.urdf
-    - add_weld:
-        parent: world
-        child: ur_right::base_link
-        X_PC:
-            translation: [.6, 0, 0]
-            rotation: !Rpy { deg: [0, 0, 0]}
-    - add_model:
-        name: wsg_right
-        file: package://drake_models/wsg_50_description/sdf/schunk_wsg_50_with_tip.sdf
-    - add_weld:
-        parent: ur_right::wrist_3_link
-        child: wsg_right::body
-        X_PC:
-            translation: [0, 0, 0.09]
-            rotation: !Rpy { deg: [90, 0, 90]}
-    """
+    scenario = LoadScenario(filename="scenario_files/bimanual.yaml")
 
-    scenario = LoadScenario(data=scenario_data)
     builder = DiagramBuilder()
 
     station = builder.AddSystem(MakeHardwareStation(scenario))

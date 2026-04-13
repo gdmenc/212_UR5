@@ -1,0 +1,47 @@
+directives:
+    - add_model:
+        name: ur_left
+        file: file:///Users/gdmen/MIT/sp26/2.12/212_UR5/ur_description/urdf/ur5e_left.urdf
+    - add_model:
+        name: wsg_left
+        file: package://drake_models/wsg_50_description/sdf/schunk_wsg_50_with_tip.sdf
+    - add_weld:
+        parent: ur_left::wrist_3_link
+        child: wsg_left::body
+        X_PC:
+            translation: [0, 0, 0.04]
+            rotation: !Rpy { deg: [90, 0, 90]}
+    - add_model:
+        name: ur_right
+        file: file:///Users/gdmen/MIT/sp26/2.12/212_UR5/ur_description/urdf/ur5e_right.urdf
+    - add_model:
+        name: wsg_right
+        file: package://drake_models/wsg_50_description/sdf/schunk_wsg_50_with_tip.sdf
+    - add_weld:
+        parent: ur_right::wrist_3_link
+        child: wsg_right::body
+        X_PC:
+            translation: [0, 0, 0.04]
+            rotation: !Rpy { deg: [90, 0, 90]}
+    - add_model:
+        name: floor
+        file: package://manipulation/floor.sdf
+    - add_weld:
+        parent: world
+        child: floor::box
+        X_PC:
+            translation: [0, 0, -0.05]
+    - add_model:
+        name: bowl 
+        file:  file:///Users/gdmen/MIT/sp26/2.12/212_UR5/src/assets/bowl/bowl.sdf
+        default_free_body_pose:
+            bowl_body_link:
+                translation: [1.5, 1, 0]
+                rotation: !Rpy { deg: [90, 0, 0]}
+    - add_model:
+        name: plate_8in 
+        file:  file:///Users/gdmen/MIT/sp26/2.12/212_UR5/src/assets/dishes/plate_8in.sdf
+        default_free_body_pose:
+            plate_8in:
+                translation: [0.5, 1, 0]
+                rotation: !Rpy { deg: [90, 0, 0]}
