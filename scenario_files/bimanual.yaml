@@ -3,14 +3,14 @@ directives:
         name: ur_left
         file: file:///Users/gdmen/MIT/sp26/2.12/212_UR5/ur_description/urdf/ur5e_left.urdf
     - add_model:
-        name: wsg_left
-        file: package://drake_models/wsg_50_description/sdf/schunk_wsg_50_with_tip.sdf
+        name: hook_gripper
+        file: file:///Users/gdmen/MIT/sp26/2.12/212_UR5/src/assets/hook_gripper/hook_gripper.sdf
     - add_weld:
         parent: ur_left::wrist_3_link
-        child: wsg_left::body
+        child: hook_gripper::hook_gripper
         X_PC:
-            translation: [0, 0, 0.04]
-            rotation: !Rpy { deg: [90, 0, 90]}
+            translation: [0, 0, 0.1]
+            rotation: !Rpy { deg: [0, 90, 0]}
     - add_model:
         name: ur_right
         file: file:///Users/gdmen/MIT/sp26/2.12/212_UR5/ur_description/urdf/ur5e_right.urdf
@@ -36,14 +36,14 @@ directives:
         file:  file:///Users/gdmen/MIT/sp26/2.12/212_UR5/src/assets/dishes/plate_8in.sdf
         default_free_body_pose:
             plate_8in:
-                translation: [-0.5, 1, 0]
+                translation: [-0.2, 0.4, 0.71]
                 rotation: !Rpy { deg: [0, 0, 90]}
     - add_model:
         name: plate_8in2
         file:  file:///Users/gdmen/MIT/sp26/2.12/212_UR5/src/assets/dishes/plate_8in.sdf
         default_free_body_pose:
             plate_8in:
-                translation: [0.5, 1, 0]
+                translation: [0.2, 0.4, 0.71]
                 rotation: !Rpy { deg: [0, 0, 90]}
     - add_model:
         name: table 
@@ -53,3 +53,18 @@ directives:
         child: table::table
         X_PC:
             translation: [0, 0, -0.05]
+    - add_model:
+        name: microwave 
+        file:  file:///Users/gdmen/MIT/sp26/2.12/212_UR5/src/assets/microwave/microwave.xml
+    - add_model:
+        name: vention_assembly 
+        file:  file:///Users/gdmen/MIT/sp26/2.12/212_UR5/src/assets/vention_assembly/vention_assembly.sdf
+    - add_weld:
+        parent: world
+        child: vention_assembly::vention_assembly
+        X_PC:
+            translation: [-0.11, 0, 0]
+            rotation: !Rpy { deg: [90, 0, 180]}
+    - add_model:
+        name: heavy_table 
+        file:  file:///Users/gdmen/MIT/sp26/2.12/212_UR5/src/assets/table/extra_heavy_duty_table.sdf
