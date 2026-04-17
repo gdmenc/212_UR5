@@ -1,0 +1,242 @@
+<?xml version="1.0"?>
+<!--
+  Hooker Gripper — a custom 1-DOF parallelogram 4-bar gripper.
+
+  Mechanism:
+    body (the "hook", mounts to the arm wrist)
+      ├── arm_A  (= link1 on +z  +  link2 on -z, moving as a rigid pair)
+      │     └── end_link  (the moving jaw that sandwiches the part against the body)
+      └── arm_B  (= link3, parallel linkage member that keeps end_link un-rotated)
+
+  The kinematic loop (arm_B <-> end_link) is closed in code with TWO coupler
+  constraints on top of this SDF — see example_load.py:
+
+      joint_B       = +1 * joint_A   (parallelogram: both arms rotate together)
+      joint_end_A   = -1 * joint_A   (end_link orientation stays fixed w.r.t. body)
+
+  All meshes are already authored in a common assembled frame, so every link
+  has body-frame pose (0,0,0) and the joint <pose> just names the pivot point.
+
+  Pivot points (in the model / assembly frame):
+      A1 = (-0.0026, 0.0313, 0)   body <-> arm_A
+      A2 = ( 0.0292, 0.0313, 0)   body <-> arm_B
+      B1 = ( 0.0125, 0.0035, 0)   arm_A <-> end_link
+      B2 = ( 0.0443, 0.0035, 0)   arm_B <-> end_link   (loop closure, not in SDF tree)
+      arm length = 31.6 mm,  base/end pivot span = 31.8 mm  (parallelogram ✓)
+-->
+<sdf xmlns:drake="http://drake.mit.edu" version="1.7">
+  <model name="hooker">
+
+    <!-- ================================================================ -->
+    <!-- Links                                                            -->
+    <!-- ================================================================ -->
+
+    <!-- The body/base: hook that mounts to the robot arm -->
+    <link name="body">
+      <inertial>
+        <pose>0.066 0.001 0.002 0 0 0</pose>
+        <mass>0.150</mass>
+        <inertia>
+          <ixx>1.52e-4</ixx> <iyy>2.03e-4</iyy> <izz>1.95e-4</izz>
+          <ixy>0</ixy> <ixz>0</ixz> <iyz>0</iyz>
+        </inertia>
+      </inertial>
+      <visual name="body_visual">
+        <geometry>
+          <mesh>
+            <uri>meshes/base.obj</uri>
+          </mesh>
+        </geometry>
+      </visual>
+      <collision name="body_collision">
+        <geometry>
+          <mesh>
+            <drake:declare_convex/>
+            <uri>meshes/base.obj</uri>
+          </mesh>
+        </geometry>
+      </collision>
+    </link>
+
+    <!-- arm_A = link1 (+z plate) + link2 (-z plate), bolted together through
+         the two pivots so they move as one rigid part. -->
+    <link name="arm_A">
+      <inertial>
+        <pose>0.005 0.017 0 0 0 0</pose>
+        <mass>0.010</mass>
+        <inertia>
+          <ixx>1.9e-6</ixx> <iyy>1.3e-6</iyy> <izz>1.8e-6</izz>
+          <ixy>0</ixy> <ixz>0</ixz> <iyz>0</iyz>
+        </inertia>
+      </inertial>
+      <visual name="link1_visual">
+        <geometry>
+          <mesh><uri>meshes/link1.obj</uri></mesh>
+        </geometry>
+      </visual>
+      <visual name="link2_visual">
+        <geometry>
+          <mesh><uri>meshes/link2.obj</uri></mesh>
+        </geometry>
+      </visual>
+      <collision name="link1_collision">
+        <geometry>
+          <mesh>
+            <drake:declare_convex/>
+            <uri>meshes/link1.obj</uri>
+          </mesh>
+        </geometry>
+      </collision>
+      <collision name="link2_collision">
+        <geometry>
+          <mesh>
+            <drake:declare_convex/>
+            <uri>meshes/link2.obj</uri>
+          </mesh>
+        </geometry>
+      </collision>
+    </link>
+
+    <!-- arm_B = link3, the parallel-linkage member -->
+    <link name="arm_B">
+      <inertial>
+        <pose>0.037 0.017 -0.012 0 0 0</pose>
+        <mass>0.005</mass>
+        <inertia>
+          <ixx>6.1e-7</ixx> <iyy>2.9e-7</iyy> <izz>8.8e-7</izz>
+          <ixy>0</ixy> <ixz>0</ixz> <iyz>0</iyz>
+        </inertia>
+      </inertial>
+      <visual name="link3_visual">
+        <geometry>
+          <mesh><uri>meshes/link3.obj</uri></mesh>
+        </geometry>
+      </visual>
+      <collision name="link3_collision">
+        <geometry>
+          <mesh>
+            <drake:declare_convex/>
+            <uri>meshes/link3.obj</uri>
+          </mesh>
+        </geometry>
+      </collision>
+    </link>
+
+    <!-- end_link: the moving jaw -->
+    <link name="end_link">
+      <inertial>
+        <pose>0.004 0.027 0 0 0 0</pose>
+        <mass>0.030</mass>
+        <inertia>
+          <ixx>8.3e-6</ixx> <iyy>1.58e-5</iyy> <izz>2.21e-5</izz>
+          <ixy>0</ixy> <ixz>0</ixz> <iyz>0</iyz>
+        </inertia>
+      </inertial>
+      <visual name="end_link_visual">
+        <geometry>
+          <mesh><uri>meshes/end_link.obj</uri></mesh>
+        </geometry>
+      </visual>
+      <collision name="end_link_collision">
+        <geometry>
+          <mesh>
+            <drake:declare_convex/>
+            <uri>meshes/end_link.obj</uri>
+          </mesh>
+        </geometry>
+      </collision>
+    </link>
+
+    <!-- ================================================================ -->
+    <!-- Useful frames                                                    -->
+    <!-- ================================================================ -->
+
+    <!-- Where the gripper attaches to the robot wrist. The far +x end of
+         the base is the natural mounting face — redefine if yours is
+         elsewhere. -->
+    <frame name="gripper_mount" attached_to="body">
+      <pose>0.0988 0 0 0 0 0</pose>
+    </frame>
+
+    <!-- Tool center point: midway between the two pivot columns, in the
+         grasping region. Handy for pick-and-place motion planning. -->
+    <frame name="tcp" attached_to="body">
+      <pose>0.028 0.018 0 0 0 0</pose>
+    </frame>
+
+    <!-- ================================================================ -->
+    <!-- Joints                                                           -->
+    <!-- ================================================================ -->
+
+    <!-- joint_A: the ONE actuated joint — rotary input that drives the
+         gripper. Positive q_A rotates arm_A CCW around +z.             -->
+    <joint name="joint_A" type="revolute">
+      <parent>body</parent>
+      <child>arm_A</child>
+      <pose>-0.0026 0.0313 0 0 0 0</pose>
+      <axis>
+        <xyz expressed_in="__model__">0 0 1</xyz>
+        <limit>
+          <lower>-0.6</lower>
+          <upper> 0.6</upper>
+          <effort>5.0</effort>
+          <velocity>3.0</velocity>
+        </limit>
+        <dynamics>
+          <damping>0.01</damping>
+        </dynamics>
+      </axis>
+    </joint>
+
+    <!-- joint_B: passive. Kept equal to joint_A by a coupler constraint
+         (see example_load.py). Exists so arm_B moves visually with the
+         rest of the mechanism.                                         -->
+    <joint name="joint_B" type="revolute">
+      <parent>body</parent>
+      <child>arm_B</child>
+      <pose>0.0292 0.0313 0 0 0 0</pose>
+      <axis>
+        <xyz expressed_in="__model__">0 0 1</xyz>
+        <limit>
+          <lower>-0.6</lower>
+          <upper> 0.6</upper>
+          <effort>0</effort>
+          <velocity>3.0</velocity>
+        </limit>
+        <dynamics>
+          <damping>0.001</damping>
+        </dynamics>
+      </axis>
+    </joint>
+
+    <!-- joint_end_A: passive. Kept equal to -joint_A by a coupler
+         constraint, which keeps end_link parallel to body (parallelogram). -->
+    <joint name="joint_end_A" type="revolute">
+      <parent>arm_A</parent>
+      <child>end_link</child>
+      <pose>0.0125 0.0035 0 0 0 0</pose>
+      <axis>
+        <xyz expressed_in="__model__">0 0 1</xyz>
+        <limit>
+          <lower>-0.6</lower>
+          <upper> 0.6</upper>
+          <effort>0</effort>
+          <velocity>3.0</velocity>
+        </limit>
+        <dynamics>
+          <damping>0.001</damping>
+        </dynamics>
+      </axis>
+    </joint>
+
+    <!--
+      Note on the 4th (loop-closure) joint arm_B <-> end_link at B2:
+      SDF is a tree, so we don't declare it here. The parallelogram
+      constraint is enforced geometrically via the two coupler
+      constraints added in Python. At every valid (q_A, -q_A, q_A)
+      configuration, arm_B's distal pivot B2 coincides exactly with
+      end_link's matching hole, so the visuals stay consistent.
+    -->
+
+  </model>
+</sdf>
