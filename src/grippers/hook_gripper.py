@@ -32,6 +32,8 @@ class HookGripper(Gripper):
     """Active hook end-effector. Constructor mirrors ``Robotiq2F85``: pass
     either a real driver handle or the sim plant, never both."""
 
+    type_name = "hook"
+
     def __init__(
         self,
         rtde_control=None,

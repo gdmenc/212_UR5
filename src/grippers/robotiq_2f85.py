@@ -25,6 +25,8 @@ class Robotiq2F85(Gripper):
     """Robotiq 2F-85. Pass exactly one of ``rtde_control`` (real) or
     ``sim_plant``+``sim_arm_name`` (sim). Mixing is a configuration error."""
 
+    type_name = "robotiq_2f85"
+
     def __init__(
         self,
         rtde_control=None,

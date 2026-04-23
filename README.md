@@ -4,13 +4,27 @@ Autonomous manipulation on a two-arm UR5e rig. The same Python code drives
 both a Drake simulator and the real robots over RTDE, so we can prototype
 in sim and run on hardware without rewriting the task logic.
 
-**Target tasks**
+**Target tasks (end-to-end drink + meal recipe)**
 
-1. Open a microwave, place/retrieve a plate or bowl, close the microwave.
-2. Pick up a bottle, pour into a target vessel, place the bottle back.
-3. Rotate a tray to a goal orientation using **non-prehensile** bimanual
-   pushing — each arm pushes one corner, asymmetric forces generate
-   torque, and neither arm grasps the tray.
+1. Move cup, bottle, and stirrer from their initial positions onto the
+   top of the microwave (clears counter for heating).
+2. Open microwave with the hook; prepare the hook arm to pick up the bowl.
+3. Heat bowl — two-finger presses button on microwave panel. Place bowl
+   on the tray. Prepare two-finger arm to pick up plate.
+4. Hook opens microwave again; two-finger places the plate in; hook
+   closes the door.
+5. If the plate sits too far back for the two-finger arm to grasp, the
+   hook drags it forward. Two-finger picks plate and places on the tray.
+6. Move cup, bottle, stirrer down from microwave top. **Bimanual pour**:
+   hook steadies the cup while the two-finger arm pours the bottle.
+7. Two-finger stirs the drink, then places the cup on the tray.
+8. **Bimanual tray transport** to the final location, keeping the tray
+   level so nothing spills. (Corner-push in-place rotation is a backup
+   if we need pure rotation, not translation.)
+
+The `task_sequencer.py` deliverable is `full_recipe()` which stitches
+these together; each step is also its own sub-task function so they are
+testable in isolation on the rig.
 
 **Hardware**
 
@@ -35,9 +49,15 @@ src/
 ├── primitives/               Task-level motion primitives.
 │   ├── pick.py               approach, grasp, lift
 │   ├── place.py              approach, descend until contact, release
-│   ├── push.py               compliant Cartesian push (tray, door close)
+│   ├── push.py               compliant Cartesian push (corner-push tray)
 │   ├── pour.py               rotate TCP about a fixed axis
-│   └── open_microwave.py     hook handle, sweep door arc
+│   ├── stir.py               circular sweep inside the cup
+│   ├── drag.py               hook variant of push (pull a rim toward the arm)
+│   ├── press_button.py       contact + brief force hold (microwave panel)
+│   ├── open_microwave.py     hook handle, sweep door arc (open & close)
+│   └── bimanual/             two-arm coordinated primitives
+│       ├── carry_tray.py     both arms grasp handles, carry level
+│       └── pour_stabilized.py  hook holds cup while two-finger pours
 │
 ├── planners/                 Trajectory planning + IK.
 │   ├── trajopt.py            primary: B-spline trajectory optimization
@@ -45,6 +65,10 @@ src/
 │   ├── ik.py                 pose -> joint config
 │   ├── diff_ik.py            Cartesian-velocity streaming
 │   └── warmstart.py          LRU cache for trajopt initial guesses
+│
+├── grasping/                 Per-object grasp candidates.
+│   └── candidates.py         static X_OG table; swappable for perception
+│                             later behind the same entry point.
 │
 ├── grippers/                 End-effector drivers.
 │   ├── robotiq_2f85.py       real: TCP socket port 63352; sim: SDF + joints

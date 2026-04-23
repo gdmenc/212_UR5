@@ -19,6 +19,16 @@ High-level flow:
     4. Terminate when travel >= travel_target OR wrench exceeds safety
        limits OR the goal (e.g. tray angle) is reached.
     5. Zero the commanded force; MoveL retract.
+
+Termination note: when ``push`` is invoked as part of a bimanual
+coordination (e.g. the tray-rotation step, where one arm pushes while
+the other completes a trajectory), the stop condition may come from
+the *other arm finishing its motion* rather than from this primitive's
+travel / wrench / goal checks. How that external stop signal is
+delivered is a sequencer-level decision (shared flag, fixed duration
+matched to the other arm, or promoting both into a bimanual primitive);
+``push`` itself stays agnostic and accepts whatever termination the
+caller arranges.
 """
 
 from typing import Optional

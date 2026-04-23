@@ -1,14 +1,18 @@
 """Pick primitive: approach, grasp, lift.
 
-Assumes the scene can provide:
-  - ``scene.object_pose(name)`` -> world-frame pose of the object,
-  - ``scene.grasp_candidates(name)`` -> list of X_OG (grasp pose in the
-    object frame) to try in order. Single-grasp objects return a 1-element
-    list; symmetric objects (bottle) return a rotation ring.
+Inputs:
+  - ``scene.object_pose(name)`` -> world-frame pose of the object (X_WO).
+  - ``get_grasp_candidates(name, gripper_type, scene)`` from ``src.grasping``
+    -> ordered list of X_OG (grasp pose in the object frame). The
+    gripper_type is read from the ``Gripper`` attached to ``arm`` so the
+    same object can have different grasps for the hook vs. the two-finger.
+    Today this is a static table; swapping to perception-driven generation
+    does not change this primitive.
 
 High-level flow:
 
-    for each grasp candidate:
+    gtype = backend.gripper(arm).type_name
+    for each X_OG in get_grasp_candidates(name, gtype, scene):
         X_WG = X_WO * X_OG
         X_WPre = X_WG * RigidTransform([0, 0, -standoff])
         q_goal = solve_ik(plant, X_WPre, q_seed=scene.q(arm))
@@ -27,6 +31,7 @@ High-level flow:
 
 from typing import Optional
 
+from ..grasping import get_grasp_candidates
 from .base import PrimitiveResult
 
 

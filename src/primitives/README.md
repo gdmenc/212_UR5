@@ -33,14 +33,26 @@ chooses which to emit each step.
 
 ## Files
 
+Single-arm:
+
 | File | Primitive | Used by tasks |
 |---|---|---|
 | `base.py` | `PrimitiveResult` dataclass | all |
-| `pick.py` | `pick(object_name, arm, ...)` | plate to/from microwave, bottle for pour |
-| `place.py` | `place(target_pose, arm, ...)` | plate into microwave, bottle back on table |
-| `push.py` | `push(arm, push_frame, direction, ...)` | tray rotation (both arms), microwave door close |
-| `pour.py` | `pour(arm, pour_origin, pour_axis, ...)` | bottle-pour task |
-| `open_microwave.py` | `open_microwave(arm)` | plate-to-microwave task |
+| `pick.py` | `pick(object_name, arm, ...)` | every pick-bearing step |
+| `place.py` | `place(target_pose, arm, ...)` | every placement (microwave, tray, counter) |
+| `push.py` | `push(arm, push_frame, direction, ...)` | corner-push tray rotation |
+| `pour.py` | `pour(arm, pour_origin, pour_axis, ...)` | single-arm pour (fallback; bimanual version in `bimanual/`) |
+| `stir.py` | `stir(arm, cup_origin, cup_axis, ...)` | drink-stir |
+| `drag.py` | `drag(arm, start_pose, direction, travel)` | hook drags plate forward out of microwave |
+| `press_button.py` | `press_button(arm, button_pose, force, ...)` | microwave panel (heat / start) |
+| `open_microwave.py` | `open_microwave(arm)`, `close_microwave(arm)` | both door operations share a swept-arc core |
+
+Bimanual (see `bimanual/README.md`):
+
+| File | Primitive | Used by tasks |
+|---|---|---|
+| `bimanual/carry_tray.py` | `carry_tray(target_pose, left_arm, right_arm, tilt_bound, ...)` | final tray transport |
+| `bimanual/pour_stabilized.py` | `pour_stabilized(pour_arm, holder_arm, ...)` | drink pour where hook steadies cup |
 
 ## Adding a new primitive
 
@@ -52,3 +64,10 @@ chooses which to emit each step.
 4. If the primitive needs scene state the scene doesn't expose yet,
    extend the `Scene` dataclass (don't reach into the plant directly from
    primitives).
+
+## Related
+
+- **Grasp candidates** used by `pick` (and optionally `place` for pose
+  consistency) live in `src/grasping/`, not in `scene`. Keeps the pick
+  primitive agnostic to whether grasps come from a hand table today or a
+  perception module tomorrow.

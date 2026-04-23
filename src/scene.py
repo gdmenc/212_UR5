@@ -48,18 +48,26 @@ class Scene:
         Logical name -> plant body name. Lets primitives do
         ``scene.object_pose("plate_left")`` without knowing the raw SDF
         body names.
-    grasp_candidates : dict[str, list[RigidTransform]]
-        Per-object grasp poses in the object frame. Pick primitive iterates
-        through these. Populated once at scene construction from a hand-
-        edited table; keeping here (not in the YAML) until we need more.
+    named_poses : dict[str, RigidTransform]
+        Task-relevant world-frame poses that are *not* object poses:
+        ``"microwave_top"`` (staging surface for cup/bottle/stirrer),
+        ``"microwave_interior"`` (inside the cavity, for plate/bowl),
+        ``"microwave_button_heat"`` / ``"microwave_button_start"``,
+        ``"tray_final"``, etc. Populated at build time from a hand-edited
+        table; primitives and the sequencer reference by name so the
+        recipe reads like prose.
     meshcat : optional Meshcat handle for interactive debug.
+
+    Grasp candidates (``X_OG`` per object) live in ``src/grasping/`` so
+    they are easy to swap for a perception-driven generator later without
+    touching diagram construction.
     """
 
     diagram: Any
     plant: MultibodyPlant
     command_ports: Dict[str, Any] = field(default_factory=dict)
     object_body_names: Dict[str, str] = field(default_factory=dict)
-    grasp_candidates: Dict[str, list] = field(default_factory=dict)
+    named_poses: Dict[str, Any] = field(default_factory=dict)
     meshcat: Optional[Any] = None
 
 
@@ -81,19 +89,42 @@ def build_scene(meshcat=None, show_collision: bool = False) -> Scene:
       3. station = builder.AddSystem(MakeHardwareStation(scenario))
       4. plant  = station.GetSubsystemByName("plant")
       5. For each arm in ("ur_left", "ur_right"):
-           controller, ctrl_plant = make_inverse_dynamics_controller(...)
+           controller, ctrl_plant = <CHOICE>(...)
            builder.AddSystem(controller)
            Connect plant state -> controller estimated_state
            Connect controller output -> plant actuation
            Expose controller.desired_state as a diagram input port or
            stash the InputPort in command_ports.
+
+         TODO (design choice — do NOT pick arbitrarily before deciding):
+           Option A — ``make_inverse_dynamics_controller``. Tight
+             tracking, cancels the arm's dynamics + gravity. Good
+             default for free-space pick-and-place; less forgiving when
+             the TCP is in contact (will fight external wrenches).
+           Option B — ``make_joint_stiffness_controller``. Compliant
+             PD-with-gravity-comp. Natural softness under contact
+             (relevant for push, tray rotation, drag). Position
+             tracking is looser.
+           Option C — mix: different default per arm, or switch at
+             runtime based on the current primitive (e.g. push/tray
+             -> stiffness, pick/place -> inverse dynamics).
+
+           Decision should be data-driven — run both on a pick task in
+           sim and pick whichever is cleaner, then see if tray/push
+           tasks force a switch. Leaving unimplemented to force the
+           experiment.
       6. If meshcat:
            MeshcatVisualizer.AddToBuilder(..., Role.kIllustration)
            if show_collision:
                MeshcatVisualizer.AddToBuilder(..., Role.kProximity, prefix="coll")
       7. diagram = builder.Build()
-      8. Populate object_body_names and grasp_candidates from a hand-edited
-         table (see below, or move to a yaml-adjacent file once it grows).
+      8. Populate ``object_body_names`` from a small mapping (logical
+         name -> plant body name). Grasp candidates are NOT populated
+         here — they live in ``src/grasping/candidates.py`` and are
+         looked up by the primitives at pick time.
+      9. Populate ``named_poses`` with the task-level reference poses
+         (microwave top, button locations, tray final). Keep this table
+         at the bottom of this module; primitives dereference by name.
     """
     # TODO
     raise NotImplementedError

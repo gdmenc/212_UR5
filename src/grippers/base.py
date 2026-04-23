@@ -20,7 +20,15 @@ from typing import Optional
 
 class Gripper(ABC):
     """One instance per arm. Constructor takes either the sim plant or a real
-    driver handle depending on which side is being wired up — not both."""
+    driver handle depending on which side is being wired up — not both.
+
+    Subclasses set ``type_name`` (short, stable string) so other modules can
+    dispatch on gripper kind without ``isinstance`` — in particular the grasp
+    candidate lookup in ``src/grasping/`` keys off this because a hook-latch
+    pose and a two-finger pinch are genuinely different grasp geometries.
+    """
+
+    type_name: str  # e.g. "hook", "robotiq_2f85". Override in subclasses.
 
     @abstractmethod
     def open(self) -> None:
