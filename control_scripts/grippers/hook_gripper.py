@@ -7,7 +7,7 @@ to disengage. Not a general-purpose pinch — semantics are "latched" vs.
 Actuation is hardware-TBD. This class supports two paths:
 
     1. ``actuation="do_pin"`` (IMPLEMENTED): toggle a digital output pin
-       on the UR control box via RTDE's ``setStandardDigitalOut``. Wire
+       on the UR control box via RTDE's ``setToolDigitalOut``. Wire
        the hook's servo/solenoid to a pin on the tool I/O port. Simplest
        path; no extra host-side software.
     2. ``actuation="serial"`` (STUB): USB-serial to a microcontroller on
@@ -26,7 +26,7 @@ from .base import Gripper
 
 
 DEFAULT_DO_PIN = 0
-"""Which standard digital output pin drives the hook. UPDATE TO MATCH
+"""Which standard digital tool output pin drives the hook. UPDATE TO MATCH
 WIRING once the hook is installed on the rig."""
 
 EXTEND_HIGH = True
@@ -61,7 +61,7 @@ class HookGripper(Gripper):
     def open(self) -> None:
         """Retract the hook (unlatch)."""
         if self._actuation == "do_pin":
-            self._rtde_c.setStandardDigitalOut(self._do_pin, not EXTEND_HIGH)
+            self._rtde_c.setToolDigitalOut(self._do_pin, not EXTEND_HIGH)
             self._extended = False
         else:
             raise NotImplementedError("serial actuation not yet implemented")
@@ -69,7 +69,7 @@ class HookGripper(Gripper):
     def close(self) -> None:
         """Extend the hook (latch)."""
         if self._actuation == "do_pin":
-            self._rtde_c.setStandardDigitalOut(self._do_pin, EXTEND_HIGH)
+            self._rtde_c.setToolDigitalOut(self._do_pin, EXTEND_HIGH)
             self._extended = True
         else:
             raise NotImplementedError("serial actuation not yet implemented")

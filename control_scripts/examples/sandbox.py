@@ -37,9 +37,9 @@ import time
 from typing import Any, List, Optional
 
 import numpy as np
-from scipy.spatial.transform import Rotation
 
 from ..config import PickPlaceConfig
+from ..util.rotations import Rotation
 from ..grasps.plate import plate_rim_grasp
 from ..reachability import (
     best_feasible_grasp,
@@ -56,14 +56,14 @@ from ..util.rtde_convert import pose_to_rtde, rtde_to_pose
 # =====================================================================
 
 # Which arm. Options: "ur_left", "ur_right".
-ARM = "ur_right"
+ARM = "ur_left"
 
 # --- Which tests to run. Start with False for motion-producing tests. ---
 RUN_CONNECTION          = True
 RUN_READ_STATE          = True
 RUN_FRAME_CONVERSIONS   = True
 RUN_REACHABILITY_PROBE  = True
-RUN_GRIPPER             = False
+RUN_GRIPPER             = True
 RUN_MOVEJ               = False
 RUN_MOVEL_DELTA         = False
 
@@ -87,11 +87,17 @@ GRIPPER_CLOSE_SPEED_PCT  = 30
 GRIPPER_CLOSE_FORCE_PCT  = 20   # gentle — just closing on air here
 
 # --- Reachability probe — a few task-frame poses to query. ---
+# IMPORTANT: a Pose with no ``rotation=`` gets identity-in-task-frame,
+# which in base frame puts the TCP at an orientation (tool Z tilted
+# outward-downward) that IK rarely solves. Use a top-down tool
+# orientation here — that's how pick/place actually runs.
+_TOOL_DOWN = Rotation.from_rotvec([np.pi, 0.0, 0.0])
+
 PROBE_POSES_TASK = [
-    Pose(translation=[0.00, 0.00, 0.10]),
-    Pose(translation=[-0.10, 0.20, 0.0]),
-    Pose(translation=[0.10, 0.20, 0.0]),
-    Pose(translation=[0.00, 0.40, 0.05]),
+    Pose(translation=[0.00, 0.00, 0.10], rotation=_TOOL_DOWN),
+    Pose(translation=[-0.10, 0.20, 0.00], rotation=_TOOL_DOWN),
+    Pose(translation=[0.10, 0.20, 0.00], rotation=_TOOL_DOWN),
+    Pose(translation=[0.00, 0.40, 0.05], rotation=_TOOL_DOWN),
 ]
 
 # =====================================================================

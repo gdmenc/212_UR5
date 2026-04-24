@@ -215,8 +215,11 @@ def default_session(
     unnecessary connection to the unused hook arm.
 
     Gripper drivers are wired from the team's known rig state:
-      ur_left  → HookGripper (TCP offset TODO, will raise on setup)
+      ur_left  → Robotiq 2F-85 (hook swapped out for two-finger pick/place tests)
       ur_right → Robotiq 2F-85
+    Note: when the hook goes back on the left arm, switch its
+    gripper_factory below to ``HookGripper(rtde_c, do_pin=...)`` and
+    update tcp_offset to TCP_OFFSET_HOOK.
     """
     specs: Dict[str, ArmSpec] = {}
     if left:
@@ -225,7 +228,9 @@ def default_session(
             ip=left_ip,
             X_base_task=X_LEFT_BASE_TASK,
             tcp_offset=TCP_OFFSET_ROBOTIQ_2F85,  # TODO: replace with TCP_OFFSET_HOOK once measured
-            gripper_factory=lambda rtde_c: HookGripper(rtde_c),
+            # Temporary fallback while the hook gripper path is broken; switch
+            # back to HookGripper(rtde_c) once the left-arm hook I/O is fixed.
+            gripper_factory=lambda rtde_c: Robotiq2F85(rtde_c),
             home_q_rad=HOME_Q_RAD_LEFT,
         )
     if right:

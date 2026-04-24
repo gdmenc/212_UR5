@@ -48,9 +48,11 @@ ARM_DEFINITIONS = {
         name="ur_left",
         ip="192.168.1.101",
         x_base_task=X_LEFT_BASE_TASK,
-        tcp_offset=TCP_OFFSET_HOOK,
-        gripper_kind="hook",
-        description="Left arm with hook end effector.",
+        # Temporary fallback while the hook gripper path is broken; restore
+        # the hook TCP/gripper settings once HookGripper is working again.
+        tcp_offset=TCP_OFFSET_ROBOTIQ_2F85,
+        gripper_kind="robotiq_2f85",
+        description="Left arm with Robotiq 2F-85.",
     ),
     "ur_right": ArmRuntimeDefinition(
         name="ur_right",

@@ -253,12 +253,21 @@ def diagnose_reachability(
     reachable. Useful in print-debugging first-time grasp failures."""
     X_base_target = arm.X_base_task @ X_task_target
     pos_base = X_base_target.translation
+    tcp_z = _tcp_offset_z_from_arm(arm)
+
+    # Max reach for the TCP is the flange reach (0.85 m) PLUS the tool
+    # offset — when the tool points radially outward, TCP extends that
+    # much farther from the shoulder. This is an OPTIMISTIC upper bound
+    # (reachable poses can be just inside it; unreachable ones only
+    # flagged when clearly beyond).
+    max_reach_tcp = UR5E_MAX_REACH + tcp_z
 
     dist = float(np.linalg.norm(pos_base - UR5E_SHOULDER_OFFSET_FROM_BASE))
-    if dist > UR5E_MAX_REACH:
+    if dist > max_reach_tcp:
         return (f"unreachable: TCP target is {dist:.3f} m from shoulder; "
-                f"UR5e max reach is {UR5E_MAX_REACH} m. "
-                f"Move the object closer or grasp at a smaller rim radius.")
+                f"UR5e max reach including tool offset ({tcp_z:.3f} m) is "
+                f"{max_reach_tcp:.3f} m. Move the object closer or grasp "
+                f"at a smaller rim radius.")
     if dist < UR5E_MIN_REACH:
         return (f"unreachable: TCP target is only {dist:.3f} m from "
                 f"shoulder — too close to base ({UR5E_MIN_REACH} m min). "

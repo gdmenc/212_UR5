@@ -36,7 +36,7 @@ import argparse
 import numpy as np
 
 from ..config import PickPlaceConfig
-from ..grasps.plate import plate_rim_grasp
+from ..grasps.plate import plate_rim_grasp, plate_rim_grasp_edge
 from ..pick import pick
 from ..place import place
 from ..session import default_session
@@ -44,32 +44,39 @@ from ..util.poses import Pose
 
 
 # --- Tunables (edit to match your physical layout) ------------------------
-PLATE_PICK_POSE_TASK = Pose(translation=[-0.10, 0.20, 0.0])
+#0.025 is the height of the plate rim
+PLATE_PICK_POSE_TASK = Pose(translation=[-0.3, -0.1, 0.025])
 """Plate center at PICK location, expressed in task frame."""
 
-PLATE_PLACE_POSE_TASK = Pose(translation=[0.10, 0.20, 0.0])
+#0.025 is the height of the plate rim
+PLATE_PLACE_POSE_TASK = Pose(translation=[0, 0, 0.025])
 """Plate center at PLACE location, task frame."""
 
-GRASP_ANGLE_RAD = 0
+GRASP_ANGLE_RAD = np.pi
 """Which rim angle to grasp at. π/2 = approach the rim from the
 microwave-facing side (y+ side of the plate)."""
 
+ARM = "ur_left"
+
 CONFIG = PickPlaceConfig(
-    transit_z=0.30,
+    transit_z=0.2,
+    place_use_contact_descent=False,  # no force-seeking; no table contact                                              
+
     # Conservative defaults everywhere else. Speed things up in a later
     # pass once the motion is known-safe.
 )
 
 
 def plan_pick() -> "Grasp":  # type: ignore[name-defined]
-    return plate_rim_grasp(PLATE_PICK_POSE_TASK, angle_rad=GRASP_ANGLE_RAD)
+    # NOTE We are using rim_grasp here instead of vertical grasp
+    return plate_rim_grasp_edge(PLATE_PICK_POSE_TASK, angle_rad=GRASP_ANGLE_RAD)
 
 
 def plan_place() -> Pose:
     """TCP pose at release. Uses the same rim-grasp factory at the place
     location so the gripper's orientation stays consistent between pick
     and place — easier on the wrist than re-solving a new orientation."""
-    grasp_at_dest = plate_rim_grasp(
+    grasp_at_dest = plate_rim_grasp_edge(
         PLATE_PLACE_POSE_TASK, angle_rad=GRASP_ANGLE_RAD
     )
     return grasp_at_dest.grasp_pose
@@ -95,8 +102,9 @@ def run(dry: bool) -> None:
         print("[dry run] skipping RTDE connection. No motion commanded.")
         return
 
-    with default_session(left=False, right=True) as session:
-        right = session.right
+
+    with default_session(left=ARM == "ur_left", right=ARM == "ur_right") as session:
+        arm = session.arms[ARM]
 
         # Optional: home before starting. Comment out if the arm is
         # already at a safe configuration.
@@ -104,7 +112,7 @@ def run(dry: bool) -> None:
 
         # Pick.
         print(f"\n→ pick: {grasp.description}")
-        pick_result = pick(right, grasp, CONFIG)
+        pick_result = pick(arm, grasp, CONFIG)
         if not pick_result.success:
             print(f"  ✗ pick FAILED: {pick_result.reason}")
             return
@@ -112,7 +120,7 @@ def run(dry: bool) -> None:
 
         # Place.
         print(f"\n→ place @ {PLATE_PLACE_POSE_TASK.translation}")
-        place_result = place(right, place_pose, CONFIG)
+        place_result = place(arm, place_pose, CONFIG)
         if not place_result.success:
             print(f"  ✗ place FAILED: {place_result.reason}")
             return

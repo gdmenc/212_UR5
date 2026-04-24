@@ -56,14 +56,14 @@ PLATE_THICKNESS = 0.0025
 """Sheet thickness (m) — the rim is just this sheet bent upward."""
 
 PLATE_RIM_SLOPE_RAD = float(
-    np.arctan2(PLATE_RIM_HEIGHT, PLATE_OUTER_RADIUS - PLATE_FLAT_RADIUS)
+    np.arctan2(PLATE_RIM_HEIGHT*5/6, PLATE_OUTER_RADIUS - PLATE_FLAT_RADIUS)
 )
 """Slope angle of the rim sheet, measured from horizontal. Derived from
 the three measurements above — ≈ 25.7° for the current plate."""
 
 
 # --- Grasp parameters ------------------------------------------------------
-PLATE_PREGRASP_OFFSET = 0.08
+PLATE_PREGRASP_OFFSET = 0.05
 """Distance (m) along gripper tool -Z from grasp to pregrasp. Made a bit
 larger than the bare 3 cm of the simple grasp because the tilted
 approach has the pregrasp point offset inward-upward into the bowl
@@ -84,7 +84,8 @@ def _top_down_rim_rotation(angle_rad: float) -> Rotation:
     ``angle_rad + 3 * np.pi / 2`` below."""
     flip = Rotation.from_rotvec([0.0, np.pi, 0.0])
     yaw = Rotation.from_rotvec([0.0, 0.0, angle_rad + np.pi])
-    return yaw * flip
+    tool_z_90 = Rotation.from_rotvec([0.0, 0.0, np.pi / 2])
+    return (yaw * flip) * tool_z_90
 
 
 def plate_rim_grasp(
@@ -154,7 +155,8 @@ def _tilted_rim_rotation(angle_rad: float, slope_rad: float) -> Rotation:
     flip = Rotation.from_rotvec([0.0, np.pi, 0.0])
     yaw = Rotation.from_rotvec([0.0, 0.0, angle_rad + np.pi])
     tilt_local_y = Rotation.from_rotvec([0.0, slope_rad - np.pi / 2, 0.0])
-    return (yaw * flip) * tilt_local_y
+    tool_z_90 = Rotation.from_rotvec([0.0, 0.0, np.pi / 2])
+    return ((yaw * flip) * tilt_local_y) * tool_z_90
 
 
 def plate_rim_grasp_edge(

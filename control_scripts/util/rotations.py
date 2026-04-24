@@ -96,6 +96,10 @@ class Rotation:
         ]) / (2.0 * np.sin(theta))
         return axis * theta
 
+    def as_matrix(self) -> np.ndarray:
+        """Return the 3x3 rotation matrix (copy, so caller can't mutate internals)."""
+        return self._matrix.copy()
+
     def apply(self, vec):
         arr = np.asarray(vec, dtype=float)
         if arr.ndim == 1:

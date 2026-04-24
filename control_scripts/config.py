@@ -35,16 +35,27 @@ class PickPlaceConfig:
 
     # --- Speeds (RTDE defaults; override per-move when a primitive needs
     # a slower final approach). ---
-    transit_speed: float = 0.25    # m/s, transit MoveL
-    transit_accel: float = 0.5     # m/s^2
+    transit_speed: float = 0.2    # m/s, transit MoveL
+    transit_accel: float = 0.4     # m/s^2
     approach_speed: float = 0.05   # m/s, final approach to grasp/place
-    approach_accel: float = 0.25   # m/s^2
-    retract_speed: float = 0.15    # m/s
+    approach_accel: float = 0.2   # m/s^2
+    retract_speed: float = 0.2   # m/s
     retract_accel: float = 0.4     # m/s^2
 
     # --- Force / contact thresholds ---
     place_contact_threshold: float = 15.0
     """Newtons. MoveUntilContact stop condition for place descent."""
+
+    place_use_contact_descent: bool = True
+    """If True (default), place() uses ``move_until_contact`` for the
+    final descent — robust to surface-height uncertainty (tables, trays,
+    microwave shelves all at different known heights).
+
+    Set False to make the final descent a deterministic ``approach_to
+    (place_pose)`` — the TCP lands exactly at the pose the caller
+    supplied and the gripper opens there, with no force-seeking. Use
+    this for dry-run trials or whenever you want reproducible timing /
+    no force-mode RPCs fired."""
 
     # --- Gripper: per-operation speed/force (applied via the Gripper
     # ABC's set_speed_pct / set_force_pct right before each call; grippers
@@ -56,12 +67,12 @@ class PickPlaceConfig:
     """0-100. Speed for ``gripper.open()`` — typically fast, no contact.
     The UR2026 reference example uses 100."""
 
-    gripper_close_speed_pct: int = 75
+    gripper_close_speed_pct: int = 100
     """0-100. Speed for ``gripper.close()`` and ``gripper.grasp()`` —
     slower than open by default so we engage fragile objects gently.
     Bump up to 100 for rigid objects where speed matters."""
 
-    gripper_close_force_pct: int = 50
+    gripper_close_force_pct: int = 80
     """0-100. Baseline force envelope for ``gripper.close()``. NOT used
     by ``grasp()`` — that call takes a per-object Newton value via
     ``Grasp.grasp_force`` and overrides. This field only matters if

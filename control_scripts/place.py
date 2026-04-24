@@ -7,13 +7,14 @@ holding the object — only pick() sets that up.
     1. lift_to_transit          current XY held, Z -> transit_z
     2. transit_xy               target XY, orientation, Z held
     3. approach_to   preplace   back off along gripper -Z by preplace_offset
-    4. move_until_contact       probe in -task-z until surface force spike
+    4. final descent            depends on config.place_use_contact_descent:
+        - True (default): move_until_contact — probes in -task-z until a
+                          force spike. Robust to surface-height error.
+        - False          : approach_to(place_pose) — deterministic descent
+                          to the supplied place pose. No force mode RPCs.
     5. gripper.open()
     6. retract_to    preplace   back along gripper +Z to preplace
     7. retract_to    transit    back up to task-frame transit altitude
-
-Step 4 replaces a hand-measured final Z with a force-triggered stop —
-robust to differences between table, tray, and microwave-shelf heights.
 """
 
 from dataclasses import dataclass
@@ -69,13 +70,17 @@ def place(
     # 3. Approach preplace along gripper -Z.
     approach_to(arm, preplace, config.approach_speed, config.approach_accel)
 
-    # 4. Probe down in task frame until surface contact.
-    move_until_contact(
-        arm,
-        _CONTACT_PROBE_V_TASK,
-        _CONTACT_PROBE_ACCEL,
-        config.place_contact_threshold,
-    )
+    # 4. Final descent — either force-seeking (robust to surface-height
+    # error) or deterministic approach_to the supplied place pose.
+    if config.place_use_contact_descent:
+        move_until_contact(
+            arm,
+            _CONTACT_PROBE_V_TASK,
+            _CONTACT_PROBE_ACCEL,
+            config.place_contact_threshold,
+        )
+    else:
+        approach_to(arm, place_pose, config.approach_speed, config.approach_accel)
 
     # 5. Release. Apply open-speed from config just before the open() call.
     arm.gripper.set_speed_pct(config.gripper_open_speed_pct)
