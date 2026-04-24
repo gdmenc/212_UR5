@@ -1,0 +1,14 @@
+<mujoco model="microwave">
+<!-- Repositioned copy for microwave_scenario — body moved from Y=1.0 to Y=0.65
+     so the door handle is within UR5e left arm reach (~0.85m). -->
+    <compiler angle="radian" />
+    <include file="microwave_asset.xml"/>
+    <visual>
+        <headlight diffuse=".9 .9 .9"/>
+    </visual>
+    <worldbody>
+        <body pos="0 0.65 0.71">
+            <include file="microwave_body0.xml"/>
+        </body>
+    </worldbody>
+</mujoco>

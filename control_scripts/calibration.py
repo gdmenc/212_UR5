@@ -46,9 +46,9 @@ vention rig in ``scenario_files/bimanual.yaml`` welded at rpy [90, 0, 180].
 from __future__ import annotations
 
 import numpy as np
-from scipy.spatial.transform import Rotation
 
 from .util.poses import Pose
+from .util.rotations import Rotation
 
 
 def _build_X_base_task(

@@ -36,9 +36,9 @@ the caller picks it to minimise wrist twist or avoid obstacles.
 from __future__ import annotations
 
 import numpy as np
-from scipy.spatial.transform import Rotation
 
 from ..util.poses import Pose
+from ..util.rotations import Rotation
 from .base import Grasp
 
 

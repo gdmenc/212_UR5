@@ -1,18 +1,19 @@
-"""RTDE-only pick-and-place control scripts.
+"""RTDE-only real-robot control scripts.
 
 Deliberately separate from ``src/``: this package has NO pydrake dependency
-and runs natively on any machine that can install ``ur_rtde`` + numpy + scipy.
-Intended as the real-robot execution path while the full Drake sim path in
-``src/`` remains in development.
+and is intended as the real-robot execution path while the full Drake sim path
+in ``src/`` remains in development.
 
 Layout
 ------
 control_scripts/
+    runtime.py             Available arm definitions + shared RTDE connect logic.
+    manual.py              Manual teleop loop with live state prints + CSV logging.
     config.py              Tunables (TRANSIT_Z, PREGRASP_OFFSET, speeds).
     arm.py                 ArmHandle — rtde_c + rtde_r + gripper + calibration.
     calibration.py         X_LEFT_BASE_TASK, X_RIGHT_BASE_TASK, TCP offsets.
     util/
-        poses.py           Pose (translation + scipy Rotation), composition.
+        poses.py           Pose (translation + local Rotation helper), composition.
         frames.py          task_to_base / base_to_task conversion helpers.
         rtde_convert.py    Pose <-> UR axis-angle list.
     moves/                 One atomic move per file; each a thin RTDE wrapper
@@ -24,6 +25,7 @@ control_scripts/
         move_until_contact.py
     pick.py                Composes the modular moves into a full pick.
     place.py               Composes the modular moves into a full place.
+    trials/                Hard-coded autonomous trial definitions + runner.
 
 Frame convention
 ----------------

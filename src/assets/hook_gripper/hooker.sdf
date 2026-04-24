@@ -18,10 +18,10 @@
   has body-frame pose (0,0,0) and the joint <pose> just names the pivot point.
 
   Pivot points (in the model / assembly frame):
-      A1 = (-0.0026, 0.0313, 0)   body <-> arm_A
-      A2 = ( 0.0292, 0.0313, 0)   body <-> arm_B
-      B1 = ( 0.0125, 0.0035, 0)   arm_A <-> end_link
-      B2 = ( 0.0443, 0.0035, 0)   arm_B <-> end_link   (loop closure, not in SDF tree)
+      A1 = (-0.0026, 0.0313, 0)   arm_A <-> end_link   (joint_end_A)
+      A2 = ( 0.0292, 0.0313, 0)   arm_B <-> end_link   (loop closure, not in SDF tree)
+      B1 = ( 0.0125, 0.0035, 0)   body  <-> arm_A      (joint_A)
+      B2 = ( 0.0443, 0.0035, 0)   body  <-> arm_B      (joint_B)
       arm length = 31.6 mm,  base/end pivot span = 31.8 mm  (parallelogram ✓)
 -->
 <sdf xmlns:drake="http://drake.mit.edu" version="1.7">
@@ -55,6 +55,11 @@
             <uri>meshes/base.obj</uri>
           </mesh>
         </geometry>
+        <drake:proximity_properties>
+          <drake:mu_dynamic>0.8</drake:mu_dynamic>
+          <drake:mu_static>0.9</drake:mu_static>
+          <drake:rigid_hydroelastic/>
+        </drake:proximity_properties>
       </collision>
     </link>
 
@@ -86,6 +91,11 @@
             <uri>meshes/link1.obj</uri>
           </mesh>
         </geometry>
+        <drake:proximity_properties>
+          <drake:mu_dynamic>0.5</drake:mu_dynamic>
+          <drake:mu_static>0.5</drake:mu_static>
+          <drake:rigid_hydroelastic/>
+        </drake:proximity_properties>
       </collision>
       <collision name="link2_collision">
         <geometry>
@@ -94,6 +104,11 @@
             <uri>meshes/link2.obj</uri>
           </mesh>
         </geometry>
+        <drake:proximity_properties>
+          <drake:mu_dynamic>0.5</drake:mu_dynamic>
+          <drake:mu_static>0.5</drake:mu_static>
+          <drake:rigid_hydroelastic/>
+        </drake:proximity_properties>
       </collision>
     </link>
 
@@ -119,6 +134,11 @@
             <uri>meshes/link3.obj</uri>
           </mesh>
         </geometry>
+        <drake:proximity_properties>
+          <drake:mu_dynamic>0.5</drake:mu_dynamic>
+          <drake:mu_static>0.5</drake:mu_static>
+          <drake:rigid_hydroelastic/>
+        </drake:proximity_properties>
       </collision>
     </link>
 
@@ -144,6 +164,11 @@
             <uri>meshes/end_link.obj</uri>
           </mesh>
         </geometry>
+        <drake:proximity_properties>
+          <drake:mu_dynamic>0.8</drake:mu_dynamic>
+          <drake:mu_static>0.9</drake:mu_static>
+          <drake:rigid_hydroelastic/>
+        </drake:proximity_properties>
       </collision>
     </link>
 
@@ -168,33 +193,12 @@
     <!-- Joints                                                           -->
     <!-- ================================================================ -->
 
-    <!-- joint_A: the ONE actuated joint — rotary input that drives the
-         gripper. Positive q_A rotates arm_A CCW around +z.             -->
+    <!-- joint_A: passive — coupled to joint_B so arm_A follows arm_B.
+         Both arms rotate together to maintain the parallelogram.       -->
     <joint name="joint_A" type="revolute">
       <parent>body</parent>
       <child>arm_A</child>
-      <pose>-0.0026 0.0313 0 0 0 0</pose>
-      <axis>
-        <xyz expressed_in="__model__">0 0 1</xyz>
-        <limit>
-          <lower>-0.6</lower>
-          <upper> 0.6</upper>
-          <effort>5.0</effort>
-          <velocity>3.0</velocity>
-        </limit>
-        <dynamics>
-          <damping>0.01</damping>
-        </dynamics>
-      </axis>
-    </joint>
-
-    <!-- joint_B: passive. Kept equal to joint_A by a coupler constraint
-         (see example_load.py). Exists so arm_B moves visually with the
-         rest of the mechanism.                                         -->
-    <joint name="joint_B" type="revolute">
-      <parent>body</parent>
-      <child>arm_B</child>
-      <pose>0.0292 0.0313 0 0 0 0</pose>
+      <pose>0.0125 0.0035 0 0 0 0</pose>
       <axis>
         <xyz expressed_in="__model__">0 0 1</xyz>
         <limit>
@@ -209,12 +213,33 @@
       </axis>
     </joint>
 
+    <!-- joint_B: the ONE actuated joint — servo drives link3 (arm_B).
+         Positive q_B rotates arm_B CCW around +z.  arm_A and end_link
+         follow via coupler constraints (see example_load.py).          -->
+    <joint name="joint_B" type="revolute">
+      <parent>body</parent>
+      <child>arm_B</child>
+      <pose>0.0443 0.0035 0 0 0 0</pose>
+      <axis>
+        <xyz expressed_in="__model__">0 0 1</xyz>
+        <limit>
+          <lower>-0.6</lower>
+          <upper> 0.6</upper>
+          <effort>5.0</effort>
+          <velocity>3.0</velocity>
+        </limit>
+        <dynamics>
+          <damping>0.01</damping>
+        </dynamics>
+      </axis>
+    </joint>
+
     <!-- joint_end_A: passive. Kept equal to -joint_A by a coupler
          constraint, which keeps end_link parallel to body (parallelogram). -->
     <joint name="joint_end_A" type="revolute">
       <parent>arm_A</parent>
       <child>end_link</child>
-      <pose>0.0125 0.0035 0 0 0 0</pose>
+      <pose>-0.0026 0.0313 0 0 0 0</pose>
       <axis>
         <xyz expressed_in="__model__">0 0 1</xyz>
         <limit>
@@ -236,7 +261,25 @@
       constraints added in Python. At every valid (q_A, -q_A, q_A)
       configuration, arm_B's distal pivot B2 coincides exactly with
       end_link's matching hole, so the visuals stay consistent.
+      
+      Loop-closure pivot (not in tree):
+      A2 = (0.0292, 0.0313, 0)  arm_B <-> end_link
     -->
+
+    <!-- ================================================================ -->
+    <!-- Collision filter: exclude all internal self-collision             -->
+    <!-- ================================================================ -->
+    <!-- All gripper links are in one group; collisions within the group
+         are ignored so body and end_link don't fight each other.
+         External objects (grasped parts, table, etc.) still collide
+         with the gripper surfaces normally.                              -->
+    <drake:collision_filter_group name="gripper_internal">
+      <drake:member>body</drake:member>
+      <drake:member>arm_A</drake:member>
+      <drake:member>arm_B</drake:member>
+      <drake:member>end_link</drake:member>
+      <drake:ignored_collision_filter_group>gripper_internal</drake:ignored_collision_filter_group>
+    </drake:collision_filter_group>
 
   </model>
 </sdf>

@@ -4,8 +4,8 @@ UR's RTDE API expresses poses as a 6-element list
     [x, y, z, rx, ry, rz]
 where (rx, ry, rz) is an **axis-angle rotation vector** — its magnitude is
 the rotation angle in radians, its direction is the axis. This is *not*
-RPY, quaternion, or Euler. scipy.spatial.transform.Rotation calls this
-representation ``rotvec``, which is what we use here.
+RPY, quaternion, or Euler. Our local ``Rotation`` helper uses the same
+representation.
 
 Keep this boundary code in one place so the move/pick/place primitives
 never touch the UR-specific representation directly.
@@ -16,9 +16,9 @@ from __future__ import annotations
 from typing import List, Sequence
 
 import numpy as np
-from scipy.spatial.transform import Rotation
 
 from .poses import Pose
+from .rotations import Rotation
 
 
 def pose_to_rtde(pose: Pose) -> List[float]:

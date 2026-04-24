@@ -1,10 +1,9 @@
 """Lightweight Pose type and compositional helpers.
 
-Uses numpy + scipy.spatial.transform.Rotation so this module has no pydrake
-dependency (important: this entire package needs to run natively on Intel
-macOS where pydrake has no wheel).
+Uses numpy plus the local ``util.rotations.Rotation`` helper so this module
+has no pydrake dependency and no scipy dependency.
 
-A ``Pose`` is (translation: (3,) ndarray, rotation: scipy Rotation).
+A ``Pose`` is (translation: (3,) ndarray, rotation: Rotation).
 Composition is ``A @ B`` (left-to-right, same convention as pydrake's
 RigidTransform). ``Pose.inverse()`` gives the frame swap.
 
@@ -18,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Sequence
 
 import numpy as np
-from scipy.spatial.transform import Rotation
+from .rotations import Rotation
 
 
 @dataclass

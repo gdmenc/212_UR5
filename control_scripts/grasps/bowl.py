@@ -22,9 +22,9 @@ rough guess from the SDF inertia values; could easily be off by 2 cm.
 from __future__ import annotations
 
 import numpy as np
-from scipy.spatial.transform import Rotation
 
 from ..util.poses import Pose
+from ..util.rotations import Rotation
 from .base import Grasp
 
 

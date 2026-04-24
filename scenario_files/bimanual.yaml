@@ -32,39 +32,33 @@ directives:
         X_PC:
             translation: [0, 0, -0.05]
     - add_model:
-        name: plate_8in 
+        name: plate_8in
         file:  file:///Users/gdmen/MIT/sp26/2.12/212_UR5/src/assets/dishes/plate_8in.sdf
         default_free_body_pose:
             plate_8in:
-                translation: [-0.2, 0.4, 0.71]
+                # Place on the heavy-table top (z ~= 0.7095), with a tiny clearance.
+                translation: [-0.20, 0.95, 0.712]
                 rotation: !Rpy { deg: [0, 0, 90]}
     - add_model:
         name: plate_8in2
         file:  file:///Users/gdmen/MIT/sp26/2.12/212_UR5/src/assets/dishes/plate_8in.sdf
         default_free_body_pose:
             plate_8in:
-                translation: [0.2, 0.4, 0.71]
+                translation: [0.20, 1.13, 0.712]
                 rotation: !Rpy { deg: [0, 0, 90]}
     - add_model:
-        name: table 
-        file:  file:///Users/gdmen/MIT/sp26/2.12/212_UR5/src/assets/table/table.sdf
-    - add_weld:
-        parent: world
-        child: table::table
-        X_PC:
-            translation: [0, 0, -0.05]
-    - add_model:
-        name: microwave 
+        name: microwave
         file:  file:///Users/gdmen/MIT/sp26/2.12/212_UR5/src/assets/microwave/microwave.xml
     - add_model:
-        name: vention_assembly 
+        name: vention_assembly
         file:  file:///Users/gdmen/MIT/sp26/2.12/212_UR5/src/assets/vention_assembly/vention_assembly.sdf
     - add_weld:
         parent: world
         child: vention_assembly::vention_assembly
         X_PC:
+            # Move fixture clear of the two UR base workspaces to avoid startup overlap.
             translation: [-0.11, 0, 0]
             rotation: !Rpy { deg: [90, 0, 180]}
     - add_model:
-        name: heavy_table 
+        name: heavy_table
         file:  file:///Users/gdmen/MIT/sp26/2.12/212_UR5/src/assets/table/extra_heavy_duty_table.sdf
