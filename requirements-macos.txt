@@ -1,0 +1,41 @@
+# macOS-native dependencies. Install with:
+#   python3 -m venv .venv && source .venv/bin/activate
+#   pip install -r requirements-macos.txt
+#
+# Tested on macOS 14+/Apple Silicon and Intel. Both `drake` and
+# `manipulation` come from PyPI here — we deliberately do NOT add the
+# CSAIL nightly wheel index, because it ships date-versioned nightly
+# Drake (0.0.YYYYMMDD) that uv/pip's resolver picks over the real
+# semver releases (1.41.x), and current `manipulation` pins
+# drake>=1.41.0. PyPI has everything we need for stable use.
+#
+# Optional system tools (only needed for specific debug features):
+#   brew install ffmpeg graphviz
+# - ffmpeg: required only if you call meshcat.StartRecording() to write MP4.
+# - graphviz: required only if you render Drake diagram graphs via pydot
+#   (e.g. plot_system_graphviz). Then also: pip install pydot.
+# Skip both if you only need Meshcat live viewing — that works out of the box.
+
+
+# --- Real-robot control (TCP to UR controller; works on macOS) ---
+# ur_rtde                     # rtde_control / rtde_receive Python bindings
+
+# --- Math / IO ---
+numpy
+scipy
+PyYAML                      # scenario_files/*.yaml parsing
+
+# --- Perception (sim-side image processing, debug viz) ---
+opencv-python
+matplotlib
+
+# --- RealSense cameras: NOT listed ---
+# pyrealsense2 has no official macOS wheel (especially on Apple Silicon).
+# If you need cameras on this machine, build librealsense from source:
+#   brew install cmake libusb pkg-config
+#   git clone https://github.com/IntelRealSense/librealsense
+#   cd librealsense && mkdir build && cd build
+#   cmake .. -DBUILD_PYTHON_BINDINGS=ON -DPYTHON_EXECUTABLE=$(which python3)
+#   make -j$(sysctl -n hw.ncpu) && sudo make install
+# Expect maintenance pain on macOS updates. Cleaner path: stream frames
+# from a Linux box (NUC/Pi5) over the network and consume them here.
