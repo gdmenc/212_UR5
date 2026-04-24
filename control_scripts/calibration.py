@@ -116,3 +116,22 @@ TCP_OFFSET_HOOK: list = None  # type: ignore
 """TODO: measure from wrist-3 flange to the hook engagement point and set
 here. Leaving None so ArmHandle.setup() raises a clear error if it's used
 before calibration."""
+
+
+# ---------------------------------------------------------------------------
+# Home joint configurations — the "safe ready" pose each arm goes to at
+# session start (before any pick/place is issued). Joint order is UR5e
+# standard: [shoulder_pan, shoulder_lift, elbow, wrist_1, wrist_2, wrist_3].
+# ---------------------------------------------------------------------------
+HOME_Q_RAD_LEFT = np.radians([
+    -48.24, -101.16, -107.03, -99.73, -120.90, -45.00
+])
+"""Left arm home, copied verbatim from ur_2026/object_grasp_example.py.
+Verified by the team in previous runs as a reachable, collision-free
+pose above the workspace."""
+
+HOME_Q_RAD_RIGHT: "np.ndarray | None" = None
+"""TODO: measure the right arm's home at the lab by manually moving to a
+safe ready pose and reading joint angles via rtde_r.getActualQ(). Setting
+``None`` here means ``Session.move_to_home()`` will SKIP homing the right
+arm — safer than guessing at a pose and commanding a wrong motion."""

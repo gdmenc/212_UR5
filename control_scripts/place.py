@@ -55,11 +55,6 @@ def place(
     if arm.gripper is None:
         raise ValueError(f"arm {arm.name!r} has no gripper attached.")
 
-    # Apply gripper speed / baseline force from config. No-op on grippers
-    # that don't support these (e.g. HookGripper).
-    arm.gripper.set_speed_pct(config.gripper_speed_pct)
-    arm.gripper.set_force_pct(config.gripper_force_pct)
-
     preplace = offset_along_tool_z(place_pose, config.preplace_offset)
     transit_over_target = pose_at_altitude(preplace, config.transit_z)
 
@@ -82,7 +77,8 @@ def place(
         config.place_contact_threshold,
     )
 
-    # 5. Release.
+    # 5. Release. Apply open-speed from config just before the open() call.
+    arm.gripper.set_speed_pct(config.gripper_open_speed_pct)
     arm.gripper.open()
 
     # 6. Retract to preplace along gripper +Z.

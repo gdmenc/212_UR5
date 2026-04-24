@@ -47,11 +47,6 @@ def pick(
     if arm.gripper is None:
         raise ValueError(f"arm {arm.name!r} has no gripper attached.")
 
-    # Apply gripper speed / baseline force from config. No-op on grippers
-    # that don't support these (e.g. HookGripper).
-    arm.gripper.set_speed_pct(config.gripper_speed_pct)
-    arm.gripper.set_force_pct(config.gripper_force_pct)
-
     grasp_pose = grasp.grasp_pose
     pregrasp = offset_along_tool_z(grasp_pose, grasp.pregrasp_offset)
     transit_over_target = pose_at_altitude(pregrasp, config.transit_z)
@@ -69,7 +64,9 @@ def pick(
     # 4. Approach grasp (final offset along gripper -Z).
     approach_to(arm, grasp_pose, config.approach_speed, config.approach_accel)
 
-    # 5. Close gripper. Returns True iff an object was detected.
+    # 5. Close gripper. Apply close-speed from config just before grasp;
+    # grasp() handles per-object force internally from grasp.grasp_force.
+    arm.gripper.set_speed_pct(config.gripper_close_speed_pct)
     held = arm.gripper.grasp(force=grasp.grasp_force)
     if not held:
         retract_to(arm, pregrasp, config.retract_speed, config.retract_accel)

@@ -46,16 +46,26 @@ class PickPlaceConfig:
     place_contact_threshold: float = 15.0
     """Newtons. MoveUntilContact stop condition for place descent."""
 
-    # --- Gripper defaults (applied once per pick/place via gripper's
-    # set_speed_pct / set_force_pct — grippers without these methods
-    # ignore silently). Per-grasp force still overrides via Grasp.grasp_force. ---
-    gripper_speed_pct: int = 100
-    """0-100. Robotiq close/open speed. 100 is the UR2026 example default."""
+    # --- Gripper: per-operation speed/force (applied via the Gripper
+    # ABC's set_speed_pct / set_force_pct right before each call; grippers
+    # without those methods ignore silently). Per-grasp force from
+    # Grasp.grasp_force (Newtons) still overrides gripper_close_force_pct
+    # for the actual grasp() call. ---
 
-    gripper_force_pct: int = 50
-    """0-100. Default force envelope applied at pick/place entry. Grasp
-    force from Grasp.grasp_force (in Newtons) overrides for the actual
-    grasp call; this is the open()/close()/move() baseline."""
+    gripper_open_speed_pct: int = 100
+    """0-100. Speed for ``gripper.open()`` — typically fast, no contact.
+    The UR2026 reference example uses 100."""
+
+    gripper_close_speed_pct: int = 75
+    """0-100. Speed for ``gripper.close()`` and ``gripper.grasp()`` —
+    slower than open by default so we engage fragile objects gently.
+    Bump up to 100 for rigid objects where speed matters."""
+
+    gripper_close_force_pct: int = 50
+    """0-100. Baseline force envelope for ``gripper.close()``. NOT used
+    by ``grasp()`` — that call takes a per-object Newton value via
+    ``Grasp.grasp_force`` and overrides. This field only matters if
+    someone calls ``close()`` directly (outside pick)."""
 
     # --- Safety bounds (not yet enforced — collect for later). ---
     workspace_z_min: Optional[float] = None
