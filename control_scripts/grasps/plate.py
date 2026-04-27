@@ -159,6 +159,40 @@ def _tilted_rim_rotation(angle_rad: float, slope_rad: float) -> Rotation:
     return ((yaw * flip) * tilt_local_y) * tool_z_90
 
 
+def _rim_grasp_z(grasp_radius: float) -> float:
+    """Height of a rim grasp point at ``grasp_radius`` in the plate frame."""
+    if not (PLATE_FLAT_RADIUS <= grasp_radius <= PLATE_OUTER_RADIUS):
+        raise ValueError(
+            f"grasp_radius={grasp_radius} must be in "
+            f"[{PLATE_FLAT_RADIUS}, {PLATE_OUTER_RADIUS}] m "
+            f"(on the sloped rim). Outside the slope there is no rim "
+            f"to pinch — flat bottom inside, empty air outside."
+        )
+
+    # Interpolate z linearly along the slope (slope is a straight line
+    # from (flat_radius, 0) to (outer_radius, rim_height) in r-z).
+    t = (grasp_radius - PLATE_FLAT_RADIUS) / (
+        PLATE_OUTER_RADIUS - PLATE_FLAT_RADIUS
+    )
+    return t * PLATE_RIM_HEIGHT
+
+
+def _plate_to_tilted_rim_grasp(
+    angle_rad: float,
+    grasp_radius: float,
+) -> Pose:
+    grasp_z = _rim_grasp_z(grasp_radius)
+    grasp_position = np.array([
+        grasp_radius * np.cos(angle_rad),
+        grasp_radius * np.sin(angle_rad),
+        grasp_z,
+    ])
+    return Pose(
+        translation=grasp_position,
+        rotation=_tilted_rim_rotation(angle_rad, PLATE_RIM_SLOPE_RAD),
+    )
+
+
 def plate_rim_grasp_edge(
     X_task_plate: Pose,
     angle_rad: float = 0.0,
@@ -177,30 +211,7 @@ def plate_rim_grasp_edge(
     Raises ``ValueError`` if ``grasp_radius`` is outside
     [PLATE_FLAT_RADIUS, PLATE_OUTER_RADIUS].
     """
-    if not (PLATE_FLAT_RADIUS <= grasp_radius <= PLATE_OUTER_RADIUS):
-        raise ValueError(
-            f"grasp_radius={grasp_radius} must be in "
-            f"[{PLATE_FLAT_RADIUS}, {PLATE_OUTER_RADIUS}] m "
-            f"(on the sloped rim). Outside the slope there is no rim "
-            f"to pinch — flat bottom inside, empty air outside."
-        )
-
-    # Interpolate z linearly along the slope (slope is a straight line
-    # from (flat_radius, 0) to (outer_radius, rim_height) in r-z).
-    t = (grasp_radius - PLATE_FLAT_RADIUS) / (
-        PLATE_OUTER_RADIUS - PLATE_FLAT_RADIUS
-    )
-    grasp_z = t * PLATE_RIM_HEIGHT
-
-    grasp_position = np.array([
-        grasp_radius * np.cos(angle_rad),
-        grasp_radius * np.sin(angle_rad),
-        grasp_z,
-    ])
-    X_plate_grasp = Pose(
-        translation=grasp_position,
-        rotation=_tilted_rim_rotation(angle_rad, PLATE_RIM_SLOPE_RAD),
-    )
+    X_plate_grasp = _plate_to_tilted_rim_grasp(angle_rad, grasp_radius)
     return Grasp(
         grasp_pose=X_task_plate @ X_plate_grasp,
         pregrasp_offset=PLATE_PREGRASP_OFFSET,
@@ -210,3 +221,19 @@ def plate_rim_grasp_edge(
             f"r={grasp_radius*100:.1f} cm, slope {np.degrees(PLATE_RIM_SLOPE_RAD):.1f}°"
         ),
     )
+
+
+def plate_pose_from_tilted_rim_tcp(
+    X_task_tcp: Pose,
+    angle_rad: float = 0.0,
+    grasp_radius: float = PLATE_OUTER_RADIUS,
+) -> Pose:
+    """Recover the task-frame plate pose from a taught rim TCP waypoint.
+
+    This is the inverse of ``plate_rim_grasp_edge``'s pose calculation:
+    ``X_task_tcp = X_task_plate @ X_plate_tcp``. Use it when a recorded
+    waypoint is the TCP pose at the intended tilted rim grasp/release
+    contact point, but the pick/place planner needs the plate center pose.
+    """
+    X_plate_tcp = _plate_to_tilted_rim_grasp(angle_rad, grasp_radius)
+    return X_task_tcp @ X_plate_tcp.inverse()

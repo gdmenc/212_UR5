@@ -57,6 +57,32 @@ class PickPlaceConfig:
     this for dry-run trials or whenever you want reproducible timing /
     no force-mode RPCs fired."""
 
+    # --- Partial aperture / staged release ---
+    release_aperture_mm: Optional[int] = None
+    """Robotiq aperture (mm, 0 = closed, ~85 = fully open) used symmetrically
+    on both sides of a pick-and-place:
+
+      - place(): partial open at the release pose to let the object settle
+        before the fingers go fully wide. Avoids the 85 mm finger swing
+        knocking into cavity walls (microwave, shelves).
+      - pick():  pre-set aperture just before the final approach so the
+        fingers are already near the object envelope rather than fully open.
+
+    Only honoured for grippers that implement ``move_mm`` (Robotiq 2F-85).
+    Other grippers fall back to full open()/close(). ``None`` keeps the
+    legacy behaviour (full open at release, no preset before grasp)."""
+
+    release_clearance: float = 0.03
+    """Distance (m) along tool +Z for a small intermediate hop, applied
+    symmetrically:
+
+      - place(): between the partial-open and the full ``open()``, so the
+        fingers break contact with the released object before swinging wide.
+      - pick():  between ``grasp()`` and the retract to pregrasp, so the
+        held object lifts off the surface gently before larger retracts.
+
+    Set 0.0 to disable. Typical values: 1–3 cm."""
+
     # --- Gripper: per-operation speed/force (applied via the Gripper
     # ABC's set_speed_pct / set_force_pct right before each call; grippers
     # without those methods ignore silently). Per-grasp force from

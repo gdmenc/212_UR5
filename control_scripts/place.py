@@ -82,9 +82,22 @@ def place(
     else:
         approach_to(arm, place_pose, config.approach_speed, config.approach_accel)
 
-    # 5. Release. Apply open-speed from config just before the open() call.
+    # 5. Release. Apply open-speed once; if a partial release aperture is
+    # configured (and the gripper supports move_mm), do a staged release:
+    # partial-open → small clearance hop → STAY at the capped aperture.
+    # The fingers are already clear of the released object via the
+    # clearance hop, so there's no upside to swinging out to ~85 mm —
+    # and the cap means the next pick's pre-grasp preset already matches,
+    # avoiding a wasted full-open / re-close cycle inside enclosed cavities.
+    # Without release_aperture_mm we keep the legacy full open.
     arm.gripper.set_speed_pct(config.gripper_open_speed_pct)
-    arm.gripper.open()
+    if config.release_aperture_mm is not None and hasattr(arm.gripper, "move_mm"):
+        arm.gripper.move_mm(config.release_aperture_mm)
+        if config.release_clearance > 0.0:
+            clearance_pose = offset_along_tool_z(place_pose, config.release_clearance)
+            retract_to(arm, clearance_pose, config.retract_speed, config.retract_accel)
+    else:
+        arm.gripper.open()
 
     # 6. Retract to preplace along gripper +Z.
     retract_to(arm, preplace, config.retract_speed, config.retract_accel)

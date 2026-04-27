@@ -56,7 +56,7 @@ from ..util.rtde_convert import pose_to_rtde, rtde_to_pose
 # =====================================================================
 
 # Which arm. Options: "ur_left", "ur_right".
-ARM = "ur_left"
+ARM = "ur_right"
 
 # --- Which tests to run. Start with False for motion-producing tests. ---
 RUN_CONNECTION          = True
@@ -65,7 +65,7 @@ RUN_FRAME_CONVERSIONS   = True
 RUN_REACHABILITY_PROBE  = True
 RUN_GRIPPER             = True
 RUN_MOVEJ               = False
-RUN_MOVEL_DELTA         = False
+RUN_MOVEL_DELTA         = True
 
 # --- moveJ target (joint angles in DEGREES). Keep inside joint limits. ---
 # Set to None to skip the actual moveJ and only print what would happen.

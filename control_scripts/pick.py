@@ -61,6 +61,13 @@ def pick(
     # 3. Approach pregrasp (along gripper -Z from transit altitude).
     approach_to(arm, pregrasp, config.approach_speed, config.approach_accel)
 
+    # 3b. If a release/pre-grasp aperture is configured, preset the gripper
+    # before the final approach so the fingers enter the object envelope
+    # at the right width rather than swinging in from fully open.
+    if config.release_aperture_mm is not None and hasattr(arm.gripper, "move_mm"):
+        arm.gripper.set_speed_pct(config.gripper_open_speed_pct)
+        arm.gripper.move_mm(config.release_aperture_mm)
+
     # 4. Approach grasp (final offset along gripper -Z).
     approach_to(arm, grasp_pose, config.approach_speed, config.approach_accel)
 
@@ -75,6 +82,13 @@ def pick(
         return PickResult(success=False,
                           reason=f"grasp did not detect object ({grasp.description})",
                           grasp=grasp)
+
+    # 5b. Small clearance lift along tool +Z before the larger retract —
+    # breaks static friction with the surface gently before the full
+    # retract to pregrasp.
+    if config.release_clearance > 0.0:
+        clearance_pose = offset_along_tool_z(grasp_pose, config.release_clearance)
+        retract_to(arm, clearance_pose, config.retract_speed, config.retract_accel)
 
     # 6. Retract to pregrasp along gripper +Z.
     retract_to(arm, pregrasp, config.retract_speed, config.retract_accel)
