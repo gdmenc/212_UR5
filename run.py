@@ -4,6 +4,7 @@ import argparse
 import sys
 
 from control_scripts.manual import ManualTeleopOptions, run_manual_teleop
+from control_scripts.routines import ROUTINES
 from control_scripts.runtime import (
     close_arms,
     connect_arms,
@@ -11,6 +12,7 @@ from control_scripts.runtime import (
     parse_arm_names,
     print_arm_state,
 )
+from control_scripts.tasks import TASKS
 from control_scripts.trials.definitions import DEFAULT_TRIAL
 from control_scripts.trials.runner import list_trials, run_trial
 
@@ -23,6 +25,30 @@ def _build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("list-arms", help="show available arm definitions")
     subparsers.add_parser("list-trials", help="show available hard-coded trials")
+    subparsers.add_parser("list-tasks", help="show registered single-arm tasks")
+    subparsers.add_parser("list-routines", help="show registered end-to-end routines")
+
+    task_parser = subparsers.add_parser(
+        "task",
+        help="run a registered single-arm task (see `list-tasks`)",
+    )
+    task_parser.add_argument("name", help="task name from the TASKS registry")
+    task_parser.add_argument(
+        "--dry",
+        action="store_true",
+        help="plan and print without commanding motion (task must support it)",
+    )
+
+    routine_parser = subparsers.add_parser(
+        "routine",
+        help="run a registered end-to-end routine (see `list-routines`)",
+    )
+    routine_parser.add_argument("name", help="routine name from the ROUTINES registry")
+    routine_parser.add_argument(
+        "--dry",
+        action="store_true",
+        help="plan and print without commanding motion (routine must support it)",
+    )
 
     state_parser = subparsers.add_parser(
         "state",
@@ -102,6 +128,34 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "list-trials":
             list_trials()
             return 0
+
+        if args.command == "list-tasks":
+            if not TASKS:
+                print("(no tasks registered)")
+            for name in sorted(TASKS):
+                print(name)
+            return 0
+
+        if args.command == "list-routines":
+            if not ROUTINES:
+                print("(no routines registered)")
+            for name in sorted(ROUTINES):
+                print(name)
+            return 0
+
+        if args.command == "task":
+            if args.name not in TASKS:
+                parser.error(
+                    f"unknown task {args.name!r}; choose from {sorted(TASKS) or 'none'}"
+                )
+            return TASKS[args.name](dry=args.dry)
+
+        if args.command == "routine":
+            if args.name not in ROUTINES:
+                parser.error(
+                    f"unknown routine {args.name!r}; choose from {sorted(ROUTINES) or 'none'}"
+                )
+            return ROUTINES[args.name](dry=args.dry)
 
         if args.command == "state":
             arm_names = parse_arm_names(args.arms)

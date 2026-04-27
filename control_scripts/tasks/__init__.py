@@ -1,16 +1,30 @@
 """Task-specific primitives.
 
-Unlike ``control_scripts/pick.py`` and ``place.py`` (which are generic —
-they work for any object with a ``Grasp``), modules here target ONE
-specific workspace fixture and encode its geometry: the microwave
-cavity, the tray handles, etc.
+Two flavours live here:
 
-Each module exposes:
-  - a dataclass describing the fixture's measurable properties
-    (``MicrowaveSpec``, ``TraySpec``, ...)
-  - one or more primitive functions that take the fixture spec and an
-    ArmHandle and drive the motion.
+  - **Workspace-fixture primitives** (``microwave_place``, ``open_microwave``)
+    encode the geometry of a single physical fixture and expose one or
+    more functions that take an ``ArmHandle`` plus a fixture spec and
+    drive the motion. They take per-call parameters that don't have
+    sensible defaults, so they're meant to be CALLED FROM ROUTINES, not
+    invoked from the CLI.
+
+  - **End-to-end single-arm tasks** (``pick_place_plate``) wrap a
+    self-contained operation behind ``main(dry=False) -> int`` so they
+    can run standalone OR be dispatched from ``run.py task <name>``.
+    Module-level constants pin the workspace coordinates; edit the
+    constants, don't pass them in.
+
+The ``TASKS`` registry below holds only the second flavour — entries
+that are invocable from the unified CLI. Add new ones as you write them.
 
 Parameters that need physical measurement are marked TODO in each file
 and will raise a clear error until set.
 """
+
+from . import pick_place_plate
+
+# Maps CLI task name → main(dry: bool = False) -> int.
+TASKS = {
+    "pick_place_plate": pick_place_plate.main,
+}
