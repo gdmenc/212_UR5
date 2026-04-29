@@ -20,8 +20,8 @@ without the RTDE wheels (e.g. CI). The RTDE imports happen inside
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -30,6 +30,7 @@ from .calibration import (
     HOME_Q_RAD_LEFT,
     HOME_Q_RAD_RIGHT,
     TCP_OFFSET_ROBOTIQ_2F85,
+    TCP_OFFSET_HOOK,
     X_LEFT_BASE_TASK,
     X_RIGHT_BASE_TASK,
 )
@@ -62,10 +63,14 @@ class ArmSpec:
     """6-vector [x, y, z, rx, ry, rz] for rtde_c.setTcp(). Must be set or
     ArmHandle.setup() raises."""
 
-    gripper_factory: Optional[Callable[[Any], Gripper]] = None
-    """``lambda rtde_c: Robotiq2F85(rtde_c)`` or equivalent. ``None`` means
-    no gripper on this arm — ArmHandle.gripper stays None, pick/place fail
-    with a clear message if called."""
+    gripper_factory: Optional[Callable[[Any, Any, Optional[Any]], Gripper]] = None
+    """``lambda rtde_c, rtde_r, rtde_io=None: Robotiq2F85(rtde_c)`` or
+    ``HookGripper(rtde_io)``. Third argument is ``RTDEIOInterface`` when
+    ``needs_rtde_io`` is True, else ``None``. ``None`` means no gripper."""
+
+    needs_rtde_io: bool = False
+    """If True, Session opens ``rtde_io.RTDEIOInterface`` for this arm's IP
+    (required for tool digital outputs / ``HookGripper``)."""
 
     home_q_rad: Optional[np.ndarray] = None
     """Joint config to send at session.move_to_home(). ``None`` skips this
@@ -92,6 +97,7 @@ class Session:
         *,
         rtde_control_cls: Optional[type] = None,
         rtde_receive_cls: Optional[type] = None,
+        rtde_io_cls: Optional[type] = None,
     ) -> None:
         self._specs = specs
         self._connect_tries = connect_tries
@@ -100,6 +106,7 @@ class Session:
         # Injectable for unit tests. None → resolve ur_rtde at __enter__ time.
         self._rtde_control_cls = rtde_control_cls
         self._rtde_receive_cls = rtde_receive_cls
+        self._rtde_io_cls = rtde_io_cls
 
     # --- public accessors -------------------------------------------------
     @property
@@ -116,7 +123,7 @@ class Session:
 
     # --- lifecycle --------------------------------------------------------
     def __enter__(self) -> "Session":
-        ControlCls, ReceiveCls = self._resolve_rtde_classes()
+        ControlCls, ReceiveCls, IOCls = self._resolve_rtde_classes()
 
         for name, spec in self._specs.items():
             rtde_c = ControlCls(spec.ip)
@@ -124,9 +131,14 @@ class Session:
 
             self._ensure_connected(rtde_c, spec.ip)
 
+            rtde_io = None
+            if spec.needs_rtde_io:
+                rtde_io = IOCls(spec.ip)
+                self._ensure_connected(rtde_io, spec.ip)
+
             gripper: Optional[Gripper] = None
             if spec.gripper_factory is not None:
-                gripper = spec.gripper_factory(rtde_c)
+                gripper = spec.gripper_factory(rtde_c, rtde_r, rtde_io)
                 gripper.activate()
 
             arm = ArmHandle(
@@ -170,25 +182,38 @@ class Session:
             arm.control.moveJ(list(home))
 
     # --- internals --------------------------------------------------------
-    def _resolve_rtde_classes(self) -> tuple:
+    def _resolve_rtde_classes(self) -> Tuple[type, type, type]:
         if self._rtde_control_cls is not None and self._rtde_receive_cls is not None:
-            return self._rtde_control_cls, self._rtde_receive_cls
-        # Import here so top-level import of this module doesn't require
-        # ur_rtde to be installed (useful for CI / doc builds).
-        from rtde_control import RTDEControlInterface
-        from rtde_receive import RTDEReceiveInterface
-        return RTDEControlInterface, RTDEReceiveInterface
+            ctl, rcv = self._rtde_control_cls, self._rtde_receive_cls
+        else:
+            # Import here so top-level import of this module doesn't require
+            # ur_rtde to be installed (useful for CI / doc builds).
+            from rtde_control import RTDEControlInterface
+            from rtde_receive import RTDEReceiveInterface
+            ctl, rcv = RTDEControlInterface, RTDEReceiveInterface
+        io_cls = self._rtde_io_cls
+        if io_cls is None:
+            from rtde_io import RTDEIOInterface
+            io_cls = RTDEIOInterface
+        return ctl, rcv, io_cls
 
-    def _ensure_connected(self, rtde_c: Any, ip: str) -> None:
-        """Retry reconnect up to ``connect_tries`` times. Mirrors the
-        connection retry loop in ur_2026/object_grasp_example.py so
-        transient power-cycle / network glitches don't fail the session."""
-        if rtde_c.isConnected():
+    def _ensure_connected(self, interface: Any, ip: str) -> None:
+        """Retry reconnect for RTDE interfaces that expose connection status.
+
+        ``RTDEIOInterface`` in some ur_rtde versions has ``disconnect()`` but
+        no ``isConnected()`` / ``reconnect()`` API. Its constructor either
+        succeeds or raises, so there is nothing useful to probe here.
+        """
+        if not hasattr(interface, "isConnected"):
+            return
+        if interface.isConnected():
             return
         for attempt in range(self._connect_tries):
-            rtde_c.reconnect()
+            if not hasattr(interface, "reconnect"):
+                break
+            interface.reconnect()
             time.sleep(self._connect_retry_delay)
-            if rtde_c.isConnected():
+            if interface.isConnected():
                 return
         raise RuntimeError(
             f"Failed to connect to arm at {ip} after "
@@ -215,11 +240,10 @@ def default_session(
     unnecessary connection to the unused hook arm.
 
     Gripper drivers are wired from the team's known rig state:
-      ur_left  → Robotiq 2F-85 (hook swapped out for two-finger pick/place tests)
+      ur_left  → Hook Gripper (``RTDEIOInterface`` + ``setToolDigitalOut``)
       ur_right → Robotiq 2F-85
-    Note: when the hook goes back on the left arm, switch its
-    gripper_factory below to ``HookGripper(rtde_c, do_pin=...)`` and
-    update tcp_offset to TCP_OFFSET_HOOK.
+    The hook uses ``needs_rtde_io=True`` so tool outputs are toggled via
+    ``rtde_io``, not ``RTDEControlInterface``.
     """
     specs: Dict[str, ArmSpec] = {}
     if left:
@@ -227,10 +251,11 @@ def default_session(
             name="ur_left",
             ip=left_ip,
             X_base_task=X_LEFT_BASE_TASK,
-            tcp_offset=TCP_OFFSET_ROBOTIQ_2F85,  # TODO: replace with TCP_OFFSET_HOOK once measured
-            # Temporary fallback while the hook gripper path is broken; switch
-            # back to HookGripper(rtde_c) once the left-arm hook I/O is fixed.
-            gripper_factory=lambda rtde_c: Robotiq2F85(rtde_c),
+            tcp_offset=TCP_OFFSET_HOOK,
+            needs_rtde_io=True,
+            gripper_factory=lambda rtde_c, rtde_r, rtde_io=None: HookGripper(
+                rtde_io,
+            ),
             home_q_rad=HOME_Q_RAD_LEFT,
         )
     if right:
@@ -239,7 +264,9 @@ def default_session(
             ip=right_ip,
             X_base_task=X_RIGHT_BASE_TASK,
             tcp_offset=TCP_OFFSET_ROBOTIQ_2F85,
-            gripper_factory=lambda rtde_c: Robotiq2F85(rtde_c),
+            gripper_factory=lambda rtde_c, rtde_r, rtde_io=None: Robotiq2F85(
+                rtde_c,
+            ),
             home_q_rad=HOME_Q_RAD_RIGHT,
         )
     return Session(specs, connect_tries=connect_tries)

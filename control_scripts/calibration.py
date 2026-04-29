@@ -112,10 +112,20 @@ X_RIGHT_BASE_TASK: Pose = _build_X_base_task(
 TCP_OFFSET_ROBOTIQ_2F85 = [0.0, 0.0, 0.174, 0.0, 0.0, 0.0]
 """Wrist-3 flange to fingertip pinch point for the Robotiq 2F-85."""
 
-TCP_OFFSET_HOOK: list = None  # type: ignore
-"""TODO: measure from wrist-3 flange to the hook engagement point and set
-here. Leaving None so ArmHandle.setup() raises a clear error if it's used
-before calibration."""
+TCP_OFFSET_HOOK = [0.0, 0.0, 0.10275, 0.0, 0.0, 0.0]
+"""Wrist-3 flange to hook engagement point (the rim seat inside the throat).
+
+Translation: 10.275 cm purely along flange +z. The engagement point sits
+1.175 cm past the fixed upper jaw (at 9.1 cm from the flange) and 2.425 cm
+before the moving finger's inner edge (at 12.7 cm). Positioned this way
+on purpose: when the bowl is lifted vertically, the rim loads against the
+fixed jaw rather than the moving finger.
+
+Rotation: identity. The throat mouth opens on the lateral side defined by
+the gripper's hardware orientation; grasp factories choose wrist_3 so that
+opening points radially toward the target. See ``grippers/hook_gripper.py``
+for the hook's full geometric model.
+"""
 
 
 # ---------------------------------------------------------------------------

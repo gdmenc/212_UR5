@@ -57,7 +57,7 @@ from ..util.poses import Pose
 
 # --- Tunables (edit to match your physical layout) ------------------------
 #0.025 is the height of the plate rim that is reasonable for pickup
-PLATE_PICK_POSE_TASK = Pose(translation=[0.2, -0.1, 0.025])
+PLATE_PICK_POSE_TASK = Pose(translation=[0.295521, -0.1, 0.01])
 """Plate center at PICK location, expressed in task frame."""
 
 #0.025 is the height of the plate rim that is reasonable for setting down
@@ -68,7 +68,7 @@ GRASP_ANGLE_RAD = 0
 """Which rim angle to grasp at. π/2 = approach the rim from the
 microwave-facing side (y+ side of the plate)."""
 
-PLACE_ANGLE_RAD = -np.pi * 7 / 24
+PLACE_ANGLE_RAD = -0.88 # -50.64 deg roughly
 """Which rim angle to place at. π/2 = approach the rim from the
 microwave-facing side (y+ side of the plate)."""
 

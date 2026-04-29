@@ -50,8 +50,8 @@ ARM_DEFINITIONS = {
         x_base_task=X_LEFT_BASE_TASK,
         # Temporary fallback while the hook gripper path is broken; restore
         # the hook TCP/gripper settings once HookGripper is working again.
-        tcp_offset=TCP_OFFSET_ROBOTIQ_2F85,
-        gripper_kind="robotiq_2f85",
+        tcp_offset=TCP_OFFSET_HOOK,
+        gripper_kind="hook",
         description="Left arm with Robotiq 2F-85.",
     ),
     "ur_right": ArmRuntimeDefinition(
@@ -126,12 +126,26 @@ def print_arm_state(arm: ArmHandle, label: Optional[str] = None) -> None:
     print_pose("task", task_pose)
 
 
-def _build_gripper(defn: ArmRuntimeDefinition, control):
+def _build_gripper(defn: ArmRuntimeDefinition, control, rtde_io):
+    """``control`` drives Robotiq URScript paths; hook actuation uses ``rtde_io``."""
     if defn.gripper_kind == "robotiq_2f85":
         return Robotiq2F85(control)
     if defn.gripper_kind == "hook":
-        return HookGripper(control, do_pin=defn.hook_do_pin)
+        return HookGripper(rtde_io, do_pin=defn.hook_do_pin)
     return None
+
+
+def _ensure_connected_rtde(interface, ip: str, *, attempts: int = 3) -> None:
+    if not hasattr(interface, "isConnected"):
+        return
+    if interface.isConnected():
+        return
+    tries = 0
+    while tries < attempts and not interface.isConnected():
+        interface.reconnect()
+        tries += 1
+    if not interface.isConnected():
+        raise RuntimeError(f"failed to connect RTDE to {ip}")
 
 
 def connect_arms(
@@ -140,6 +154,7 @@ def connect_arms(
     gripper_arms: Optional[Iterable[str]] = None,
 ) -> dict[str, ArmHandle]:
     from rtde_control import RTDEControlInterface as RTDEControlInterface
+    from rtde_io import RTDEIOInterface as RTDEIOInterface
     from rtde_receive import RTDEReceiveInterface as RTDEReceiveInterface
 
     requested = list(arm_names)
@@ -158,15 +173,15 @@ def connect_arms(
             control = RTDEControlInterface(defn.ip)
             receive = RTDEReceiveInterface(defn.ip)
 
-            if hasattr(control, "isConnected") and not control.isConnected():
-                attempts = 0
-                while attempts < 3 and not control.isConnected():
-                    control.reconnect()
-                    attempts += 1
-                if not control.isConnected():
-                    raise RuntimeError(f"failed to connect RTDE control to {defn.ip}")
+            _ensure_connected_rtde(control, defn.ip)
 
-            gripper = _build_gripper(defn, control) if name in with_grippers else None
+            gripper = None
+            if name in with_grippers:
+                rtde_io_iface = None
+                if defn.gripper_kind == "hook":
+                    rtde_io_iface = RTDEIOInterface(defn.ip)
+                    _ensure_connected_rtde(rtde_io_iface, defn.ip)
+                gripper = _build_gripper(defn, control, rtde_io_iface)
             arm = ArmHandle(
                 name=name,
                 control=control,

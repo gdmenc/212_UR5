@@ -56,7 +56,7 @@ from ..util.rtde_convert import pose_to_rtde, rtde_to_pose
 # =====================================================================
 
 # Which arm. Options: "ur_left", "ur_right".
-ARM = "ur_right"
+ARM = "ur_left"
 
 # --- Which tests to run. Start with False for motion-producing tests. ---
 RUN_CONNECTION          = True
@@ -81,7 +81,7 @@ MOVEL_SPEED_M_S  = 0.05       # slow — 5 cm/s
 MOVEL_ACCEL_M_S2 = 0.10
 
 # --- Gripper cycle parameters. ---
-GRIPPER_PAUSE_BETWEEN_ACTIONS = 0.5
+GRIPPER_PAUSE_BETWEEN_ACTIONS = 2
 GRIPPER_OPEN_SPEED_PCT   = 100
 GRIPPER_CLOSE_SPEED_PCT  = 30
 GRIPPER_CLOSE_FORCE_PCT  = 20   # gentle — just closing on air here
@@ -196,7 +196,7 @@ def test_reachability_probe(arm) -> None:
         print(f"  probe [{i}] at task {X_task.translation.tolist()}:")
         print(f"    {diagnose_reachability(arm, X_task)}")
 
-    # Also test a plate grasp at one location.
+    # Also test a plate w at one location.
     X_task_plate = Pose(translation=[-0.10, 0.20, 0.0])
     grasp = plate_rim_grasp(X_task_plate, angle_rad=np.pi / 2)
     print()

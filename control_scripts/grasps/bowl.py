@@ -1,22 +1,30 @@
-"""Bowl grasps (bowl.sdf / evo_bowl from src/assets/).
+"""Bowl grasps.
 
 Same object-frame convention as the plate: origin at the bowl's resting
 point on the table, +z up out of the opening, rotational symmetry about
 +z.
 
-Grasp strategy is identical in kind to the plate — top-down rim pinch —
-but the geometry differs in two ways that matter:
+Bowl shape (measured at the 212 lab):
+    - Outer rim diameter:  7.4 cm  (radius 3.7 cm)
+    - Base diameter:       4.25 cm (radius 2.125 cm)
+    - Total height:        7.2 cm
+    - Rim wall thickness:  ≈ 0.27 cm (rough — easily ±0.05 cm)
+    - Profile: significantly concave / tapered. The sidewall sweeps inward
+      from the rim down to a much smaller base, so the rim is the widest
+      point. Approximate inward inset of the outer wall ≈ 0.22 cm per cm
+      of depth (linear approximation; the actual curve is smooth).
 
-    1. The rim is higher off the table (≈ 5 cm for evo_bowl vs. 2 cm for
-       plate), so Z of the rim point is bigger.
-    2. The bowl's curved sidewall means a narrow pregrasp standoff risks
-       clipping the outer wall during the final approach. A larger
-       pregrasp_offset (≈ 5 cm) pulls the pre-grasp point clear of the
-       curvature so the straight-line descent stays off the wall.
+Two grasp families on this object:
+    1. Top-down rim pinch with the 2F-85 — implemented below.
+    2. Side-entry rim hook with the welded hook gripper — TBD; will live
+       alongside this once the hook approach trajectory is settled. Throat
+       width (3.6 cm, see ``grippers/hook_gripper.py``) easily accommodates
+       the 0.27 cm rim wall, so the rim slides into the throat with
+       generous lateral margin.
 
-TODO: measure the actual bowl at the lab (height, rim radius, rim
-thickness) and replace these estimates. The 5 cm bowl-height figure is a
-rough guess from the SDF inertia values; could easily be off by 2 cm.
+Pregrasp standoff: the concave sidewall means a narrow vertical pregrasp
+risks clipping the outer wall during descent. ``BOWL_PREGRASP_OFFSET``
+of 5 cm keeps the final moveL clear of the curvature.
 """
 
 from __future__ import annotations
@@ -28,15 +36,31 @@ from ..util.rotations import Rotation
 from .base import Grasp
 
 
-BOWL_RIM_RADIUS = 0.075
-"""Radial distance from bowl center to rim (m). Approximate — measure."""
+BOWL_RIM_OUTER_RADIUS_M = 0.037
+"""Radial distance from bowl center to the OUTER edge of the rim. Measured
+at the lab — outer rim diameter 7.4 cm."""
 
-BOWL_RIM_Z_OFFSET = 0.055
-"""Height of the bowl rim above the table (m). Approximate — measure."""
+BOWL_BASE_RADIUS_M = 0.02125
+"""Radial distance from bowl center to the bowl's base (the part that rests
+on the table). Measured 4.25 cm diameter. The bowl tapers from
+BOWL_RIM_OUTER_RADIUS_M at the top down to this at the bottom."""
+
+BOWL_RIM_Z_OFFSET_M = 0.072
+"""Height of the bowl rim above the bowl's resting surface (= total bowl
+height). When the bowl sits on the table, this is also the rim's task-z."""
+
+BOWL_RIM_WALL_THICKNESS_M = 0.0027
+"""Rim wall thickness, ROUGH estimate (≈ 2.7 mm, easily ±0.5 mm). Sets the
+required throat width for any hook grasp; the hook's 3.6 cm throat
+(see ``grippers/hook_gripper.HOOK_THROAT_WIDTH_M``) gives ~13× margin so
+the precise value isn't load-bearing."""
 
 BOWL_PREGRASP_OFFSET = 0.05
 """Larger than plate's because the curved sidewall demands more clearance
-at pregrasp to keep the final moveL clear of the outer wall."""
+at pregrasp to keep the final moveL clear of the outer wall. With a
+~0.22 cm/cm inward sidewall inset, a 5 cm vertical pregrasp standoff sees
+the wall ≈ 1.1 cm inset from the rim — comfortable clearance for 2F-85
+fingers."""
 
 BOWL_GRASP_FORCE = 15.0
 """Similar to plate — thin rim, no need to squeeze hard."""
@@ -62,9 +86,9 @@ def bowl_rim_grasp(
     angle_rad: float = 0.0,
 ) -> Grasp:
     rim_xy = np.array([
-        BOWL_RIM_RADIUS * np.cos(angle_rad),
-        BOWL_RIM_RADIUS * np.sin(angle_rad),
-        BOWL_RIM_Z_OFFSET,
+        BOWL_RIM_OUTER_RADIUS_M * np.cos(angle_rad),
+        BOWL_RIM_OUTER_RADIUS_M * np.sin(angle_rad),
+        BOWL_RIM_Z_OFFSET_M,
     ])
     X_bowl_grasp = Pose(
         translation=rim_xy,
