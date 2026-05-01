@@ -7,8 +7,9 @@ Uses hand-recorded task-frame waypoints from:
     snapshot "microwave initial open (grasp) 2"       → engage / handle pose
 
 Phase 3 uses ARC MODE — a series of moveL waypoints along the computed
-door arc — because the hinge location is now known from the door width
-measurement (44 cm).  Arc mode is deterministic and needs no force sensing.
+door arc while preserving the engaged hook orientation — because the hinge
+location is now known from the door width measurement (44 cm). Arc mode is
+deterministic and needs no force sensing.
 
 Arc geometry
 ------------
@@ -75,7 +76,7 @@ HANDLE_ENGAGE_POSE_TASK = Pose(
 # to approach at the wrong angle.
 # Source: snapshot "microwave initial open (pre-grasp) 2"
 PRE_ENGAGE_POSE_TASK = Pose(
-    translation=np.array([-0.101657031669903, 0.3461991798550567, 0.15811394534347623]),
+    translation=np.array([-0.101657031669903, 0.3461991798550567, 0.16811394534347623]),
     rotation=Rotation.from_rotvec(
         [-1.5775781112086387, 0.018476229935449232, 0.0008169673631912397]
     ),
@@ -88,20 +89,19 @@ PRE_ENGAGE_POSE_TASK = Pose(
 # end effector from HOME to the pre-engage orientation.
 # Source: snapshot "microwave initial open (pre-grasp) 2" → joints_rad
 PRE_ENGAGE_JOINTS_RAD = [
-    2.0982916355133057,
-    -0.6880388420871277,
-    1.0973766485797327,
-    -3.547537942925924,
-    -2.089057747517721,
-    -3.9151886145221155,
+    2.0675549507141113,
+    -0.7741321486285706,
+    0.8808053175555628,
+    -0.14715857923541265,
+    1.9965837001800537,
+    -0.750498119984762
 ]
-
 
 # ---------------------------------------------------------------------------
 #  Arc geometry  (door width = 44 cm)
 # ---------------------------------------------------------------------------
 
-DOOR_WIDTH_M = 0.33
+DOOR_WIDTH_M = 0.38
 """Width of the microwave door panel (measured), used as the arc radius."""
 
 # The door swings open in the −X, −Y direction (diagonally toward the operator and to the left).
@@ -126,8 +126,8 @@ DOOR_SPEC = MicrowaveDoorSpec(
 
     # Arc mode — hinge is known.
     hinge_position_task=HINGE_POSITION_TASK,
-    arc_open_angle_rad=1.2,   # ≈ 69° — tune until door is visually fully open
-    n_arc_steps=8,            # moveL waypoints along the arc
+    arc_open_angle_rad=1.8,   # ≈ 69° — tune until door is visually fully open
+    n_arc_steps=14,            # moveL waypoints along the arc
 
     # pull_direction_task drives the arc rotation sign check.
     # −X, −Y = door swings diagonally toward operator and to the left.

@@ -19,7 +19,9 @@ object at a given rig.
 """
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Sequence
+
+import numpy as np
 
 from .arm import ArmHandle
 from .config import DEFAULT, PickPlaceConfig
@@ -94,6 +96,114 @@ def pick(
 
     # 7. Retract to transit altitude (task-frame Z, XY/orientation held).
     retract_to(arm, transit_over_target,
+               config.retract_speed, config.retract_accel)
+
+    return PickResult(success=True, grasp=grasp)
+
+
+def pick_from_box(
+    arm: ArmHandle,
+    grasp: Grasp,
+    entry_xy: Sequence[float],
+    entry_z: float,
+    config: PickPlaceConfig = DEFAULT,
+) -> PickResult:
+    """Pick where the grasp pose lives inside a ceiling-constrained cavity
+    (microwave, shelf, ...). The standard ``pick`` flow retracts upward
+    along tool +Z after grasping — that smashes the wrist into the ceiling
+    when grasp_pose is inside a box. Instead this routes:
+
+        transit_z → (entry_xy, transit_z) → (entry_xy, entry_z)
+                  → (target_xy, entry_z) → grasp_pose
+                  → close → (target_xy, entry_z) → (entry_xy, entry_z)
+                  → (entry_xy, transit_z)
+
+    so the gripper stays below the ceiling while inside the box, then
+    ascends only after exiting.
+
+    ``entry_xy`` is the task-frame XY OUTSIDE the box where the descent
+    from transit_z to entry_z happens — typically a few cm beyond the
+    door plane, with the same Y as the target. ``entry_z`` is the
+    constrained altitude we traverse at inside the box; must clear both
+    the box floor and any objects on it, and be below the ceiling minus
+    wrist clearance.
+
+    The approach orientation is taken from ``grasp.grasp_pose`` and is
+    held constant from the entry pose all the way through the box, so
+    the gripper does not rotate inside the cavity.
+
+    Caller is responsible for choosing a grasp angle that puts the
+    forearm pointing back through the door. The pregrasp_offset on the
+    grasp is NOT used here — the (target_xy, entry_z) waypoint replaces
+    the conventional pregrasp."""
+    if config.transit_z is None:
+        raise ValueError(
+            "config.transit_z is unset — set it from measurements before calling pick_from_box()."
+        )
+    if arm.gripper is None:
+        raise ValueError(f"arm {arm.name!r} has no gripper attached.")
+
+    grasp_pose = grasp.grasp_pose
+    target_xy = grasp_pose.translation[:2]
+    entry_xy = np.asarray(entry_xy, dtype=float).reshape(2)
+
+    entry_pose = Pose(
+        translation=np.array([entry_xy[0], entry_xy[1], entry_z]),
+        rotation=grasp_pose.rotation,
+    )
+    above_target_at_entry_z = Pose(
+        translation=np.array([target_xy[0], target_xy[1], entry_z]),
+        rotation=grasp_pose.rotation,
+    )
+    transit_over_entry = pose_at_altitude(entry_pose, config.transit_z)
+
+    # 1. Lift to transit altitude (task frame).
+    lift_to_transit(arm, config.transit_z, config.transit_speed, config.transit_accel)
+
+    # 2. Transit at altitude to ABOVE the entry XY, rotating to grasp orientation.
+    transit_xy(arm, entry_pose, config.transit_z,
+               config.transit_speed, config.transit_accel)
+
+    # 3. Descend OUTSIDE the box from transit_z to entry_z.
+    approach_to(arm, entry_pose, config.approach_speed, config.approach_accel)
+
+    # 3b. Preset gripper aperture before going inside the cavity. Per-gripper
+    # semantics match pick(): 2F-85 narrows to release_aperture_mm if given,
+    # hook opens its throat regardless. Doing it BEFORE the lateral entry
+    # so the fingers are at their narrow profile inside the box.
+    arm.gripper.set_speed_pct(config.gripper_open_speed_pct)
+    arm.gripper.prepare_for_grasp(target_aperture_mm=config.release_aperture_mm)
+
+    # 4. Translate INTO the box at entry_z, holding orientation.
+    approach_to(arm, above_target_at_entry_z,
+                config.approach_speed, config.approach_accel)
+
+    # 5. Final descent to grasp pose.
+    approach_to(arm, grasp_pose, config.approach_speed, config.approach_accel)
+
+    # 6. Close gripper.
+    arm.gripper.set_speed_pct(config.gripper_close_speed_pct)
+    held = arm.gripper.grasp(force=grasp.grasp_force)
+    if not held:
+        # Failure path: retrace the entry sequence.
+        retract_to(arm, above_target_at_entry_z,
+                   config.retract_speed, config.retract_accel)
+        retract_to(arm, entry_pose, config.retract_speed, config.retract_accel)
+        retract_to(arm, transit_over_entry,
+                   config.retract_speed, config.retract_accel)
+        return PickResult(success=False,
+                          reason=f"grasp did not detect object ({grasp.description})",
+                          grasp=grasp)
+
+    # 7. Lift back to entry_z above the grasp location.
+    retract_to(arm, above_target_at_entry_z,
+               config.retract_speed, config.retract_accel)
+
+    # 8. Translate OUT of the box at entry_z.
+    retract_to(arm, entry_pose, config.retract_speed, config.retract_accel)
+
+    # 9. Ascend to transit_z (above the entry XY, outside the box).
+    retract_to(arm, transit_over_entry,
                config.retract_speed, config.retract_accel)
 
     return PickResult(success=True, grasp=grasp)

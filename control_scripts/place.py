@@ -18,7 +18,9 @@ holding the object — only pick() sets that up.
 """
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Sequence
+
+import numpy as np
 
 from .arm import ArmHandle
 from .config import DEFAULT, PickPlaceConfig
@@ -104,6 +106,93 @@ def place(
 
     # 7. Retract to transit altitude.
     retract_to(arm, transit_over_target,
+               config.retract_speed, config.retract_accel)
+
+    return PlaceResult(success=True)
+
+
+def place_into_box(
+    arm: ArmHandle,
+    place_pose: Pose,
+    entry_xy: Sequence[float],
+    entry_z: float,
+    config: PickPlaceConfig = DEFAULT,
+) -> PlaceResult:
+    """Place where the release pose lives inside a ceiling-constrained
+    cavity. Mirrors ``pick_from_box`` — the standard ``place`` flow
+    retracts up along tool +Z and would smash the wrist into the cavity
+    ceiling. This routes:
+
+        transit_z → (entry_xy, transit_z) → (entry_xy, entry_z)
+                  → (target_xy, entry_z) → place_pose
+                  → release → (target_xy, entry_z) → (entry_xy, entry_z)
+                  → (entry_xy, transit_z)
+
+    Final descent is always deterministic (``approach_to(place_pose)``);
+    the ``place_use_contact_descent`` config flag is ignored — running a
+    force-mode probe inside a ceiling-constrained cavity is too risky on
+    a first cut.
+
+    Same caller responsibilities as ``pick_from_box``: pick a place
+    angle that puts the forearm pointing back through the door, and
+    set ``entry_z`` above the cavity floor (with object clearance) and
+    below the cavity ceiling (with wrist clearance)."""
+    if config.transit_z is None:
+        raise ValueError(
+            "config.transit_z is unset — set it from measurements before calling place_into_box()."
+        )
+    if arm.gripper is None:
+        raise ValueError(f"arm {arm.name!r} has no gripper attached.")
+
+    target_xy = place_pose.translation[:2]
+    entry_xy = np.asarray(entry_xy, dtype=float).reshape(2)
+
+    entry_pose = Pose(
+        translation=np.array([entry_xy[0], entry_xy[1], entry_z]),
+        rotation=place_pose.rotation,
+    )
+    above_target_at_entry_z = Pose(
+        translation=np.array([target_xy[0], target_xy[1], entry_z]),
+        rotation=place_pose.rotation,
+    )
+    transit_over_entry = pose_at_altitude(entry_pose, config.transit_z)
+
+    # 1. Lift to transit altitude.
+    lift_to_transit(arm, config.transit_z, config.transit_speed, config.transit_accel)
+
+    # 2. Transit at altitude to ABOVE the entry XY.
+    transit_xy(arm, entry_pose, config.transit_z,
+               config.transit_speed, config.transit_accel)
+
+    # 3. Descend OUTSIDE the box from transit_z to entry_z.
+    approach_to(arm, entry_pose, config.approach_speed, config.approach_accel)
+
+    # 4. Translate INTO the box at entry_z, holding orientation.
+    approach_to(arm, above_target_at_entry_z,
+                config.approach_speed, config.approach_accel)
+
+    # 5. Final descent to the place pose. Always deterministic — see docstring.
+    approach_to(arm, place_pose, config.approach_speed, config.approach_accel)
+
+    # 6. Release. If a release aperture is set and the gripper supports
+    # move_mm, just narrow to that aperture (no clearance hop — we manage
+    # vertical clearance via the explicit ascend in step 7). Otherwise
+    # full open().
+    arm.gripper.set_speed_pct(config.gripper_open_speed_pct)
+    if config.release_aperture_mm is not None and hasattr(arm.gripper, "move_mm"):
+        arm.gripper.move_mm(config.release_aperture_mm)
+    else:
+        arm.gripper.open()
+
+    # 7. Ascend back to entry_z above the place location.
+    retract_to(arm, above_target_at_entry_z,
+               config.retract_speed, config.retract_accel)
+
+    # 8. Translate OUT of the box at entry_z.
+    retract_to(arm, entry_pose, config.retract_speed, config.retract_accel)
+
+    # 9. Ascend to transit_z above the entry XY.
+    retract_to(arm, transit_over_entry,
                config.retract_speed, config.retract_accel)
 
     return PlaceResult(success=True)

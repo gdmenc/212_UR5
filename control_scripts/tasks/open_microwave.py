@@ -11,9 +11,10 @@ Four-phase strategy:
 
                                ARC MODE (preferred when hinge is measured):
                                A series of ``moveL`` waypoints along the
-                               computed arc. The TCP position and orientation
-                               both rotate around the hinge axis (task Z) so
-                               the hook tracks the handle throughout the sweep.
+                               computed arc. The TCP position follows the
+                               hinge arc while orientation stays fixed at the
+                               engaged hook pose, avoiding unnecessary wrist
+                               rotation while pulling.
                                Deterministic and doesn't require force sensing.
 
                                FORCE MODE (fallback, no hinge needed):
@@ -50,10 +51,8 @@ from scipy.spatial.transform import Rotation as ScipyRotation
 
 from ..arm import ArmHandle
 from ..config import DEFAULT, PickPlaceConfig
-from ..moves import approach_to, lift_to_transit, retract_to, transit_xy
 from ..reachability import is_task_pose_reachable
-from ..util.poses import Pose, pose_at_altitude
-from ..util.rotations import Rotation
+from ..util.poses import Pose
 from ..util.rtde_convert import pose_to_rtde, rtde_to_pose
 
 
@@ -118,11 +117,11 @@ class MicrowaveDoorSpec:
         hinge = handle_translation + np.array([-door_width, 0, 0])
     (adjust sign based on which side the hinge is on)."""
 
-    arc_open_angle_rad: float = 1.2
+    arc_open_angle_rad: float = 1.57
     """Total door opening angle (rad) for arc mode. 1.2 rad ≈ 69°.
     Adjust until the door is visually fully open."""
 
-    n_arc_steps: int = 10
+    n_arc_steps: int = 12
     """Number of intermediate moveL waypoints along the arc. More steps =
     smoother motion but more RTDE round-trips. 8 is a good start."""
 
@@ -157,21 +156,25 @@ class OpenMicrowaveResult:
 #  Arc-mode helpers
 # -----------------------------------------------------------------------
 
-def _arc_waypoints(door: MicrowaveDoorSpec) -> List[Pose]:
+def _arc_waypoints(
+    door: MicrowaveDoorSpec,
+    start_pose_task: Optional[Pose] = None,
+) -> List[Pose]:
     """Generate task-frame TCP poses along the door's opening arc.
 
     The door rotates about the hinge axis (task Z). Each waypoint:
       - Rotates the handle position around the hinge by a small angle increment.
-      - Rotates the TCP orientation by the same angle so the hook stays
-        aligned with the handle throughout the sweep.
+      - Keeps the TCP orientation fixed at ``start_pose_task``. At runtime,
+        this is the live TCP pose after the hook has been seated, so Phase 3
+        continues from the exact wrist orientation reached by the approach.
 
     Rotation sign is chosen so the initial arc tangent aligns with
     ``pull_direction_task``.
     """
-    engage = door.handle_engage_pose_task
+    start = start_pose_task or door.handle_engage_pose_task
     hinge = door.hinge_position_task
 
-    r_vec = engage.translation - hinge  # hinge → handle, task frame
+    r_vec = start.translation - hinge  # hinge → current handle/TCP, task frame
 
     ccw_tangent_2d = np.array([r_vec[1], -r_vec[0]])
     pull_2d = door.pull_direction_task[:2]
@@ -190,12 +193,9 @@ def _arc_waypoints(door: MicrowaveDoorSpec) -> List[Pose]:
             r_vec[2],
         ])
         new_translation = hinge + new_r
+        # new_translation[0] = new_translation[0] * -1
 
-        # Rotate TCP orientation by the same angle around task Z.
-        dR = Rotation.from_rotvec(np.array([0.0, 0.0, theta]))
-        new_rotation = dR * engage.rotation
-
-        waypoints.append(Pose(translation=new_translation, rotation=new_rotation))
+        waypoints.append(Pose(translation=new_translation, rotation=start.rotation))
 
     return waypoints
 
@@ -297,43 +297,41 @@ def open_microwave_door(
             door.joint_speed,
             door.joint_accel,
         )
-    else:
-        # Cartesian fallback: lift → transit at safe altitude → descend.
-        # May cause wrist spin if the starting orientation is far from the
-        # pre-engage orientation. Prefer providing pre_engage_joints_rad.
-        lift_to_transit(arm, config.transit_z, config.transit_speed, config.transit_accel)
-        transit_xy(arm, pre_engage_pose, config.transit_z,
-                   config.transit_speed, config.transit_accel)
-        approach_to(arm, pre_engage_pose, config.approach_speed, config.approach_accel)
+    # else:
+    #     # Cartesian fallback: lift → transit at safe altitude → descend.
+    #     # May cause wrist spin if the starting orientation is far from the
+    #     # pre-engage orientation. Prefer providing pre_engage_joints_rad.
+    #     lift_to_transit(arm, config.transit_z, config.transit_speed, config.transit_accel)
+    #     transit_xy(arm, pre_engage_pose, config.transit_z,
+    #                config.transit_speed, config.transit_accel)
+    #     approach_to(arm, pre_engage_pose, config.approach_speed, config.approach_accel)
 
     # --- Phase 2: engage (short moveL slide to seat hook, then latch) ---
-    approach_to(arm, engage_pose, config.approach_speed, config.approach_accel)
-    arm.gripper.close()
+    # approach_to(arm, engage_pose, config.approach_speed, config.approach_accel)
+    # arm.gripper.close()
 
     # --- Phase 3: pull open ---
     if door.hinge_position_task is not None:
         distance_moved = _phase3_arc(arm, door, config)
-        final_pose_task = _arc_waypoints(door)[-1]
     else:
         distance_moved = _phase3_force(arm, door, engage_pose)
-        final_pose_task = None
 
     # --- Phase 4: release and retract ---
-    arm.gripper.open()
+    # arm.gripper.open()
 
-    if final_pose_task is not None:
-        # Arc mode: lift straight up from wherever the door ended.
-        lift_to_transit(
-            arm, config.transit_z, config.retract_speed, config.retract_accel
-        )
-    else:
-        # Force mode: back to pre-engage, then up.
-        retract_to(arm, pre_engage_pose, config.retract_speed, config.retract_accel)
-        retract_to(
-            arm,
-            pose_at_altitude(pre_engage_pose, config.transit_z),
-            config.retract_speed, config.retract_accel,
-        )
+    # if final_pose_task is not None:
+    #     # Arc mode: lift straight up from wherever the door ended.
+    #     lift_to_transit(
+    #         arm, config.transit_z, config.retract_speed, config.retract_accel
+    #     )
+    # else:
+    #     # Force mode: back to pre-engage, then up.
+    #     retract_to(arm, pre_engage_pose, config.retract_speed, config.retract_accel)
+    #     retract_to(
+    #         arm,
+    #         pose_at_altitude(pre_engage_pose, config.transit_z),
+    #         config.retract_speed, config.retract_accel,
+    #     )
 
     if door.hinge_position_task is not None:
         # Arc: distance is the arc length.
@@ -346,6 +344,7 @@ def open_microwave_door(
             door_opened_distance=arc_length,
         )
     else:
+        distance_moved = 0.0
         opened_ok = distance_moved >= 0.8 * door.pull_distance_task
         return OpenMicrowaveResult(
             success=opened_ok,
@@ -367,14 +366,20 @@ def _phase3_arc(
 
     Returns the arc length traveled (m).
     """
-    waypoints = _arc_waypoints(door)
+    start_pose_task = arm.to_task(rtde_to_pose(arm.receive.getActualTCPPose()))
+    waypoints = _arc_waypoints(door, start_pose_task=start_pose_task)
+    # print(f"Arc waypoints: {waypoints}")
+    # type(waypoints)
+    # for wp in waypoints[::-1]:
+    #     # print(wp)
+    #     print(f"pose to rtde:{arm.to_base(wp)}")
     for wp in waypoints:
         arm.control.moveL(
             pose_to_rtde(arm.to_base(wp)),
             config.approach_speed,
             config.approach_accel,
         )
-    r_vec = door.handle_engage_pose_task.translation - door.hinge_position_task
+    r_vec = start_pose_task.translation - door.hinge_position_task
     return float(np.linalg.norm(r_vec[:2])) * door.arc_open_angle_rad
 
 

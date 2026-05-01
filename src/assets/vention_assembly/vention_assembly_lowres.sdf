@@ -1,0 +1,61 @@
+<?xml version='1.0'?>
+<!--
+  Lightweight twin of vention_assembly.sdf for motion planning and meshcat
+  visualization. A single <box> primitive sized to the WORLD-frame AABB of
+  the original 195 MB mesh, capped at z=1.27 so the box's top sits flush
+  with the arm-base weld points (avoiding spurious geometry above the arms).
+
+  Authored in WORLD coordinates: this SDF expects the bimanual.yaml weld for
+  vention_assembly to be stripped of BOTH its translation and its rotation,
+  so the SDF link sits at world origin with identity rotation. The smoke
+  test does this inline. If you want a drop-in replacement for the rotated
+  YAML weld, use the original vention_assembly.sdf instead (which now
+  references the decimated visual mesh in this directory).
+
+  Source-of-truth measurements (computed from vention_assembly.obj after
+  scale 0.001, rotation rpy=[90,0,180]deg, translation [-0.11, 0, 0]):
+    world AABB lo: [-0.439, -0.080, -0.056]
+    world AABB hi: [+0.473, +0.652, +1.422]
+    box center  (z capped at 1.27): [0.017, 0.286, 0.607]
+    box size    (z capped at 1.27): [0.912, 0.732, 1.326]
+-->
+<sdf xmlns:drake="http://drake.mit.edu" version="1.8">
+  <model name='vention_assembly'>
+    <link name='vention_assembly'>
+      <inertial>
+        <pose>0.017 0.286 0.607 0 0 0</pose>
+        <mass>269.96233</mass>
+        <inertia>
+          <ixx>5313.07</ixx>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyy>3298.87</iyy>
+          <iyz>0</iyz>
+          <izz>5319.13</izz>
+        </inertia>
+      </inertial>
+
+      <visual name='body'>
+        <pose>0.017 0.286 0.607 0 0 0</pose>
+        <geometry>
+          <box>
+            <size>0.912 0.732 1.326</size>
+          </box>
+        </geometry>
+        <material>
+          <ambient>0.30 0.32 0.40 1</ambient>
+          <diffuse>0.55 0.58 0.70 1</diffuse>
+        </material>
+      </visual>
+
+      <collision name='body'>
+        <pose>0.017 0.286 0.607 0 0 0</pose>
+        <geometry>
+          <box>
+            <size>0.912 0.732 1.326</size>
+          </box>
+        </geometry>
+      </collision>
+    </link>
+  </model>
+</sdf>
