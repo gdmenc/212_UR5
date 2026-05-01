@@ -30,9 +30,10 @@ import numpy as np
 from ..arm import ArmHandle
 from ..config import DEFAULT, PickPlaceConfig
 from ..moves import approach_to, lift_to_transit, transit_xy
+from ..tasks.open_microwave import MicrowaveDoorSpec, _arc_waypoints
 from ..util.poses import Pose
 from ..util.rotations import Rotation
-from ..util.rtde_convert import pose_to_rtde
+from ..util.rtde_convert import pose_to_rtde, rtde_to_pose
 
 
 # -----------------------------------------------------------------------
@@ -66,8 +67,14 @@ class CloseMicrowaveDoorSpec:
     when opening. The close arc runs from this angle back to 0."""
 
     n_arc_steps: int = 8
-    """Number of moveL waypoints for the closing push. Keep ≥ 6 so the
+    """Number of moveJ waypoints for the closing push. Keep ≥ 6 so the
     arc is smooth enough that the hook face stays flush with the door."""
+
+    joint_speed: float = 0.5
+    """Joint speed (rad/s) for the ``moveJ`` arc steps."""
+
+    joint_accel: float = 0.3
+    """Joint acceleration (rad/s²) for the ``moveJ`` arc steps."""
 
 
 @dataclass
@@ -80,64 +87,49 @@ class CloseMicrowaveResult:
 #  Arc helpers
 # -----------------------------------------------------------------------
 
-def _arc_angle_sign(door: CloseMicrowaveDoorSpec) -> float:
-    """Return +1 (CCW) or -1 (CW) for the opening rotation direction."""
-    r_vec = door.handle_closed_pose_task.translation - door.hinge_position_task
-    ccw_tangent_2d = np.array([-r_vec[1], r_vec[0]])
-    pull_2d = door.pull_direction_task[:2]
-    return +1.0 if np.dot(ccw_tangent_2d, pull_2d) > 0.0 else -1.0
+# During opening the arc orientation tracks the pull (opening) tangent direction.
+# For closing we travel the arc in reverse, so without correction the tool would
+# face backward relative to the direction of travel — "gliding" rather than
+# "facing" the arc.  A 180° flip around task Z (the hinge axis) corrects this so
+# the tool always faces forward in the closing direction.
+_FLIP_Z = Rotation.from_rotvec(np.array([0.0, 0.0, np.pi]))
+
+
+def _as_open_spec(door: CloseMicrowaveDoorSpec) -> MicrowaveDoorSpec:
+    """Build a MicrowaveDoorSpec from the close spec so we can reuse
+    ``_arc_waypoints`` from the open task."""
+    return MicrowaveDoorSpec(
+        handle_engage_pose_task=door.handle_closed_pose_task,
+        hinge_position_task=door.hinge_position_task,
+        pull_direction_task=door.pull_direction_task,
+        arc_open_angle_rad=door.arc_open_angle_rad,
+        n_arc_steps=door.n_arc_steps,
+    )
 
 
 def open_handle_pose(door: CloseMicrowaveDoorSpec) -> Pose:
     """Compute the handle TCP pose when the door is fully open.
 
-    This is the position the arm needs to reach before starting the
-    push — the door should already be at this angle when close_microwave_door
-    is called.
+    The orientation is flipped 180° around task Z relative to the open-arc
+    endpoint so the approach already has the closing-direction tool face.
     """
-    engage = door.handle_closed_pose_task
-    hinge = door.hinge_position_task
-    r_vec = engage.translation - hinge
-
-    total_angle = _arc_angle_sign(door) * door.arc_open_angle_rad
-    c, s = np.cos(total_angle), np.sin(total_angle)
-    r_open = np.array([c * r_vec[0] - s * r_vec[1],
-                       s * r_vec[0] + c * r_vec[1],
-                       r_vec[2]])
-    dR = Rotation.from_rotvec(np.array([0.0, 0.0, total_angle]))
-    return Pose(
-        translation=hinge + r_open,
-        rotation=dR * engage.rotation,
-    )
+    open_wps = _arc_waypoints(_as_open_spec(door))
+    last = open_wps[-1]
+    return Pose(translation=last.translation, rotation=_FLIP_Z * last.rotation)
 
 
 def close_arc_waypoints(door: CloseMicrowaveDoorSpec) -> List[Pose]:
     """Generate task-frame TCP poses from fully-open back to closed.
 
-    The reverse of ``_arc_waypoints`` in open_microwave — same geometry,
-    angle sequence runs from ``total_angle`` back to 0. The final waypoint
-    is at angle=0, i.e., door fully closed.
+    Reuses ``_arc_waypoints`` from the open task, reverses the list, and
+    applies a 180° task-Z flip to every orientation so the tool faces the
+    closing direction of travel rather than the opening direction.
     """
-    engage = door.handle_closed_pose_task
-    hinge = door.hinge_position_task
-    r_vec = engage.translation - hinge
-
-    total_angle = _arc_angle_sign(door) * door.arc_open_angle_rad
-    # Exclude total_angle (already there), include 0 (fully closed).
-    angles = np.linspace(total_angle, 0.0, door.n_arc_steps + 1)[1:]
-
-    waypoints: List[Pose] = []
-    for theta in angles:
-        c, s = np.cos(theta), np.sin(theta)
-        new_r = np.array([c * r_vec[0] - s * r_vec[1],
-                          s * r_vec[0] + c * r_vec[1],
-                          r_vec[2]])
-        dR = Rotation.from_rotvec(np.array([0.0, 0.0, theta]))
-        waypoints.append(Pose(
-            translation=hinge + new_r,
-            rotation=dR * engage.rotation,
-        ))
-    return waypoints
+    open_wps = _arc_waypoints(_as_open_spec(door))
+    return [
+        Pose(translation=wp.translation, rotation=_FLIP_Z * wp.rotation)
+        for wp in reversed(open_wps)
+    ]
 
 
 # -----------------------------------------------------------------------
@@ -162,18 +154,48 @@ def close_microwave_door(
     waypoints = close_arc_waypoints(door)
 
     # --- Phase 1: approach the fully-open handle position ---
+    # Use moveJ with IK hint (same as the arc) to avoid the wrist
+    # singularity that moveL hits, which was arriving with ~90° wrong
+    # orientation.
+    #
+    # Step 1a: lift to transit Z (still use moveL — vertical only, no
+    # orientation change, so no singularity risk).
     lift_to_transit(arm, config.transit_z, config.transit_speed, config.transit_accel)
-    transit_xy(arm, handle_open, config.transit_z,
-               config.transit_speed, config.transit_accel)
-    approach_to(arm, handle_open, config.approach_speed, config.approach_accel)
+
+    # Step 1b: move to the open-handle XY at transit Z, then descend,
+    # all via moveJ with IK to keep the wrist on the correct branch.
+    from ..util.poses import pose_at_altitude
+    transit_pose = pose_at_altitude(handle_open, config.transit_z)
+
+    prev_joints = list(arm.receive.getActualQ())
+    for target_pose in [transit_pose, handle_open]:
+        rp = pose_to_rtde(arm.to_base(target_pose))
+        target_joints = arm.control.getInverseKinematics(
+            rp, prev_joints, 0.001, 0.001,
+        )
+        arm.control.moveJ(
+            target_joints,
+            door.joint_speed,
+            door.joint_accel,
+        )
+        prev_joints = list(arm.receive.getActualQ())
 
     # --- Phase 2: push closed along the reverse arc ---
-    for wp in waypoints:
-        arm.control.moveL(
-            pose_to_rtde(arm.to_base(wp)),
-            config.approach_speed,
-            config.approach_accel,
+    # Use moveJ with IK solved via q_near to avoid wrist singularities,
+    # same approach as the open_microwave arc.
+    rtde_poses = [pose_to_rtde(arm.to_base(wp)) for wp in waypoints]
+    prev_joints = list(arm.receive.getActualQ())
+
+    for rp in rtde_poses:
+        target_joints = arm.control.getInverseKinematics(
+            rp, prev_joints, 0.001, 0.001,
         )
+        arm.control.moveJ(
+            target_joints,
+            door.joint_speed,
+            door.joint_accel,
+        )
+        prev_joints = list(arm.receive.getActualQ())
 
     # --- Phase 3: retract (lift straight up, hook not latched) ---
     lift_to_transit(arm, config.transit_z, config.retract_speed, config.retract_accel)

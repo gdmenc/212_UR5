@@ -55,15 +55,14 @@ HANDLE_CLOSED_POSE_TASK = Pose(
     ),
 )
 
-DOOR_WIDTH_M = 0.44
+DOOR_WIDTH_M = 0.38
 
-# Hinge is offset from the handle in the [−1, +1] direction (left and
-# deeper into the microwave) so that the opening arc tangent is [−1, −1].
-_HINGE_DIR = np.array([-1.0, 1.0, 0.0]) / np.sqrt(2.0)
+# Hinge is directly left of the handle (pure -X offset) at the full door width.
+# Must match open_microwave.py exactly.
+_HINGE_DIR = np.array([-1.0, 0.0, 0.0]) / np.sqrt(2.0)
 HINGE_POSITION_TASK = (
     HANDLE_CLOSED_POSE_TASK.translation + DOOR_WIDTH_M * _HINGE_DIR
 )
-# ≈ [−0.382, 0.655, 0.155] in task frame
 
 ARM = "ur_left"
 
@@ -71,14 +70,16 @@ DOOR_SPEC = CloseMicrowaveDoorSpec(
     handle_closed_pose_task=HANDLE_CLOSED_POSE_TASK,
     hinge_position_task=HINGE_POSITION_TASK,
     pull_direction_task=np.array([-1.0, -1.0, 0.0]),
-    arc_open_angle_rad=1.2,   # must match the value used to open
-    n_arc_steps=8,
+    arc_open_angle_rad=1.6,   # must match the value used to open
+    n_arc_steps=14,
+    joint_speed=0.8,          # rad/s — matches open_microwave
+    joint_accel=0.5,          # rad/s²
 )
 
 CONFIG = PickPlaceConfig(
     transit_z=0.25,         # same as open_microwave
-    transit_speed=0.15,
-    transit_accel=0.3,
+    transit_speed=0.1,
+    transit_accel=0.2,
     approach_speed=0.04,    # slow push so door doesn't slam
     approach_accel=0.1,
     retract_speed=0.10,
