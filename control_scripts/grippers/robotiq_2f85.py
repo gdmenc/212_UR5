@@ -116,6 +116,14 @@ class Robotiq2F85(Gripper):
     def close(self) -> None:
         self._call("CLOSE", "rq_close_and_wait()")
 
+    def prepare_for_grasp(self, target_aperture_mm: Optional[float] = None) -> None:
+        """If a target aperture is provided, narrow the fingers to it before
+        the final approach so they enter the object envelope at the right
+        width. ``None`` leaves the aperture untouched (preserving any state
+        the caller set up explicitly)."""
+        if target_aperture_mm is not None:
+            self.move_mm(target_aperture_mm)
+
     def grasp(self, force: Optional[float] = None) -> bool:
         """Close with the given target force (Newtons). Returns True
         unconditionally — the URScript path does not expose per-call

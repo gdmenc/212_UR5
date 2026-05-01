@@ -44,7 +44,7 @@ from typing import List, Optional
 import numpy as np
 
 from ..arm import ArmHandle
-from ..runtime import current_base_pose, current_task_pose, print_arm_state
+from ..runtime import current_base_pose, print_arm_state
 from ..session import default_session
 
 
@@ -132,9 +132,31 @@ def _help() -> None:
     print("  l               → list captured snapshots so far")
     print("  d               → delete last snapshot")
     print("  s               → save now (also auto-saves on each capture)")
+    print("  c               → close the attached gripper")
+    print("  o               → open the attached gripper")
     print("  ?               → this help")
     print("  q               → quit (saves, ends teach mode, prints paste snippets)")
     print()
+
+
+def _run_gripper_command(
+    arm: ArmHandle,
+    arm_name: str,
+    command: str,
+    done_label: str,
+    no_freedrive: bool,
+) -> None:
+    if arm.gripper is None:
+        print(f"  (arm {arm_name!r} has no gripper attached)")
+        return
+
+    try:
+        getattr(arm.gripper, command)()
+        print(f"  gripper {done_label}")
+    finally:
+        if not no_freedrive:
+            arm.control.teachMode()
+            print("  freedrive re-enabled")
 
 
 def run(arm_name: str, out_path: Optional[str], no_freedrive: bool) -> int:
@@ -169,7 +191,7 @@ def run(arm_name: str, out_path: Optional[str], no_freedrive: bool) -> int:
                 try:
                     line = input(
                         "\n[wp] label (ENTER=auto, 'l' list, 'd' del, "
-                        "'s' save, '?' help, 'q' quit): "
+                        "'s' save, 'c' close, 'o' open, '?' help, 'q' quit): "
                     ).strip()
                 except EOFError:
                     line = "q"
@@ -198,6 +220,16 @@ def run(arm_name: str, out_path: Optional[str], no_freedrive: bool) -> int:
                 if line == "s":
                     _save(snapshots, out_path, arm_name)
                     print(f"  ↳ saved {len(snapshots)} snapshot(s) to {out_path}")
+                    continue
+                if line == "c":
+                    _run_gripper_command(
+                        arm, arm_name, "close", "closed", no_freedrive
+                    )
+                    continue
+                if line == "o":
+                    _run_gripper_command(
+                        arm, arm_name, "open", "opened", no_freedrive
+                    )
                     continue
 
                 name = line if line else f"wp_{wp_index:02d}"

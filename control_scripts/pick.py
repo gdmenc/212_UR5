@@ -61,12 +61,11 @@ def pick(
     # 3. Approach pregrasp (along gripper -Z from transit altitude).
     approach_to(arm, pregrasp, config.approach_speed, config.approach_accel)
 
-    # 3b. If a release/pre-grasp aperture is configured, preset the gripper
-    # before the final approach so the fingers enter the object envelope
-    # at the right width rather than swinging in from fully open.
-    if config.release_aperture_mm is not None and hasattr(arm.gripper, "move_mm"):
-        arm.gripper.set_speed_pct(config.gripper_open_speed_pct)
-        arm.gripper.move_mm(config.release_aperture_mm)
+    # 3b. Preset the gripper for the final descent. Per-gripper semantics:
+    #   - 2F-85: narrow to release_aperture_mm if given; else leave alone.
+    #   - Hook:  open the throat (regardless of the aperture argument).
+    arm.gripper.set_speed_pct(config.gripper_open_speed_pct)
+    arm.gripper.prepare_for_grasp(target_aperture_mm=config.release_aperture_mm)
 
     # 4. Approach grasp (final offset along gripper -Z).
     approach_to(arm, grasp_pose, config.approach_speed, config.approach_accel)

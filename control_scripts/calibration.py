@@ -109,22 +109,24 @@ X_RIGHT_BASE_TASK: Pose = _build_X_base_task(
 # Rotation zero because standard tools don't re-orient the tool axis.
 # Must be applied once per connection (ArmHandle.setup()).
 # ---------------------------------------------------------------------------
-TCP_OFFSET_ROBOTIQ_2F85 = [0.0, 0.0, 0.174, 0.0, 0.0, 0.0]
+TCP_OFFSET_ROBOTIQ_2F85 = [0.0, 0.0, 0.184, 0.0, 0.0, 0.0]
 """Wrist-3 flange to fingertip pinch point for the Robotiq 2F-85."""
 
-TCP_OFFSET_HOOK = [0.0, 0.0, 0.10275, 0.0, 0.0, 0.0]
+TCP_OFFSET_HOOK = [0.0, 0.0, 0.10275, 0.0, 1.5708, 0.0]
 """Wrist-3 flange to hook engagement point (the rim seat inside the throat).
 
 Translation: 10.275 cm purely along flange +z. The engagement point sits
-1.175 cm past the fixed upper jaw (at 9.1 cm from the flange) and 2.425 cm
-before the moving finger's inner edge (at 12.7 cm). Positioned this way
-on purpose: when the bowl is lifted vertically, the rim loads against the
-fixed jaw rather than the moving finger.
+between the fixed jaw (at flange z = 9.1 cm) and the moving finger's inner
+edge (at flange z = 12.7 cm) — closer to the fixed jaw, since the moving
+finger retracts in flange -z toward the fixed jaw to clamp.
 
-Rotation: identity. The throat mouth opens on the lateral side defined by
-the gripper's hardware orientation; grasp factories choose wrist_3 so that
-opening points radially toward the target. See ``grippers/hook_gripper.py``
-for the hook's full geometric model.
+Rotation: R_y(+π/2). Maps tool +Z to flange +X. The hook is welded so
+that, at a natural rim-grasp wrist orientation, flange +X points task -Z
+(vertically down) — verified against a recorded grasp pose at angle π
+(see grasps/bottle.py::bottle_hook_grasp). After this TCP rotation, tool
++Z aligns with task -Z (down), so the package convention "approach =
++tool_Z" gives a vertical descent and ``offset_along_tool_z(grasp, d)``
+produces a pregrasp exactly d above the grasp in task z.
 """
 
 

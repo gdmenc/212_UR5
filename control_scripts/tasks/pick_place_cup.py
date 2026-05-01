@@ -37,11 +37,11 @@ from ..util.poses import Pose
 
 
 # --- Tunables (edit to match your physical layout) ------------------------
-CUP_PICK_POSE_TASK = Pose(translation=[0.2, 0.2, 0.0])
+CUP_PICK_POSE_TASK = Pose(translation=[0, 0, 0.0])
 """Cup base at PICK location, expressed in task frame. Edit to match the
 table layout. Z is the resting surface; the rim is at z + CUP_HEIGHT_M."""
 
-CUP_PLACE_POSE_TASK = Pose(translation=[0, 0, 0.0])
+CUP_PLACE_POSE_TASK = Pose(translation=[0.2, 0.2, 0.0])
 """Cup base at PLACE location, task frame. Defaults to the same as the
 pick pose (set it back down) — set to a different translation to relocate."""
 

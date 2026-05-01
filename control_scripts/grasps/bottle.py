@@ -137,6 +137,100 @@ def bottle_body_grasp(
     )
 
 
+HOOK_RIM_PREGRASP_OFFSET = 0.05
+"""Vertical pregrasp standoff (m) for the hook engaging the bottle's
+opening rim. The hook's throat opening sits 1.6 cm below the TCP in task
+z (per HOOK_FINGER_TIP_LATERAL_M); 5 cm leaves ~3.4 cm of clear vertical
+space between the finger tip and the rim plane during pregrasp."""
+
+
+def _hook_rim_rotation(angle_rad: float) -> Rotation:
+    """TCP rotation (object frame) for a hook rim grasp at ``angle_rad``
+    around the bottle's +z axis. Combined with ``TCP_OFFSET_HOOK = R_y(+π/2)``
+    this produces a TCP frame at the grasp pose with:
+        - Tool +Z = task -Z (vertical descent direction)
+        - Tool +X = radial OUTWARD at angle_rad (away from bottle center)
+        - Tool +Y = horizontal tangent
+    Matches the rig's natural hook-rim wrist orientation (verified against
+    a recorded grasp pose at angle π).
+    """
+    yaw = Rotation.from_rotvec([0.0, 0.0, angle_rad])
+    flip = Rotation.from_rotvec([np.pi, 0.0, 0.0])
+    return yaw * flip
+
+
+def bottle_hook_grasp(
+    X_task_bottle: Pose,
+    angle_rad: float = 0.0,
+) -> Grasp:
+    """Hook-gripper rim grasp at the bottle's top opening. Hook descends
+    vertically; finger threads through the opening into the neck cavity,
+    fixed jaw lands radially outside the rim. Bottle hangs by its rim wall
+    clamped between the finger and the fixed jaw.
+
+    Cap must be off — the rim must be exposed for the hook to engage."""
+    rim_xyz = np.array([
+        BOTTLE_OPENING_RADIUS_M * np.cos(angle_rad),
+        BOTTLE_OPENING_RADIUS_M * np.sin(angle_rad),
+        BOTTLE_TOTAL_HEIGHT_M,
+    ])
+    X_bottle_grasp = Pose(
+        translation=rim_xyz,
+        rotation=_hook_rim_rotation(angle_rad),
+    )
+    return Grasp(
+        grasp_pose=X_task_bottle @ X_bottle_grasp,
+        pregrasp_offset=HOOK_RIM_PREGRASP_OFFSET,
+        description=f"bottle hook rim grasp @ {np.degrees(angle_rad):+.0f}°",
+    )
+
+
+def _opening_in_hook_tool_frame() -> np.ndarray:
+    """Vector from TCP origin to the bottle's opening center, expressed in
+    HOOK tool-local coords. INVARIANT under any TCP motion (rigid grasp),
+    and ALSO invariant under the grasp angle θ — that's the rotational
+    symmetry of the rim circle paying off.
+
+    Derivation: TCP sits on the rim outer edge at bottle (R_rim cos θ,
+    R_rim sin θ, H); opening center at (0, 0, H). Vector in bottle frame
+    is (-R_rim cos θ, -R_rim sin θ, 0). Tool +X = radial outward at angle
+    θ = (cos θ, sin θ, 0) in bottle frame, so the bottle vector projects
+    onto tool axes as (x_tool, y_tool, z_tool) = (-R_rim, 0, 0) — θ
+    cancels out.
+    """
+    return np.array([-BOTTLE_OPENING_RADIUS_M, 0.0, 0.0])
+
+
+def bottle_hook_pour_tcp_pose(
+    X_task_bottle: Pose,
+    target_task,
+    angle_rad: float = 0.0,
+    tilt_rad: float = 0.0,
+) -> Pose:
+    """TCP pose (task frame) at which the bottle — held by a HOOK rim grasp
+    at ``angle_rad`` — is tilted by ``tilt_rad`` and its opening center
+    sits at ``target_task``.
+
+    Same conventions as ``bottle_pour_tcp_pose`` (the 2F-85 body grasp
+    version): positive ``tilt_rad`` tips the bottle's +z away from the
+    gripper, around the tool +Y axis. The math is simpler than the body
+    grasp because the opening's offset from the TCP is just R_rim (~2 cm)
+    along tool -X, independent of any grasp_z parameter — there's no
+    grasp_z for a rim grasp.
+    """
+    target_task = np.asarray(target_task, dtype=float).reshape(3)
+    R_tcp = (
+        X_task_bottle.rotation
+        * _hook_rim_rotation(angle_rad)
+        * Rotation.from_rotvec([0.0, tilt_rad, 0.0])
+    )
+    opening_offset_task = R_tcp.apply(_opening_in_hook_tool_frame())
+    return Pose(
+        translation=target_task - opening_offset_task,
+        rotation=R_tcp,
+    )
+
+
 def _opening_in_tool_frame(grasp_z: float) -> np.ndarray:
     """Vector from the TCP origin to the bottle's opening, expressed in
     tool-local coordinates. INVARIANT under any TCP motion (the bottle

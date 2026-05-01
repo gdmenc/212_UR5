@@ -27,6 +27,7 @@ Pick the path at construction time so pick/place code stays identical.
 
 from __future__ import annotations
 
+import time
 from typing import Any, Optional
 
 from .base import Gripper
@@ -37,16 +38,20 @@ from .base import Gripper
 # =========================================================================
 # All distances are measured from the wrist_3 flange (mounting plate face).
 #   Flange-z:  perpendicular to the flange face, positive into the workspace.
-#   Flange-xy: lateral plane parallel to the flange face. By convention,
-#              +y_flange points toward the throat opening — the side a rim
-#              slides in from.
+#   Flange-xy: lateral plane parallel to the flange face. The hook is
+#              welded such that +x_flange points toward the throat opening
+#              — the side a rim enters from. Verified against a recorded
+#              grasp pose: with TCP_OFFSET_HOOK = R_y(+π/2), tool +Z (the
+#              package's "approach" direction) lands on flange +X, which
+#              the rig naturally orients to task -Z (vertical down) at a
+#              rim-grasp wrist pose.
 #
 # Throat structure (cross-section perpendicular to the flange face):
 #
 #       flange face
 #       │
 #       │             ┌──── HOOK_FIXED_JAW_Z_M             (0.091)
-#       │             │       fixed upper jaw
+#       │             │       fixed jaw
 #       │   throat ──→│··············  HOOK_TCP_Z_M        (0.10275)
 #       │             │       (rim seats here; matches
 #       │             │        calibration.TCP_OFFSET_HOOK)
@@ -57,8 +62,9 @@ from .base import Gripper
 # along flange-z toward the fixed jaw to clamp; "close()" = retract.
 
 HOOK_FIXED_JAW_Z_M = 0.091
-"""Flange-z of the fixed upper jaw (the 'adjacent contact edge'). The
-surface that bears the rim during a vertical lift."""
+"""Flange-z of the fixed jaw — the stationary surface opposite the moving
+finger across the throat. The moving finger clamps the rim against this
+jaw on close."""
 
 HOOK_FINGER_INNER_EDGE_Z_M = 0.127
 """Flange-z of the moving finger's inner edge when fully OPEN (extended).
@@ -79,14 +85,18 @@ on a flange-down descent the camera sits ABOVE the rim height, not below.
 The leading edge during descent is the finger inner edge at 0.127 m."""
 
 # ---- Lateral (xy-plane) extents from the mounting plate center -----------
-# +y_flange = side the throat opens toward (the side a rim enters from).
+# +x_flange = side the throat opens toward (the side a rim enters from).
 
 HOOK_FINGER_TIP_LATERAL_M = 0.016
-"""+y_flange offset of the finger tip — i.e., how far the moving finger
-protrudes laterally on the throat-opening side."""
+"""+x_flange offset of the finger tip — i.e., how far the moving finger
+protrudes laterally on the throat-opening side. Doubles as the vertical
+clearance from the TCP to the throat opening at the grasp pose: with
+TCP_OFFSET_HOOK = R_y(+π/2) and the rig's natural rim-grasp wrist
+orientation, +x_flange = task -z, so this is the descent distance from
+"rim crosses throat opening" to "rim seated at TCP" — 1.6 cm."""
 
 HOOK_TOP_OF_HOOK_LATERAL_M = 0.038
-"""−y_flange offset of the top of the hook piece — lateral extent on the
+"""−x_flange offset of the top of the hook piece — lateral extent on the
 side OPPOSITE the throat opening. Total lateral span of the hook structure
 is 0.016 + 0.038 = 0.054 m."""
 
@@ -115,6 +125,11 @@ RETRACT_HIGH = False
 Flip if the wiring convention is inverted. ``close()`` writes RETRACT_HIGH
 to the pin; ``open()`` writes its negation."""
 
+DEFAULT_CLOSE_SETTLE_S = 1
+"""Seconds to wait after commanding close before reporting grasp success.
+The DO-pin path has no feedback, so this gives the hook actuator time to
+finish retracting before the arm starts the post-grasp lift."""
+
 
 class HookGripper(Gripper):
     type_name = "hook"
@@ -124,11 +139,14 @@ class HookGripper(Gripper):
         rtde_io: Any,
         actuation: str = "do_pin",
         do_pin: int = DEFAULT_DO_PIN,
+        close_settle_s: float = DEFAULT_CLOSE_SETTLE_S,
     ) -> None:
         if actuation not in ("do_pin", "serial"):
             raise ValueError(
                 f"actuation must be 'do_pin' or 'serial', got {actuation!r}"
             )
+        if close_settle_s < 0.0:
+            raise ValueError("close_settle_s must be non-negative")
         if actuation == "do_pin" and rtde_io is None:
             raise ValueError(
                 "HookGripper(do_pin path) requires an RTDEIOInterface instance "
@@ -137,6 +155,7 @@ class HookGripper(Gripper):
         self._rtde_io = rtde_io
         self._actuation = actuation
         self._do_pin = do_pin
+        self._close_settle_s = close_settle_s
         self._extended: Optional[bool] = None
 
     def activate(self) -> None:
@@ -161,6 +180,12 @@ class HookGripper(Gripper):
         else:
             raise NotImplementedError("serial actuation not yet implemented")
 
+    def prepare_for_grasp(self, target_aperture_mm: Optional[float] = None) -> None:
+        """Open the throat (extend the finger) regardless of the argument.
+        The hook has no continuous aperture; it must be open before the
+        final descent or the rim cannot enter the throat."""
+        self.open()
+
     def grasp(self, force: Optional[float] = None) -> bool:
         """Latch. The ``force`` argument is ignored — DO-pin actuation has
         no load cell on the hook itself. Returns True unconditionally on
@@ -169,12 +194,15 @@ class HookGripper(Gripper):
         serial path adds force feedback, this should return based on that.
         """
         self.close()
+        if self._close_settle_s > 0.0:
+            time.sleep(self._close_settle_s)
         return True
 
     def status(self) -> dict:
         return {
             "actuation": self._actuation,
             "extended": self._extended,
+            "close_settle_s": self._close_settle_s,
         }
 
     def disconnect(self) -> None:

@@ -66,3 +66,16 @@ class Gripper(ABC):
         Default no-op. Note: per-grasp force still comes from Grasp.grasp_force
         (in Newtons) and overrides this at grasp time."""
         pass
+
+    def prepare_for_grasp(self, target_aperture_mm: Optional[float] = None) -> None:
+        """Position the gripper for the final approach to a grasp pose.
+
+        Called by ``pick()`` between pregrasp and the final descent. Each
+        gripper interprets this differently:
+            - 2F-85: if ``target_aperture_mm`` is given, move there; else
+              leave the aperture unchanged.
+            - Hook: open the throat (extend the finger) regardless of the
+              argument — the throat must be open to accept a rim.
+
+        Default is no-op so simple grippers don't need to override."""
+        pass
