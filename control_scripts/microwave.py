@@ -1,13 +1,14 @@
 """Microwave geometry — task-frame placeholders.
 
-All numbers below are first-pass guesses. Re-measure on the rig before
-trusting any motion. Coordinates are in the shared task frame the rest
-of the package uses (same as ``tasks/pick_place_*.py``).
+All numbers below are first-pass guesses except the center XY, which
+the user already measured. Re-measure depth and clearance on the rig
+before trusting any motion. Coordinates are in the shared task frame
+the rest of the package uses (same as ``tasks/pick_place_*.py``).
 
 Layout assumptions
 ------------------
-- Door opens toward task -X. Entering the cavity means translating in
-  the +X direction; exiting means -X.
+- Door opens toward task -Y. Entering the cavity means translating in
+  the +Y direction; exiting means -Y.
 - Cavity is a rectangular prism with horizontal floor and ceiling.
 - The glass tray is the floor of the *interior* — objects rest at
   ``MICROWAVE_FLOOR_Z``.
@@ -34,11 +35,11 @@ import numpy as np
 
 MICROWAVE_CENTER_XY_TASK = np.array([-0.215458, 0.548696])
 """Task-frame XY of the interior center (the canonical place location).
-PLACEHOLDER — replace with the measured center on the rig."""
+Measured on the rig."""
 
-MICROWAVE_INTERIOR_X_DEPTH = 0.26
-"""Interior depth along task X (door-to-back wall). The door plane sits
-at ``MICROWAVE_CENTER_XY_TASK[0] - MICROWAVE_INTERIOR_X_DEPTH/2``.
+MICROWAVE_INTERIOR_DEPTH = 0.26
+"""Interior depth along the door axis (task Y). The door plane sits at
+``MICROWAVE_CENTER_XY_TASK[1] - MICROWAVE_INTERIOR_DEPTH/2``.
 PLACEHOLDER — typical microwaves are 25-30 cm."""
 
 MICROWAVE_FLOOR_Z = 0.08
@@ -49,21 +50,27 @@ MICROWAVE_CEILING_Z = 0.23
 """Interior ceiling, in task z. From user spec: microwave 3 cm off the
 ground + 20 cm interior height = 23 cm."""
 
-MICROWAVE_ENTRY_X_CLEARANCE = 0.05
-"""How far in -X (outside the door plane) the gripper descends to
-``entry_z`` before translating into the cavity. 5 cm gives the wrist
-some lateral margin from the door frame on the way in."""
+MICROWAVE_ENTRY_CLEARANCE = 0.05
+"""Default distance in -Y outside the door plane where the gripper
+descends to ``entry_z`` before translating into the cavity. Pass a
+different value to ``entry_xy_for`` to override per-object (e.g. a
+larger clearance for the hook so the wrist doesn't crowd the door
+frame)."""
 
 
-def door_plane_x() -> float:
-    """Task-frame X of the door plane (front face of the cavity)."""
-    return float(MICROWAVE_CENTER_XY_TASK[0] - MICROWAVE_INTERIOR_X_DEPTH / 2.0)
+def door_plane_y() -> float:
+    """Task-frame Y of the door plane (front face of the cavity)."""
+    return float(MICROWAVE_CENTER_XY_TASK[1] - MICROWAVE_INTERIOR_DEPTH / 2.0)
 
 
-def entry_xy_for(target_xy_task) -> np.ndarray:
+def entry_xy_for(
+    target_xy_task,
+    clearance: float = MICROWAVE_ENTRY_CLEARANCE,
+) -> np.ndarray:
     """Task-frame XY where the gripper descends from transit_z to
-    entry_z BEFORE translating laterally into the cavity. Same Y as
-    the target; X is just outside the door plane."""
+    entry_z BEFORE translating laterally into the cavity. Same X as
+    the target; Y is just outside the door plane (in -Y by
+    ``clearance``)."""
     target_xy = np.asarray(target_xy_task, dtype=float).reshape(2)
-    x = door_plane_x() - MICROWAVE_ENTRY_X_CLEARANCE
-    return np.array([x, target_xy[1]])
+    y = door_plane_y() - clearance
+    return np.array([target_xy[0], y])

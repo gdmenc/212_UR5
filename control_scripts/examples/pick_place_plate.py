@@ -81,7 +81,7 @@ USE_MIDPOINT = True
 ARM = "ur_right"
 
 CONFIG = PickPlaceConfig(
-    transit_z=0.1325,
+    transit_z=0.2,
     place_use_contact_descent=False,  # no force-seeking; no table contact
     transit_speed=0.15,
     transit_accel=0.3,

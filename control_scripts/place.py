@@ -124,19 +124,23 @@ def place_into_box(
     ceiling. This routes:
 
         transit_z → (entry_xy, transit_z) → (entry_xy, entry_z)
-                  → (target_xy, entry_z) → place_pose
-                  → release → (target_xy, entry_z) → (entry_xy, entry_z)
+                  → preplace → place_pose
+                  → release → preplace → (entry_xy, entry_z)
                   → (entry_xy, transit_z)
 
-    Final descent is always deterministic (``approach_to(place_pose)``);
-    the ``place_use_contact_descent`` config flag is ignored — running a
-    force-mode probe inside a ceiling-constrained cavity is too risky on
-    a first cut.
+    The in-cavity waypoint is ``preplace = offset_along_tool_z
+    (place_pose, config.preplace_offset)``, so the final descent to
+    place_pose is a pure tool +Z move — the same final approach as the
+    standard ``place``. Final descent is always deterministic
+    (``approach_to(place_pose)``); the ``place_use_contact_descent``
+    config flag is ignored — running a force-mode probe inside a
+    ceiling-constrained cavity is too risky on a first cut.
 
     Same caller responsibilities as ``pick_from_box``: pick a place
     angle that puts the forearm pointing back through the door, and
-    set ``entry_z`` above the cavity floor (with object clearance) and
-    below the cavity ceiling (with wrist clearance)."""
+    set ``entry_z`` (the OUTSIDE-the-door descent altitude) above the
+    cavity floor (with object clearance) and below the cavity ceiling
+    (with wrist clearance)."""
     if config.transit_z is None:
         raise ValueError(
             "config.transit_z is unset — set it from measurements before calling place_into_box()."
@@ -144,17 +148,13 @@ def place_into_box(
     if arm.gripper is None:
         raise ValueError(f"arm {arm.name!r} has no gripper attached.")
 
-    target_xy = place_pose.translation[:2]
     entry_xy = np.asarray(entry_xy, dtype=float).reshape(2)
 
     entry_pose = Pose(
         translation=np.array([entry_xy[0], entry_xy[1], entry_z]),
         rotation=place_pose.rotation,
     )
-    above_target_at_entry_z = Pose(
-        translation=np.array([target_xy[0], target_xy[1], entry_z]),
-        rotation=place_pose.rotation,
-    )
+    preplace = offset_along_tool_z(place_pose, config.preplace_offset)
     transit_over_entry = pose_at_altitude(entry_pose, config.transit_z)
 
     # 1. Lift to transit altitude.
@@ -167,11 +167,15 @@ def place_into_box(
     # 3. Descend OUTSIDE the box from transit_z to entry_z.
     approach_to(arm, entry_pose, config.approach_speed, config.approach_accel)
 
-    # 4. Translate INTO the box at entry_z, holding orientation.
-    approach_to(arm, above_target_at_entry_z,
-                config.approach_speed, config.approach_accel)
+    # 4. Move from the OUTSIDE-the-door entry pose to preplace (along
+    # tool -Z from place_pose). One moveL — combines lateral motion
+    # through the door with any vertical adjustment from entry_z to
+    # preplace_z. Orientation held constant.
+    approach_to(arm, preplace, config.approach_speed, config.approach_accel)
 
-    # 5. Final descent to the place pose. Always deterministic — see docstring.
+    # 5. Final descent to the place pose. With step 4 landing at
+    # preplace, this is a pure tool +Z move — same final approach as
+    # the standard place().
     approach_to(arm, place_pose, config.approach_speed, config.approach_accel)
 
     # 6. Release. If a release aperture is set and the gripper supports
@@ -184,11 +188,11 @@ def place_into_box(
     else:
         arm.gripper.open()
 
-    # 7. Ascend back to entry_z above the place location.
-    retract_to(arm, above_target_at_entry_z,
-               config.retract_speed, config.retract_accel)
+    # 7. Lift along tool -Z back to preplace.
+    retract_to(arm, preplace, config.retract_speed, config.retract_accel)
 
-    # 8. Translate OUT of the box at entry_z.
+    # 8. Move from preplace back out to the entry pose (lateral exit
+    # plus any Z adjustment back to entry_z).
     retract_to(arm, entry_pose, config.retract_speed, config.retract_accel)
 
     # 9. Ascend to transit_z above the entry XY.
