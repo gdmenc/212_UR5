@@ -104,11 +104,9 @@ PRE_ENGAGE_JOINTS_RAD = [
 DOOR_WIDTH_M = 0.33
 """Width of the microwave door panel (measured), used as the arc radius."""
 
-# The door swings open in the −X, −Y direction (diagonally toward the
-# operator and to the left).  For the initial arc tangent to be [−1, −1],
-# the hinge must sit in the [−1, +1] direction from the handle (left and
-# deeper into the microwave), at the full door width away.
-_HINGE_DIR = np.array([-1.0, 1.0, 0.0]) / np.sqrt(2.0)
+# The door swings open in the −X, −Y direction (diagonally toward the operator and to the left).
+# The hinge is directly left of the handle (pure -X offset) at the full door width.
+_HINGE_DIR = np.array([-1.0, 0.0, 0.0]) / np.sqrt(2.0)
 HINGE_POSITION_TASK = (
     HANDLE_ENGAGE_POSE_TASK.translation + DOOR_WIDTH_M * _HINGE_DIR
 )

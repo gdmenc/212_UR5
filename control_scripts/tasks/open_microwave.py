@@ -173,12 +173,8 @@ def _arc_waypoints(door: MicrowaveDoorSpec) -> List[Pose]:
 
     r_vec = engage.translation - hinge  # hinge → handle, task frame
 
-    # Determine whether the door swings CCW (+) or CW (-) around task Z.
-    # CCW tangent at θ=0: [-r_y, r_x, 0].  Pick the sign that aligns
-    # this tangent with the pull direction.
     ccw_tangent_2d = np.array([r_vec[1], -r_vec[0]])
     pull_2d = door.pull_direction_task[:2]
-    # Flip sign logic: if the CCW tangent aligns with the pull direction, we need a CW (negative) rotation.
     angle_sign = -1.0 if np.dot(ccw_tangent_2d, pull_2d) > 0.0 else +1.0
 
     total_angle = angle_sign * door.arc_open_angle_rad
