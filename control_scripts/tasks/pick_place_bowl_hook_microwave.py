@@ -239,16 +239,14 @@ def _print_plan(grasp, place_pose: Pose) -> None:
     if PICK_FROM == "microwave" or PLACE_TO == "microwave":
         print(f"  Microwave entry Z : {MICROWAVE_ENTRY_Z} m")
         if PICK_FROM == "microwave":
+            xy = entry_xy_for(grasp.grasp_pose.translation[:2])
             pregrasp = offset_along_tool_z(grasp.grasp_pose, grasp.pregrasp_offset)
-            xy = entry_xy_for(pregrasp.translation[:2])
-            print(f"  Pregrasp XY       : {pregrasp.translation[:2]}")
             print(f"  Entry XY (pick)   : {xy}")
             print(f"  Pregrasp Z (pick) : {pregrasp.translation[2]:.3f} m"
                   f"  (offset {grasp.pregrasp_offset*100:.0f} cm)")
         if PLACE_TO == "microwave":
+            xy = entry_xy_for(place_pose.translation[:2])
             preplace = offset_along_tool_z(place_pose, CONFIG.preplace_offset)
-            xy = entry_xy_for(preplace.translation[:2])
-            print(f"  Preplace XY       : {preplace.translation[:2]}")
             print(f"  Entry XY (place)  : {xy}")
             print(f"  Preplace Z (place): {preplace.translation[2]:.3f} m"
                   f"  (offset {CONFIG.preplace_offset*100:.0f} cm)")
@@ -266,11 +264,7 @@ def run_on_arm(
 ) -> bool:
     print(f"\n→ pick: {grasp.description}  (from {PICK_FROM})")
     if PICK_FROM == "microwave":
-        # Entry XY anchored on the pregrasp (not the grasp). For an
-        # untilted hook grasp these are equal; the abstraction matters
-        # for any future tilted grasp variant.
-        pregrasp = offset_along_tool_z(grasp.grasp_pose, grasp.pregrasp_offset)
-        entry_xy = entry_xy_for(pregrasp.translation[:2])
+        entry_xy = entry_xy_for(grasp.grasp_pose.translation[:2])
         pick_result = pick_from_box(
             arm, grasp, entry_xy, MICROWAVE_ENTRY_Z, config
         )
@@ -295,9 +289,7 @@ def run_on_arm(
 
     print(f"\n→ place @ {place_pose.translation}  (to {PLACE_TO})")
     if PLACE_TO == "microwave":
-        # See note in the pick branch — anchor entry XY on the preplace.
-        preplace = offset_along_tool_z(place_pose, config.preplace_offset)
-        entry_xy = entry_xy_for(preplace.translation[:2])
+        entry_xy = entry_xy_for(place_pose.translation[:2])
         place_result = place_into_box(
             arm, place_pose, entry_xy, MICROWAVE_ENTRY_Z, config
         )
