@@ -88,20 +88,21 @@ PRE_ENGAGE_POSE_TASK = Pose(
 # end effector from HOME to the pre-engage orientation.
 # Source: snapshot "microwave initial open (pre-grasp) 2" → joints_rad
 # PRE_ENGAGE_JOINTS_RAD = [
-#     2.0675549507141113,
-#     -0.7741321486285706,
-#     0.8808053175555628,
-#     -0.14715857923541265,
-#     1.9965837001800537,
-#     -0.750498119984762
+#     2.0982916355133057,
+#     -0.6880388420871277,
+#     1.0973766485797327,
+#     -3.547537942925924,
+#     -2.089057747517721,
+#     -3.9151886145221155
 # ]
+
 PRE_ENGAGE_JOINTS_RAD = [
     2.0675549507141113,
     -0.7741321486285706,
     0.8808053175555628,
     -0.14715857923541265,
     1.9965837001800537,
-    0.03490004341
+    0.75490004341
 ]
 
 # ---------------------------------------------------------------------------
@@ -137,8 +138,8 @@ DOOR_SPEC = MicrowaveDoorSpec(
     n_arc_steps=15,            # moveJ waypoints along the arc
 
     # Slightly faster arc traversal for smoother inter-waypoint motion.
-    joint_speed=0.8,           # rad/s (default 0.5)
-    joint_accel=0.5,           # rad/s² (default 0.3)
+    joint_speed=0.3,           # rad/s (default 0.5)
+    joint_accel=0.1,           # rad/s² (default 0.3)
 
     # pull_direction_task drives the arc rotation sign check.
     # −X, −Y = door swings diagonally toward operator and to the left.
@@ -154,13 +155,13 @@ DOOR_SPEC = MicrowaveDoorSpec(
 CONFIG = PickPlaceConfig(
     # transit_z is in TASK frame. Handle is at ~0.158 m; 0.25 m gives
     # ~9 cm clearance above it and the microwave housing.
-    transit_z=0.25,
-    transit_speed=0.1,
-    transit_accel=0.2,
+    transit_z=0.3,
+    transit_speed=0.07,
+    transit_accel=0.1,
     approach_speed=0.04,    # slow final slide onto handle + arc steps
     approach_accel=0.1,
-    retract_speed=0.10,
-    retract_accel=0.2,
+    retract_speed=0.07,
+    retract_accel=0.1,
 )
 
 

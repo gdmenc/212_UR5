@@ -63,11 +63,11 @@ from ..util.poses import Pose, offset_along_tool_z
 # --- Tunables --------------------------------------------------------------
 
 PICK_FROM: Literal["outside", "microwave"] = "outside"
-PLACE_TO: Literal["outside", "microwave"] = "microwave"
+PLACE_TO: Literal["outside", "microwave"] = "outside"
 
 # Free-standing bowl poses (used when the corresponding side is "outside").
-BOWL_PICK_POSE_TASK = Pose(translation=[0.1, 0.0, 0.01])
-BOWL_PLACE_POSE_TASK = Pose(translation=[-0.1, 0.2, 0.01])
+BOWL_PICK_POSE_TASK = Pose(translation=[0.05, -0.125, -0.01])
+BOWL_PLACE_POSE_TASK = Pose(translation=[-0.1, 0.2, -0.01])
 
 # Intermediate waypoint between pick and place. The transit_z is what
 # actually sets the carry altitude; the Z below is ignored. Picked at a
@@ -75,7 +75,7 @@ BOWL_PLACE_POSE_TASK = Pose(translation=[-0.1, 0.2, 0.01])
 # shorter, predictable legs — moveL between far-apart poses can over-
 # extend through awkward joint configurations even when the start and
 # end are reachable. Move this until the path looks clean on the rig.
-BOWL_MIDPOINT_POSE_TASK = Pose(translation=[0.0, 0.2, 0.0])
+BOWL_MIDPOINT_POSE_TASK = Pose(translation=[-0.1, 0.1, 0.0])
 USE_MIDPOINT = True
 """Whether to carry the held bowl through ``BOWL_MIDPOINT_POSE_TASK``
 between pick and place. Off-by-default would replicate the failure mode
@@ -85,8 +85,13 @@ pick↔place geometry."""
 # Bowl-frame angle at which to engage the rim. π = approach from −X
 # side; forearm exits back through the −X microwave door. Keep at π
 # for any microwave-side leg.
-GRASP_ANGLE_RAD = float(np.radians(180))
-PLACE_ANGLE_RAD = float(np.radians(180))
+GRASP_ANGLE_RAD = float(np.radians(180-30))
+PLACE_ANGLE_RAD = float(-np.radians(90 + 30))
+MIDPOINT_ANGLE_RAD = PLACE_ANGLE_RAD
+"""Bowl-frame angle used at the midpoint. Mirrors the plate microwave task:
+the midpoint has an explicit orientation knob rather than inferring from
+PICK_FROM / PLACE_TO branches. Default matches the place leg so wrist
+rotation happens before the final entry/place move."""
 
 # Tilt of the descent off pure-vertical (rotation around tool +Y).
 # +15° lifts the wrist ~2.7 cm to clear the table for free-standing bowls.
@@ -179,15 +184,20 @@ def plan_place() -> Pose:
     return grasp_at_dest.grasp_pose
 
 
-def plan_midpoint() -> Pose:
+def plan_midpoint(
+    angle_rad: float = MIDPOINT_ANGLE_RAD,
+    approach_tilt_rad: float | None = None,
+) -> Pose:
     """TCP pose for carrying the held bowl through the midpoint XY at
-    transit_z. Orientation matches the upcoming PLACE leg (PLACE_ANGLE_RAD
-    + place-side tilt) so the wrist rotation happens during the safer
-    pick→midpoint leg, not during the longer midpoint→place transit."""
+    transit_z. Orientation is explicit, matching the plate microwave task's
+    current midpoint planning style. By default the tilt still follows the
+    place side so microwave-side entries stay ceiling-safe."""
+    if approach_tilt_rad is None:
+        approach_tilt_rad = _tilt_for(PLACE_TO)
     grasp_at_midpoint = bowl_hook_grasp(
         BOWL_MIDPOINT_POSE_TASK,
-        angle_rad=PLACE_ANGLE_RAD,
-        approach_tilt_rad=_tilt_for(PLACE_TO),
+        angle_rad=angle_rad,
+        approach_tilt_rad=approach_tilt_rad,
     )
     return grasp_at_midpoint.grasp_pose
 
@@ -235,6 +245,8 @@ def _print_plan(grasp, place_pose: Pose) -> None:
     print(f"  Midpoint      : "
           f"{BOWL_MIDPOINT_POSE_TASK.translation if USE_MIDPOINT else 'disabled'}"
           f"{' (task)' if USE_MIDPOINT else ''}")
+    if USE_MIDPOINT:
+        print(f"  Midpoint angle: {np.degrees(MIDPOINT_ANGLE_RAD):+.0f}°")
     print(f"  Transit Z     : {CONFIG.transit_z} m")
     if PICK_FROM == "microwave" or PLACE_TO == "microwave":
         print(f"  Microwave entry Z : {MICROWAVE_ENTRY_Z} m")
@@ -276,7 +288,7 @@ def run_on_arm(
     print("  ✓ pick succeeded.")
 
     if USE_MIDPOINT:
-        midpoint_pose = plan_midpoint()
+        midpoint_pose = plan_midpoint(angle_rad=MIDPOINT_ANGLE_RAD)
         print(f"\n→ midpoint @ {BOWL_MIDPOINT_POSE_TASK.translation}")
         transit_xy(
             arm,
@@ -301,6 +313,21 @@ def run_on_arm(
     print("  ✓ place succeeded.")
 
     print("\nDone — arm retracted to transit altitude.")
+
+    # Match the plate microwave task: after completing the place flow,
+    # return to the shared midpoint at transit height for a predictable
+    # post-task arm location.
+    if USE_MIDPOINT:
+        midpoint_pose = plan_midpoint(angle_rad=MIDPOINT_ANGLE_RAD)
+        print(f"\n→ midpoint @ {BOWL_MIDPOINT_POSE_TASK.translation}")
+        transit_xy(
+            arm,
+            midpoint_pose,
+            config.transit_z,
+            config.transit_speed,
+            config.transit_accel,
+        )
+        print("  ✓ midpoint reached.")
     return True
 
 
