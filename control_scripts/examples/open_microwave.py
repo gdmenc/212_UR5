@@ -133,7 +133,7 @@ DOOR_SPEC = MicrowaveDoorSpec(
 
     # pull_direction_task drives the arc rotation sign check.
     # −X, −Y = door swings diagonally toward operator and to the left.
-    pull_direction_task=np.array([-1.0, -1.0, 0.0]),
+    pull_direction_task=np.array([1.0, -1.0, 0.0]),
 
     # Force-mode params below are only used if hinge_position_task were None.
     pull_force_n=20.0,
