@@ -68,21 +68,39 @@ class MicrowaveDoorSpec:
     door handle, before pulling. Hook pointing into the handle from
     below; tool orientation chosen so the hook latches when extended."""
 
+    pre_engage_joints_rad: Optional[List[float]] = None
+    """Recorded joint angles (6-element list, radians) at the pre-grasp
+    waypoint. When set, phase 1 uses ``moveJ`` to this configuration
+    instead of the ``lift → transit_xy → approach`` Cartesian chain.
+
+    This avoids the wrist over-rotation / singularity that happens when
+    ``moveL`` has to simultaneously move XY and rotate the end effector
+    from its starting orientation (e.g. HOME) to the pre-engage
+    orientation — a large orientation change in a single Cartesian move
+    spins the wrist excessively. ``moveJ`` goes directly to the correct
+    arm configuration in joint space with no orientation interpolation.
+
+    Set from the ``joints_rad`` field of the recorded waypoint snapshot."""
+
+    joint_speed: float = 0.5
+    """Joint speed (rad/s) for the ``moveJ`` approach. Conservative default;
+    speed up once the joint path is verified collision-free."""
+
+    joint_accel: float = 0.3
+    """Joint acceleration (rad/s²) for the ``moveJ`` approach."""
+
     pre_engage_pose_task: Optional[Pose] = None
     """Full task-frame Pose for the pre-engagement waypoint — both
-    translation AND rotation taken directly from the recorded pre-grasp
-    snapshot. Preferred over ``pre_engage_offset`` because the hook
-    gripper's TCP offset (R_y π/2 baked in) means pre-grasp and engage
-    can have different orientations that matter for correct hook alignment.
-    If set, ``pre_engage_offset`` is ignored."""
+    translation AND rotation from the recorded pre-grasp snapshot.
+    Used only in the Cartesian fallback (when ``pre_engage_joints_rad``
+    is None). If also None, falls back to engage pose + offset."""
 
     pre_engage_offset: np.ndarray = field(
         default_factory=lambda: np.array([0.0, 0.0, -0.03])
     )
-    """Fallback when ``pre_engage_pose_task`` is None: task-frame
-    translation from engage pose to pre-engage, with engage rotation
-    reused. Default 3 cm in task -Z. Use ``pre_engage_pose_task``
-    instead whenever a recorded pre-grasp waypoint is available."""
+    """Last-resort fallback: task-frame translation from engage to
+    pre-engage, reusing the engage rotation. Prefer
+    ``pre_engage_joints_rad`` + ``pre_engage_pose_task`` instead."""
 
     pull_direction_task: np.ndarray = field(
         default_factory=lambda: np.array([0.0, -1.0, 0.0])
@@ -262,21 +280,36 @@ def open_microwave_door(
             rotation=engage_pose.rotation,
         )
 
-    # Pre-flight reachability.
-    for label, pose in [("pre_engage", pre_engage_pose), ("engage", engage_pose)]:
-        if is_task_pose_reachable(arm, pose) is None:
-            return OpenMicrowaveResult(
-                success=False,
-                reason=f"waypoint '{label}' is kinematically infeasible.",
-            )
+    # Pre-flight reachability (only for the Cartesian fallback path).
+    if door.pre_engage_joints_rad is None:
+        for label, pose in [("pre_engage", pre_engage_pose), ("engage", engage_pose)]:
+            if is_task_pose_reachable(arm, pose) is None:
+                return OpenMicrowaveResult(
+                    success=False,
+                    reason=f"waypoint '{label}' is kinematically infeasible.",
+                )
 
     # --- Phase 1: approach ---
-    lift_to_transit(arm, config.transit_z, config.transit_speed, config.transit_accel)
-    transit_xy(arm, pre_engage_pose, config.transit_z,
-               config.transit_speed, config.transit_accel)
-    approach_to(arm, pre_engage_pose, config.approach_speed, config.approach_accel)
+    if door.pre_engage_joints_rad is not None:
+        # Joint-space approach: go directly to the recorded pre-grasp joint
+        # configuration. Avoids the wrist over-rotation that happens when a
+        # single moveL tries to simultaneously move XY and rotate the end
+        # effector from its starting orientation to the pre-engage orientation.
+        arm.control.moveJ(
+            list(door.pre_engage_joints_rad),
+            door.joint_speed,
+            door.joint_accel,
+        )
+    else:
+        # Cartesian fallback: lift → transit at safe altitude → descend.
+        # May cause wrist spin if the starting orientation is far from the
+        # pre-engage orientation. Prefer providing pre_engage_joints_rad.
+        lift_to_transit(arm, config.transit_z, config.transit_speed, config.transit_accel)
+        transit_xy(arm, pre_engage_pose, config.transit_z,
+                   config.transit_speed, config.transit_accel)
+        approach_to(arm, pre_engage_pose, config.approach_speed, config.approach_accel)
 
-    # --- Phase 2: engage (slide hook under handle, then latch) ---
+    # --- Phase 2: engage (short moveL slide to seat hook, then latch) ---
     approach_to(arm, engage_pose, config.approach_speed, config.approach_accel)
     arm.gripper.close()
 

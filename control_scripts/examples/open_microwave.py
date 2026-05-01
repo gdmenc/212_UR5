@@ -79,6 +79,21 @@ PRE_ENGAGE_POSE_TASK = Pose(
     ),
 )
 
+# Joint angles at the pre-grasp snapshot (radians).
+# Used for moveJ approach so the arm reaches the pre-engage configuration
+# directly in joint space — avoids the wrist over-rotation / singularity
+# that occurs when moveL tries to simultaneously move XY and rotate the
+# end effector from HOME to the pre-engage orientation.
+# Source: snapshot "microwave initial open (pre-grasp) 2" → joints_rad
+PRE_ENGAGE_JOINTS_RAD = [
+    2.0982916355133057,
+    -0.6880388420871277,
+    1.0973766485797327,
+    -3.547537942925924,
+    -2.089057747517721,
+    -3.9151886145221155,
+]
+
 
 # ---------------------------------------------------------------------------
 #  Arc geometry  (door width = 44 cm)
@@ -108,7 +123,8 @@ ARM = "ur_left"
 
 DOOR_SPEC = MicrowaveDoorSpec(
     handle_engage_pose_task=HANDLE_ENGAGE_POSE_TASK,
-    pre_engage_pose_task=PRE_ENGAGE_POSE_TASK,   # full Pose: correct translation + rotation
+    pre_engage_joints_rad=PRE_ENGAGE_JOINTS_RAD,  # moveJ to here first — no wrist spin
+    pre_engage_pose_task=PRE_ENGAGE_POSE_TASK,    # full Pose used for dry-run display
 
     # Arc mode — hinge is known.
     hinge_position_task=HINGE_POSITION_TASK,
