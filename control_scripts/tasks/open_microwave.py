@@ -103,7 +103,7 @@ class MicrowaveDoorSpec:
     ``pre_engage_joints_rad`` + ``pre_engage_pose_task`` instead."""
 
     pull_direction_task: np.ndarray = field(
-        default_factory=lambda: np.array([0.0, -1.0, 0.0])
+        default_factory=lambda: np.array([-1.0, -1.0, 0.0])
     )
     """Unit vector in task frame pointing along the INITIAL door-pull
     direction (tangent to the door's arc at the start of the swing).
@@ -122,7 +122,7 @@ class MicrowaveDoorSpec:
     """Total door opening angle (rad) for arc mode. 1.2 rad ≈ 69°.
     Adjust until the door is visually fully open."""
 
-    n_arc_steps: int = 8
+    n_arc_steps: int = 10
     """Number of intermediate moveL waypoints along the arc. More steps =
     smoother motion but more RTDE round-trips. 8 is a good start."""
 
@@ -176,7 +176,7 @@ def _arc_waypoints(door: MicrowaveDoorSpec) -> List[Pose]:
     # Determine whether the door swings CCW (+) or CW (-) around task Z.
     # CCW tangent at θ=0: [-r_y, r_x, 0].  Pick the sign that aligns
     # this tangent with the pull direction.
-    ccw_tangent_2d = np.array([-r_vec[1], r_vec[0]])
+    ccw_tangent_2d = np.array([r_vec[1], r_vec[0]])
     pull_2d = door.pull_direction_task[:2]
     angle_sign = +1.0 if np.dot(ccw_tangent_2d, pull_2d) > 0.0 else -1.0
 
