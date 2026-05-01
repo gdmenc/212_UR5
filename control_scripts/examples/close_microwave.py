@@ -56,21 +56,21 @@ HANDLE_CLOSED_POSE_TASK = Pose(
 )
 
 DOOR_WIDTH_M = 0.44
-HINGE_SIDE = -1  # −1 = hinge on LEFT (more negative task-frame X)
 
-HINGE_POSITION_TASK = np.array([
-    HANDLE_CLOSED_POSE_TASK.translation[0] + HINGE_SIDE * DOOR_WIDTH_M,
-    HANDLE_CLOSED_POSE_TASK.translation[1],
-    HANDLE_CLOSED_POSE_TASK.translation[2],
-])
-# ≈ [−0.511, 0.344, 0.155] in task frame
+# Hinge is offset from the handle in the [−1, +1] direction (left and
+# deeper into the microwave) so that the opening arc tangent is [−1, −1].
+_HINGE_DIR = np.array([-1.0, 1.0, 0.0]) / np.sqrt(2.0)
+HINGE_POSITION_TASK = (
+    HANDLE_CLOSED_POSE_TASK.translation + DOOR_WIDTH_M * _HINGE_DIR
+)
+# ≈ [−0.382, 0.655, 0.155] in task frame
 
 ARM = "ur_left"
 
 DOOR_SPEC = CloseMicrowaveDoorSpec(
     handle_closed_pose_task=HANDLE_CLOSED_POSE_TASK,
     hinge_position_task=HINGE_POSITION_TASK,
-    pull_direction_task=np.array([0.0, -1.0, 0.0]),
+    pull_direction_task=np.array([-1.0, -1.0, 0.0]),
     arc_open_angle_rad=1.2,   # must match the value used to open
     n_arc_steps=8,
 )

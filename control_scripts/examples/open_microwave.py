@@ -12,16 +12,18 @@ measurement (44 cm).  Arc mode is deterministic and needs no force sensing.
 
 Arc geometry
 ------------
-The door is 44 cm wide.  The hinge is on the LEFT side of the door (more
-negative task-frame X), so the hinge is at:
+The door is 44 cm wide.  The door swings open in the −X and −Y direction
+(diagonally toward the operator and to the left).  The hinge sits at a
+45° diagonal offset from the handle:
 
-    hinge_x = handle_x − 0.44 m  =  −0.071 − 0.44  ≈  −0.511 m
+    hinge_offset_direction = normalize([-1, +1, 0])   (left and deeper)
+    hinge = handle + 0.44 * hinge_offset_direction
+           ≈ [−0.382, 0.655, 0.155] in task frame
 
-The handle traces a horizontal arc of radius ≈ 0.44 m in the task XY plane
-as the door swings open toward −Y (toward the operator).
-
-If the hinge turns out to be on the RIGHT side instead, flip the sign:
-    HINGE_SIDE = +1   (and re-run --dry to verify the arc direction).
+This places r_vec (hinge → handle) in the [+1, −1] direction, so the
+clockwise arc tangent at the start is [−1, −1] (diagonal pull). The
+arc rotation sign is determined automatically in ``_arc_waypoints``
+from ``pull_direction_task``.
 
 Running
 -------
@@ -102,17 +104,15 @@ PRE_ENGAGE_JOINTS_RAD = [
 DOOR_WIDTH_M = 0.44
 """Width of the microwave door panel (measured), used as the arc radius."""
 
-# −1 = hinge on the LEFT side of the door (lower task-frame X), which is
-# the conventional hinge side and matches the Drake simulation geometry.
-# Change to +1 if the hinge is on the RIGHT side.
-HINGE_SIDE = -1
-
-HINGE_POSITION_TASK = np.array([
-    HANDLE_ENGAGE_POSE_TASK.translation[0] + HINGE_SIDE * DOOR_WIDTH_M,
-    HANDLE_ENGAGE_POSE_TASK.translation[1],   # same Y as handle (simplification)
-    HANDLE_ENGAGE_POSE_TASK.translation[2],   # same Z as handle (hinge is vertical)
-])
-# ≈ [−0.511, 0.344, 0.155] in task frame
+# The door swings open in the −X, −Y direction (diagonally toward the
+# operator and to the left).  For the initial arc tangent to be [−1, −1],
+# the hinge must sit in the [−1, +1] direction from the handle (left and
+# deeper into the microwave), at the full door width away.
+_HINGE_DIR = np.array([-1.0, 1.0, 0.0]) / np.sqrt(2.0)
+HINGE_POSITION_TASK = (
+    HANDLE_ENGAGE_POSE_TASK.translation + DOOR_WIDTH_M * _HINGE_DIR
+)
+# ≈ [−0.382, 0.655, 0.155] in task frame
 
 
 # ---------------------------------------------------------------------------
@@ -132,8 +132,8 @@ DOOR_SPEC = MicrowaveDoorSpec(
     n_arc_steps=8,            # moveL waypoints along the arc
 
     # pull_direction_task drives the arc rotation sign check.
-    # −Y = door swings toward the operator.
-    pull_direction_task=np.array([0.0, -1.0, 0.0]),
+    # −X, −Y = door swings diagonally toward operator and to the left.
+    pull_direction_task=np.array([-1.0, -1.0, 0.0]),
 
     # Force-mode params below are only used if hinge_position_task were None.
     pull_force_n=20.0,
