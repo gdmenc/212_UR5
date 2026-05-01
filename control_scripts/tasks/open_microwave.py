@@ -315,10 +315,10 @@ def open_microwave_door(
     # arm.gripper.close()
 
     # --- Phase 3: pull open ---
-    if door.hinge_position_task is not None:
-        distance_moved = _phase3_arc(arm, door, config)
-    else:
-        distance_moved = _phase3_force(arm, door, engage_pose)
+    # if door.hinge_position_task is not None:
+    #     distance_moved = _phase3_arc(arm, door, config)
+    # else:
+    #     distance_moved = _phase3_force(arm, door, engage_pose)
 
     # --- Phase 4: release and retract ---
     # arm.gripper.open()
