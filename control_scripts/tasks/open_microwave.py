@@ -68,12 +68,21 @@ class MicrowaveDoorSpec:
     door handle, before pulling. Hook pointing into the handle from
     below; tool orientation chosen so the hook latches when extended."""
 
+    pre_engage_pose_task: Optional[Pose] = None
+    """Full task-frame Pose for the pre-engagement waypoint — both
+    translation AND rotation taken directly from the recorded pre-grasp
+    snapshot. Preferred over ``pre_engage_offset`` because the hook
+    gripper's TCP offset (R_y π/2 baked in) means pre-grasp and engage
+    can have different orientations that matter for correct hook alignment.
+    If set, ``pre_engage_offset`` is ignored."""
+
     pre_engage_offset: np.ndarray = field(
         default_factory=lambda: np.array([0.0, 0.0, -0.03])
     )
-    """Task-frame translation from engage pose back to the pre-engage
-    pose (where the hook tip is positioned BEFORE the slide that engages
-    the handle). Computed from (pre-grasp waypoint − grasp waypoint)."""
+    """Fallback when ``pre_engage_pose_task`` is None: task-frame
+    translation from engage pose to pre-engage, with engage rotation
+    reused. Default 3 cm in task -Z. Use ``pre_engage_pose_task``
+    instead whenever a recorded pre-grasp waypoint is available."""
 
     pull_direction_task: np.ndarray = field(
         default_factory=lambda: np.array([0.0, -1.0, 0.0])
@@ -241,10 +250,17 @@ def open_microwave_door(
         raise ValueError(f"arm {arm.name!r} has no gripper attached.")
 
     engage_pose = door.handle_engage_pose_task
-    pre_engage_pose = Pose(
-        translation=engage_pose.translation + door.pre_engage_offset,
-        rotation=engage_pose.rotation,
-    )
+
+    # Use the full recorded pre-grasp Pose when available — this preserves
+    # the exact hook orientation from the recording, which differs from the
+    # engage orientation due to the hook gripper's R_y(π/2) TCP offset.
+    if door.pre_engage_pose_task is not None:
+        pre_engage_pose = door.pre_engage_pose_task
+    else:
+        pre_engage_pose = Pose(
+            translation=engage_pose.translation + door.pre_engage_offset,
+            rotation=engage_pose.rotation,
+        )
 
     # Pre-flight reachability.
     for label, pose in [("pre_engage", pre_engage_pose), ("engage", engage_pose)]:

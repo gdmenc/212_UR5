@@ -67,16 +67,17 @@ HANDLE_ENGAGE_POSE_TASK = Pose(
 )
 
 # Pre-engage: hook tip clear of the handle before the slide that seats it.
-# Computed as (pre-grasp waypoint) − (grasp waypoint), preserving the
-# measured approach direction.
-# Source: snapshot "microwave initial open (pre-grasp) 2" minus engage above.
-_PRE_GRASP_TRANSLATION = np.array(
-    [-0.101657031669903, 0.3461991798550567, 0.15811394534347623]
+# Uses the FULL recorded waypoint — both translation AND rotation — because
+# the hook gripper's TCP offset (R_y π/2) means pre-grasp and engage have
+# different orientations. Using only the engage rotation here caused the hook
+# to approach at the wrong angle.
+# Source: snapshot "microwave initial open (pre-grasp) 2"
+PRE_ENGAGE_POSE_TASK = Pose(
+    translation=np.array([-0.101657031669903, 0.3461991798550567, 0.15811394534347623]),
+    rotation=Rotation.from_rotvec(
+        [-1.5775781112086387, 0.018476229935449232, 0.0008169673631912397]
+    ),
 )
-PRE_ENGAGE_OFFSET: np.ndarray = (
-    _PRE_GRASP_TRANSLATION - HANDLE_ENGAGE_POSE_TASK.translation
-)
-# ≈ [-0.031, +0.002, +0.003] m  (~3 cm along task −X, the hook approach axis)
 
 
 # ---------------------------------------------------------------------------
@@ -107,7 +108,7 @@ ARM = "ur_left"
 
 DOOR_SPEC = MicrowaveDoorSpec(
     handle_engage_pose_task=HANDLE_ENGAGE_POSE_TASK,
-    pre_engage_offset=PRE_ENGAGE_OFFSET,
+    pre_engage_pose_task=PRE_ENGAGE_POSE_TASK,   # full Pose: correct translation + rotation
 
     # Arc mode — hinge is known.
     hinge_position_task=HINGE_POSITION_TASK,
@@ -143,11 +144,6 @@ CONFIG = PickPlaceConfig(
 # ---------------------------------------------------------------------------
 
 def run(dry: bool) -> None:
-    pre_engage_pose = Pose(
-        translation=HANDLE_ENGAGE_POSE_TASK.translation + PRE_ENGAGE_OFFSET,
-        rotation=HANDLE_ENGAGE_POSE_TASK.rotation,
-    )
-
     arc_waypoints = _arc_waypoints(DOOR_SPEC)
     final_arc_pos = arc_waypoints[-1].translation
 
@@ -158,7 +154,7 @@ def run(dry: bool) -> None:
 
     print("=" * 60)
     print("  Arm               :", ARM)
-    print("  Pre-engage (task) :", np.round(pre_engage_pose.translation, 4))
+    print("  Pre-engage (task) :", np.round(PRE_ENGAGE_POSE_TASK.translation, 4))
     print("  Engage pose(task) :", np.round(HANDLE_ENGAGE_POSE_TASK.translation, 4))
     print("  Hinge (task)      :", np.round(HINGE_POSITION_TASK, 4))
     print("  Arc radius        :", f"{radius:.3f} m")
