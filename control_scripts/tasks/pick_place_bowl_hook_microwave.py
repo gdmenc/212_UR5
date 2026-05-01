@@ -51,7 +51,7 @@ from ..microwave import (
     MICROWAVE_CEILING_Z,
     MICROWAVE_CENTER_XY_TASK,
     MICROWAVE_FLOOR_Z,
-    entry_xy_for,
+    entry_xy_for_pose,
 )
 from ..moves import transit_xy
 from ..pick import pick, pick_from_box
@@ -239,13 +239,13 @@ def _print_plan(grasp, place_pose: Pose) -> None:
     if PICK_FROM == "microwave" or PLACE_TO == "microwave":
         print(f"  Microwave entry Z : {MICROWAVE_ENTRY_Z} m")
         if PICK_FROM == "microwave":
-            xy = entry_xy_for(grasp.grasp_pose.translation[:2])
+            xy = entry_xy_for_pose(grasp.grasp_pose)
             pregrasp = offset_along_tool_z(grasp.grasp_pose, grasp.pregrasp_offset)
             print(f"  Entry XY (pick)   : {xy}")
             print(f"  Pregrasp Z (pick) : {pregrasp.translation[2]:.3f} m"
                   f"  (offset {grasp.pregrasp_offset*100:.0f} cm)")
         if PLACE_TO == "microwave":
-            xy = entry_xy_for(place_pose.translation[:2])
+            xy = entry_xy_for_pose(place_pose)
             preplace = offset_along_tool_z(place_pose, CONFIG.preplace_offset)
             print(f"  Entry XY (place)  : {xy}")
             print(f"  Preplace Z (place): {preplace.translation[2]:.3f} m"
@@ -264,7 +264,7 @@ def run_on_arm(
 ) -> bool:
     print(f"\n→ pick: {grasp.description}  (from {PICK_FROM})")
     if PICK_FROM == "microwave":
-        entry_xy = entry_xy_for(grasp.grasp_pose.translation[:2])
+        entry_xy = entry_xy_for_pose(grasp.grasp_pose)
         pick_result = pick_from_box(
             arm, grasp, entry_xy, MICROWAVE_ENTRY_Z, config
         )
@@ -289,7 +289,7 @@ def run_on_arm(
 
     print(f"\n→ place @ {place_pose.translation}  (to {PLACE_TO})")
     if PLACE_TO == "microwave":
-        entry_xy = entry_xy_for(place_pose.translation[:2])
+        entry_xy = entry_xy_for_pose(place_pose)
         place_result = place_into_box(
             arm, place_pose, entry_xy, MICROWAVE_ENTRY_Z, config
         )

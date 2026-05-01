@@ -74,7 +74,7 @@ from ..microwave import (
     MICROWAVE_CEILING_Z,
     MICROWAVE_CENTER_XY_TASK,
     MICROWAVE_FLOOR_Z,
-    entry_xy_for,
+    entry_xy_for_pose,
 )
 from ..moves import transit_xy
 from ..pick import pick, pick_from_box
@@ -115,7 +115,7 @@ pick→entry swing."""
 # ``plate_rim_grasp_edge`` the TCP yaw = angle_rad + π.
 
 GRASP_ANGLE_RAD = 0.0
-PLACE_ANGLE_RAD = -np.radians(51)
+PLACE_ANGLE_RAD = -np.radians(60)
 # GRASP_ANGLE_RAD = -np.radians(51)
 # PLACE_ANGLE_RAD = 0 # ~-50.6° — same as the non-microwave plate task
 
@@ -133,7 +133,7 @@ MICROWAVE_PLATE_Z = MICROWAVE_FLOOR_Z + PLATE_RIM_HEIGHT - 0.03  # 0.10 m
 ARM = "ur_right"
 
 CONFIG = PickPlaceConfig(
-    transit_z=0.2,
+    transit_z=0.22,
     place_use_contact_descent=False,
     transit_speed=0.1,
     transit_accel=0.2,
@@ -182,7 +182,7 @@ def plan_midpoint() -> Pose:
     midpoint→place transit."""
     grasp_at_midpoint = plate_rim_grasp_edge(
         PLATE_MIDPOINT_POSE_TASK,
-        angle_rad=PLACE_ANGLE_RAD,
+        angle_rad=GRASP_ANGLE_RAD,
     )
     return grasp_at_midpoint.grasp_pose
 
@@ -228,10 +228,10 @@ def _print_plan(grasp, place_pose: Pose) -> None:
     if PICK_FROM == "microwave" or PLACE_TO == "microwave":
         print(f"  Microwave entry Z : {MICROWAVE_ENTRY_Z} m")
         if PICK_FROM == "microwave":
-            xy = entry_xy_for(grasp.grasp_pose.translation[:2])
+            xy = entry_xy_for_pose(grasp.grasp_pose)
             print(f"  Entry XY (pick)   : {xy}")
         if PLACE_TO == "microwave":
-            xy = entry_xy_for(place_pose.translation[:2])
+            xy = entry_xy_for_pose(place_pose)
             print(f"  Entry XY (place)  : {xy}")
     print("=" * 60)
     _check_wrist_clearance()
@@ -247,7 +247,7 @@ def run_on_arm(
 ) -> bool:
     print(f"\n→ pick: {grasp.description}  (from {PICK_FROM})")
     if PICK_FROM == "microwave":
-        entry_xy = entry_xy_for(grasp.grasp_pose.translation[:2])
+        entry_xy = entry_xy_for_pose(grasp.grasp_pose)
         pick_result = pick_from_box(
             arm, grasp, entry_xy, MICROWAVE_ENTRY_Z, config
         )
@@ -272,7 +272,7 @@ def run_on_arm(
 
     print(f"\n→ place @ {place_pose.translation}  (to {PLACE_TO})")
     if PLACE_TO == "microwave":
-        entry_xy = entry_xy_for(place_pose.translation[:2])
+        entry_xy = entry_xy_for_pose(place_pose)
         place_result = place_into_box(
             arm, place_pose, entry_xy, MICROWAVE_ENTRY_Z, config
         )

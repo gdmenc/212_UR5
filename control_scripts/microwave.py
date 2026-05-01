@@ -33,7 +33,7 @@ from __future__ import annotations
 import numpy as np
 
 
-MICROWAVE_CENTER_XY_TASK = np.array([-0.215458, 0.548696])
+MICROWAVE_CENTER_XY_TASK = np.array([-0.225458, 0.508696])
 """Task-frame XY of the interior center (the canonical place location).
 Measured on the rig."""
 
@@ -74,3 +74,39 @@ def entry_xy_for(
     target_xy = np.asarray(target_xy_task, dtype=float).reshape(2)
     y = door_plane_y() - clearance
     return np.array([target_xy[0], y])
+
+
+def entry_xy_for_pose(
+    target_pose_task,
+    clearance: float = MICROWAVE_ENTRY_CLEARANCE,
+) -> np.ndarray:
+    """Entry XY aligned with the target pose's tool-axis approach.
+
+    The entry point still lies just outside the door plane, but its X is
+    chosen by tracing the target pose's local -Z direction backward to that
+    outside-door Y. This makes the in-cavity segment approach along the same
+    XY direction as the final tool-axis pregrasp/grasp motion instead of
+    always moving straight along task Y.
+
+    Falls back to ``entry_xy_for`` when the tool-axis projection is nearly
+    parallel to the door plane or points away from the door.
+    """
+    target_xy = target_pose_task.translation[:2]
+    entry_y = door_plane_y() - clearance
+
+    tool_minus_z_task = target_pose_task.rotation.apply([0.0, 0.0, -1.0])
+    approach_xy = np.asarray(tool_minus_z_task[:2], dtype=float)
+    norm = float(np.linalg.norm(approach_xy))
+    if norm < 1e-6:
+        return entry_xy_for(target_xy, clearance)
+
+    approach_xy = approach_xy / norm
+    dy = entry_y - target_xy[1]
+    if abs(approach_xy[1]) < 1e-6:
+        return entry_xy_for(target_xy, clearance)
+
+    scale = dy / approach_xy[1]
+    if scale <= 0.0:
+        return entry_xy_for(target_xy, clearance)
+
+    return target_xy + scale * approach_xy
