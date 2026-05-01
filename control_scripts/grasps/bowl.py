@@ -34,6 +34,7 @@ import numpy as np
 
 from ..util.poses import Pose
 from ..util.rotations import Rotation
+from ._hook_rim import HOOK_RIM_PREGRASP_OFFSET, hook_rim_rotation
 from .base import Grasp
 
 
@@ -65,11 +66,6 @@ fingers."""
 
 BOWL_GRASP_FORCE = 15.0
 """Similar to plate — thin rim, no need to squeeze hard."""
-
-BOWL_HOOK_PREGRASP_OFFSET = 0.05
-"""Vertical pregrasp standoff (m) for hook engagement on the bowl rim.
-Matches the bottle hook rim grasp: approach from above, open the throat,
-descend onto the rim, latch, then retract vertically."""
 
 
 def _top_down_rim_rotation(angle_rad: float) -> Rotation:
@@ -108,33 +104,23 @@ def bowl_rim_grasp(
     )
 
 
-def _hook_rim_rotation(angle_rad: float) -> Rotation:
-    """TCP rotation (bowl frame) for a hook rim grasp at ``angle_rad``.
-
-    This intentionally matches ``bottle_hook_grasp``:
-      - Tool +Z = task -Z, so ``pick()`` approaches by descending vertically.
-      - Tool +X = radial OUTWARD at ``angle_rad``.
-      - Tool +Y = horizontal tangent.
-
-    No bowl slant compensation is included here; the bowl is treated as if
-    the rim plane is horizontal.
-    """
-    yaw = Rotation.from_rotvec([0.0, 0.0, angle_rad])
-    flip = Rotation.from_rotvec([np.pi, 0.0, 0.0])
-    return yaw * flip
-
-
 def bowl_hook_grasp(
     X_task_bowl: Pose,
     angle_rad: float = 0.0,
+    approach_tilt_rad: float = 0.0,
 ) -> Grasp:
     """Hook-gripper rim grasp at the bowl's outer rim.
 
-    The hook descends vertically at the selected rim angle. The moving hook
-    finger sits just inside the bowl rim, the fixed jaw stays outside, and
-    the rim wall is captured in the hook throat. This does not account for
-    the bowl sidewall slant yet; it uses the measured outer rim radius and
-    horizontal rim height directly.
+    The hook descends at the selected rim angle. The moving finger sits
+    just inside the bowl rim, the fixed jaw stays outside, and the rim
+    wall is captured in the hook throat. The bowl sidewall slant is NOT
+    compensated — uses the outer rim radius and horizontal rim height
+    directly. A future tilted-rim variant should compensate.
+
+    ``approach_tilt_rad`` (default 0) tips the descent off pure-vertical
+    around tool +Y. Positive values "dive" the gripper into the bowl
+    from above-and-outward, lifting the wrist away from the table — see
+    ``hook_rim_rotation`` for the full sign convention.
     """
     rim_xyz = np.array([
         BOWL_RIM_OUTER_RADIUS_M * np.cos(angle_rad),
@@ -143,13 +129,20 @@ def bowl_hook_grasp(
     ])
     X_bowl_grasp = Pose(
         translation=rim_xyz,
-        rotation=_hook_rim_rotation(angle_rad),
+        rotation=hook_rim_rotation(angle_rad, approach_tilt_rad),
+    )
+    tilt_label = (
+        ""
+        if approach_tilt_rad == 0.0
+        else f", tilt {np.degrees(approach_tilt_rad):+.0f}°"
     )
     return Grasp(
         grasp_pose=X_task_bowl @ X_bowl_grasp,
-        pregrasp_offset=BOWL_HOOK_PREGRASP_OFFSET,
+        pregrasp_offset=HOOK_RIM_PREGRASP_OFFSET,
         grasp_force=BOWL_GRASP_FORCE,
-        description=f"bowl hook rim grasp @ {np.degrees(angle_rad):+.0f}°",
+        description=(
+            f"bowl hook rim grasp @ {np.degrees(angle_rad):+.0f}°{tilt_label}"
+        ),
     )
 
 

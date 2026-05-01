@@ -38,6 +38,7 @@ import numpy as np
 
 from ..util.poses import Pose
 from ..util.rotations import Rotation
+from ._hook_rim import HOOK_RIM_PREGRASP_OFFSET, hook_rim_rotation
 from .base import Grasp
 
 
@@ -137,28 +138,6 @@ def bottle_body_grasp(
     )
 
 
-HOOK_RIM_PREGRASP_OFFSET = 0.05
-"""Vertical pregrasp standoff (m) for the hook engaging the bottle's
-opening rim. The hook's throat opening sits 1.6 cm below the TCP in task
-z (per HOOK_FINGER_TIP_LATERAL_M); 5 cm leaves ~3.4 cm of clear vertical
-space between the finger tip and the rim plane during pregrasp."""
-
-
-def _hook_rim_rotation(angle_rad: float) -> Rotation:
-    """TCP rotation (object frame) for a hook rim grasp at ``angle_rad``
-    around the bottle's +z axis. Combined with ``TCP_OFFSET_HOOK = R_y(+π/2)``
-    this produces a TCP frame at the grasp pose with:
-        - Tool +Z = task -Z (vertical descent direction)
-        - Tool +X = radial OUTWARD at angle_rad (away from bottle center)
-        - Tool +Y = horizontal tangent
-    Matches the rig's natural hook-rim wrist orientation (verified against
-    a recorded grasp pose at angle π).
-    """
-    yaw = Rotation.from_rotvec([0.0, 0.0, angle_rad])
-    flip = Rotation.from_rotvec([np.pi, 0.0, 0.0])
-    return yaw * flip
-
-
 def bottle_hook_grasp(
     X_task_bottle: Pose,
     angle_rad: float = 0.0,
@@ -176,7 +155,7 @@ def bottle_hook_grasp(
     ])
     X_bottle_grasp = Pose(
         translation=rim_xyz,
-        rotation=_hook_rim_rotation(angle_rad),
+        rotation=hook_rim_rotation(angle_rad),
     )
     return Grasp(
         grasp_pose=X_task_bottle @ X_bottle_grasp,
@@ -221,7 +200,7 @@ def bottle_hook_pour_tcp_pose(
     target_task = np.asarray(target_task, dtype=float).reshape(3)
     R_tcp = (
         X_task_bottle.rotation
-        * _hook_rim_rotation(angle_rad)
+        * hook_rim_rotation(angle_rad)
         * Rotation.from_rotvec([0.0, tilt_rad, 0.0])
     )
     opening_offset_task = R_tcp.apply(_opening_in_hook_tool_frame())
