@@ -53,6 +53,7 @@ from ..arm import ArmHandle
 from ..config import DEFAULT, PickPlaceConfig
 from ..reachability import is_task_pose_reachable
 from ..util.poses import Pose
+from ..util.rotations import Rotation
 from ..util.rtde_convert import pose_to_rtde, rtde_to_pose
 
 
@@ -164,9 +165,8 @@ def _arc_waypoints(
 
     The door rotates about the hinge axis (task Z). Each waypoint:
       - Rotates the handle position around the hinge by a small angle increment.
-      - Keeps the TCP orientation fixed at ``start_pose_task``. At runtime,
-        this is the live TCP pose after the hook has been seated, so Phase 3
-        continues from the exact wrist orientation reached by the approach.
+      - Rotates the TCP orientation by the same angle around task Z so the
+        hook stays tangent to the arc and maintains its grip on the handle.
 
     Rotation sign is chosen so the initial arc tangent aligns with
     ``pull_direction_task``.
@@ -193,9 +193,13 @@ def _arc_waypoints(
             r_vec[2],
         ])
         new_translation = hinge + new_r
-        # new_translation[0] = new_translation[0] * -1
 
-        waypoints.append(Pose(translation=new_translation, rotation=start.rotation))
+        # Rotate TCP orientation by the same angle around task Z so the
+        # hook stays tangent to the arc throughout the sweep.
+        dR = Rotation.from_rotvec(np.array([0.0, 0.0, theta]))
+        new_rotation = dR * start.rotation
+
+        waypoints.append(Pose(translation=new_translation, rotation=new_rotation))
 
     return waypoints
 
