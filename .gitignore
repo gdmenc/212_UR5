@@ -3,5 +3,5 @@ __pycache__/
 *.pyc
 
 # Drake / local runtime artifacts
-logs/
+# logs/
 *.log

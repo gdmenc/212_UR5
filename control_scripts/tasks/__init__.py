@@ -22,9 +22,10 @@ Parameters that need physical measurement are marked TODO in each file
 and will raise a clear error until set.
 """
 
-from . import pick_place_plate
+from . import pick_place_cup, pick_place_plate
 
 # Maps CLI task name → main(dry: bool = False) -> int.
 TASKS = {
     "pick_place_plate": pick_place_plate.main,
+    "pick_place_cup": pick_place_cup.main,
 }

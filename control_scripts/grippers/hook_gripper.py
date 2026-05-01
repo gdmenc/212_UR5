@@ -73,7 +73,7 @@ HOOK_TCP_Z_M = 0.10275
 ``calibration.TCP_OFFSET_HOOK[2]`` — keep the two in sync if either
 is re-measured."""
 
-HOOK_CAMERA_Z_M = 0.095
+HOOK_CAMERA_Z_M = 0.090
 """Flange-z of the on-hook camera. Note this is LESS than HOOK_TCP_Z_M, so
 on a flange-down descent the camera sits ABOVE the rim height, not below.
 The leading edge during descent is the finger inner edge at 0.127 m."""
