@@ -87,13 +87,21 @@ PRE_ENGAGE_POSE_TASK = Pose(
 # that occurs when moveL tries to simultaneously move XY and rotate the
 # end effector from HOME to the pre-engage orientation.
 # Source: snapshot "microwave initial open (pre-grasp) 2" → joints_rad
+# PRE_ENGAGE_JOINTS_RAD = [
+#     2.0675549507141113,
+#     -0.7741321486285706,
+#     0.8808053175555628,
+#     -0.14715857923541265,
+#     1.9965837001800537,
+#     -0.750498119984762
+# ]
 PRE_ENGAGE_JOINTS_RAD = [
     2.0675549507141113,
     -0.7741321486285706,
     0.8808053175555628,
     -0.14715857923541265,
     1.9965837001800537,
-    -0.750498119984762
+    0.03490004341
 ]
 
 # ---------------------------------------------------------------------------
@@ -126,7 +134,7 @@ DOOR_SPEC = MicrowaveDoorSpec(
     # Arc mode — hinge is known.
     hinge_position_task=HINGE_POSITION_TASK,
     arc_open_angle_rad=1.6,   # ≈ 92° — tune until door is visually fully open
-    n_arc_steps=14,            # moveJ waypoints along the arc
+    n_arc_steps=15,            # moveJ waypoints along the arc
 
     # Slightly faster arc traversal for smoother inter-waypoint motion.
     joint_speed=0.8,           # rad/s (default 0.5)
