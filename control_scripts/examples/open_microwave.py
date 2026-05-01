@@ -125,8 +125,12 @@ DOOR_SPEC = MicrowaveDoorSpec(
 
     # Arc mode — hinge is known.
     hinge_position_task=HINGE_POSITION_TASK,
-    arc_open_angle_rad=1.,   # ≈ 69° — tune until door is visually fully open
-    n_arc_steps=14,            # moveL waypoints along the arc
+    arc_open_angle_rad=1.6,   # ≈ 92° — tune until door is visually fully open
+    n_arc_steps=14,            # moveJ waypoints along the arc
+
+    # Slightly faster arc traversal for smoother inter-waypoint motion.
+    joint_speed=0.8,           # rad/s (default 0.5)
+    joint_accel=0.5,           # rad/s² (default 0.3)
 
     # pull_direction_task drives the arc rotation sign check.
     # −X, −Y = door swings diagonally toward operator and to the left.

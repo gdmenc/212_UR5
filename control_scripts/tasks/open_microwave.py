@@ -372,28 +372,32 @@ def _phase3_arc(
     """
     start_pose_task = arm.to_task(rtde_to_pose(arm.receive.getActualTCPPose()))
     waypoints = _arc_waypoints(door, start_pose_task=start_pose_task)
-
-    # Convert all waypoints to RTDE base-frame poses up-front, then enforce
-    # rotvec continuity so the UR controller doesn't see axis-angle flips
-    # between consecutive targets (which causes unnecessary wrist spins).
     rtde_poses = [pose_to_rtde(arm.to_base(wp)) for wp in waypoints]
-    prev_rv = np.array(rtde_poses[0][3:6]) if rtde_poses else None
-    for rp in rtde_poses:
-        rv = np.array(rp[3:6])
-        if prev_rv is not None and np.dot(rv, prev_rv) < 0.0:
-            # Flip to equivalent representation: rotvec ± 2π*axis
-            # For axis-angle, negating gives same rotation when angle → 2π-angle
-            # but the simpler fix is to pick the closer of ±rv.
-            rv = -rv
-            rp[3], rp[4], rp[5] = float(rv[0]), float(rv[1]), float(rv[2])
-        prev_rv = rv
+
+    # Use moveJ with IK solved via q_near to avoid wrist singularities.
+    #
+    # moveL interpolates in Cartesian space and the UR's internal IK can
+    # jump to a different joint-solution branch when the wrist passes
+    # through a singularity (joint 5 ≈ 0), causing a violent wrist spin.
+    #
+    # Instead we solve IK ourselves with q_near = previous joint config,
+    # which forces the solver to stay on the same solution branch, then
+    # move in joint space with moveJ.  For the small angular increments
+    # of the arc steps the joint-space path closely tracks the Cartesian
+    # arc — deviation is negligible.
+    prev_joints = list(arm.receive.getActualQ())
 
     for rp in rtde_poses:
-        arm.control.moveL(
-            rp,
-            config.approach_speed,
-            config.approach_accel,
+        target_joints = arm.control.getInverseKinematics(
+            rp, prev_joints, 0.001, 0.001,
         )
+        arm.control.moveJ(
+            target_joints,
+            door.joint_speed,
+            door.joint_accel,
+        )
+        prev_joints = list(arm.receive.getActualQ())
+
     r_vec = start_pose_task.translation - door.hinge_position_task
     return float(np.linalg.norm(r_vec[:2])) * door.arc_open_angle_rad
 
