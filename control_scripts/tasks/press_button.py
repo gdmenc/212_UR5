@@ -102,17 +102,17 @@ TCP itself sits at ``TCP_OFFSET_ROBOTIQ_2F85[2]`` (0.184 m). Difference
 (14.9 mm) is the gap between the pinch point and whatever is held in
 the gripper that does the pressing."""
 
-STANDOFF_M = 0.05
+STANDOFF_M = 0.03
 """Standoff distance back along the press axis from the press TCP. The
 arm goes here before move_until_contact."""
 
-PRESS_FORCE_N = 10.0
+PRESS_FORCE_N = 30.0
 """Newtons applied along the press axis once contact is detected."""
 
 PRESS_HOLD_S = 1.0
 """How long to hold ``PRESS_FORCE_N`` after contact, before retracting."""
 
-CONTACT_THRESHOLD_N = 5.0
+CONTACT_THRESHOLD_N = 10.0
 """TCP force threshold (N) that ends move_until_contact. Conservative
 default — microwave buttons typically actuate at 2-5 N."""
 

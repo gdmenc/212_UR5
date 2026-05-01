@@ -32,11 +32,11 @@ from __future__ import annotations
 import numpy as np
 
 
-MICROWAVE_CENTER_XY_TASK = np.array([0.5, 0.0])
+MICROWAVE_CENTER_XY_TASK = np.array([-0.215458, 0.548696])
 """Task-frame XY of the interior center (the canonical place location).
 PLACEHOLDER — replace with the measured center on the rig."""
 
-MICROWAVE_INTERIOR_X_DEPTH = 0.30
+MICROWAVE_INTERIOR_X_DEPTH = 0.26
 """Interior depth along task X (door-to-back wall). The door plane sits
 at ``MICROWAVE_CENTER_XY_TASK[0] - MICROWAVE_INTERIOR_X_DEPTH/2``.
 PLACEHOLDER — typical microwaves are 25-30 cm."""

@@ -7,9 +7,8 @@ Uses hand-recorded task-frame waypoints from:
     snapshot "microwave initial open (grasp) 2"       → engage / handle pose
 
 Phase 3 uses ARC MODE — a series of moveL waypoints along the computed
-door arc while preserving the engaged hook orientation — because the hinge
-location is now known from the door width measurement (44 cm). Arc mode is
-deterministic and needs no force sensing.
+door arc — because the hinge location is now known from the door width
+measurement (44 cm).  Arc mode is deterministic and needs no force sensing.
 
 Arc geometry
 ------------
@@ -126,7 +125,7 @@ DOOR_SPEC = MicrowaveDoorSpec(
 
     # Arc mode — hinge is known.
     hinge_position_task=HINGE_POSITION_TASK,
-    arc_open_angle_rad=1.8,   # ≈ 69° — tune until door is visually fully open
+    arc_open_angle_rad=1.,   # ≈ 69° — tune until door is visually fully open
     n_arc_steps=14,            # moveL waypoints along the arc
 
     # pull_direction_task drives the arc rotation sign check.
@@ -144,8 +143,8 @@ CONFIG = PickPlaceConfig(
     # transit_z is in TASK frame. Handle is at ~0.158 m; 0.25 m gives
     # ~9 cm clearance above it and the microwave housing.
     transit_z=0.25,
-    transit_speed=0.15,
-    transit_accel=0.3,
+    transit_speed=0.1,
+    transit_accel=0.2,
     approach_speed=0.04,    # slow final slide onto handle + arc steps
     approach_accel=0.1,
     retract_speed=0.10,

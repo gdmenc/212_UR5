@@ -374,10 +374,10 @@ def _phase3_arc(
     waypoints = _arc_waypoints(door, start_pose_task=start_pose_task)
     # print(f"Arc waypoints: {waypoints}")
     # type(waypoints)
-    # for wp in waypoints[::-1]:
-    #     # print(wp)
-    #     print(f"pose to rtde:{arm.to_base(wp)}")
-    for wp in waypoints:
+    for wp in waypoints[::-1]:
+        print(wp)
+        # print(f"pose to rtde:{arm.to_base(wp)}")
+    for wp in waypoints[:10]:
         arm.control.moveL(
             pose_to_rtde(arm.to_base(wp)),
             config.approach_speed,

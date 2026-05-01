@@ -72,6 +72,7 @@ from ..microwave import (
     MICROWAVE_FLOOR_Z,
     entry_xy_for,
 )
+from ..moves import transit_xy
 from ..pick import pick, pick_from_box
 from ..place import place, place_into_box
 from ..session import default_session
@@ -89,12 +90,24 @@ PLACE_TO: Literal["outside", "microwave"] = "microwave"
 PLATE_PICK_POSE_TASK = Pose(translation=[0.295521, -0.1, 0.01])
 PLATE_PLACE_POSE_TASK = Pose(translation=[-0.25, 0.5, 0.09])
 
+# Intermediate waypoint between pick and place. Z is ignored —
+# transit_z sets the carry altitude. Picked at a Cartesian location
+# that breaks long pick→place swings into two shorter, predictable
+# legs. Same value as ``examples/pick_place_plate.py`` since the pick/
+# place geometry is similar.
+PLATE_MIDPOINT_POSE_TASK = Pose(translation=[0.0, 0.0, 0.0])
+USE_MIDPOINT = True
+"""Whether to carry the held plate through ``PLATE_MIDPOINT_POSE_TASK``
+between pick and place. Mirrors ``examples/pick_place_plate.py`` —
+disabling this is what caused the rig over-extend on a long direct
+pick→entry swing."""
+
 # Plate-frame angle at which to engage the rim. Choose so the wrist
 # exits back through the -X microwave door for any microwave-side leg.
 # 2F-85 closes along tool +Y, so the rim-radial axis is tool +X. With
 # ``plate_rim_grasp_edge`` the TCP yaw = angle_rad + π.
 GRASP_ANGLE_RAD = 0.0
-PLACE_ANGLE_RAD = -0.88  # ~-50.6° — same as the non-microwave plate task
+PLACE_ANGLE_RAD = -np.radians(51)  # ~-50.6° — same as the non-microwave plate task
 
 # Constrained altitude inside the cavity. Plate on tray sits at task z
 # ~10 cm (8 + 2 cm rim). Top of plate rim ~ 11 cm. 14 cm gives ~3 cm
@@ -102,7 +115,7 @@ PLACE_ANGLE_RAD = -0.88  # ~-50.6° — same as the non-microwave plate task
 # 14 + 18.4 = 32.4 cm — ABOVE the 23 cm ceiling. See top-of-file
 # warning; this constant is correct for an enlarged real cavity but
 # does not magically fit a 23 cm one.
-MICROWAVE_ENTRY_Z = 0.14
+MICROWAVE_ENTRY_Z = 0.13
 
 # Plate center at task z when sitting on tray = tray + plate rim height.
 MICROWAVE_PLATE_Z = MICROWAVE_FLOOR_Z + PLATE_RIM_HEIGHT  # 0.10 m
@@ -152,6 +165,18 @@ def plan_place() -> Pose:
     return grasp_at_dest.grasp_pose
 
 
+def plan_midpoint() -> Pose:
+    """TCP pose for carrying the held plate through the midpoint XY at
+    transit_z. Orientation matches the upcoming PLACE leg so the wrist
+    rotation happens during the pick→midpoint leg, not the longer
+    midpoint→place transit."""
+    grasp_at_midpoint = plate_rim_grasp_edge(
+        PLATE_MIDPOINT_POSE_TASK,
+        angle_rad=PLACE_ANGLE_RAD,
+    )
+    return grasp_at_midpoint.grasp_pose
+
+
 def _check_wrist_clearance() -> None:
     """Loudly warn at plan time if the 2F-85 wrist will exceed the cavity
     ceiling on a microwave-side leg. Conservative: assumes pure-vertical
@@ -185,6 +210,9 @@ def _print_plan(grasp, place_pose: Pose) -> None:
     print(f"  Place pose    : {place_pose.translation} (task)")
     print(f"  Grasp angle   : {np.degrees(GRASP_ANGLE_RAD):+.0f}°")
     print(f"  Place angle   : {np.degrees(PLACE_ANGLE_RAD):+.0f}°")
+    print(f"  Midpoint      : "
+          f"{PLATE_MIDPOINT_POSE_TASK.translation if USE_MIDPOINT else 'disabled'}"
+          f"{' (task)' if USE_MIDPOINT else ''}")
     print(f"  Transit Z     : {CONFIG.transit_z} m")
     print(f"  Release aper. : {CONFIG.release_aperture_mm} mm")
     if PICK_FROM == "microwave" or PLACE_TO == "microwave":
@@ -219,6 +247,18 @@ def run_on_arm(
         print(f"  ✗ pick FAILED: {pick_result.reason}")
         return False
     print("  ✓ pick succeeded.")
+
+    if USE_MIDPOINT:
+        midpoint_pose = plan_midpoint()
+        print(f"\n→ midpoint @ {PLATE_MIDPOINT_POSE_TASK.translation}")
+        transit_xy(
+            arm,
+            midpoint_pose,
+            config.transit_z,
+            config.transit_speed,
+            config.transit_accel,
+        )
+        print("  ✓ midpoint reached.")
 
     print(f"\n→ place @ {place_pose.translation}  (to {PLACE_TO})")
     if PLACE_TO == "microwave":

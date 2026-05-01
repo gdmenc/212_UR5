@@ -48,6 +48,7 @@ from ..microwave import (
     MICROWAVE_FLOOR_Z,
     entry_xy_for,
 )
+from ..moves import transit_xy
 from ..pick import pick, pick_from_box
 from ..place import place, place_into_box
 from ..session import default_session
@@ -62,6 +63,19 @@ PLACE_TO: Literal["outside", "microwave"] = "microwave"
 # Free-standing bowl poses (used when the corresponding side is "outside").
 BOWL_PICK_POSE_TASK = Pose(translation=[0.1, 0.0, 0.01])
 BOWL_PLACE_POSE_TASK = Pose(translation=[-0.1, 0.2, 0.01])
+
+# Intermediate waypoint between pick and place. The transit_z is what
+# actually sets the carry altitude; the Z below is ignored. Picked at a
+# Cartesian location that breaks long pick→place swings into two
+# shorter, predictable legs — moveL between far-apart poses can over-
+# extend through awkward joint configurations even when the start and
+# end are reachable. Move this until the path looks clean on the rig.
+BOWL_MIDPOINT_POSE_TASK = Pose(translation=[0.0, 0.2, 0.0])
+USE_MIDPOINT = True
+"""Whether to carry the held bowl through ``BOWL_MIDPOINT_POSE_TASK``
+between pick and place. Off-by-default would replicate the failure mode
+the user just saw on the rig — leave True unless you've shortened the
+pick↔place geometry."""
 
 # Bowl-frame angle at which to engage the rim. π = approach from −X
 # side; forearm exits back through the −X microwave door. Keep at π
@@ -141,6 +155,19 @@ def plan_place() -> Pose:
     return grasp_at_dest.grasp_pose
 
 
+def plan_midpoint() -> Pose:
+    """TCP pose for carrying the held bowl through the midpoint XY at
+    transit_z. Orientation matches the upcoming PLACE leg (PLACE_ANGLE_RAD
+    + place-side tilt) so the wrist rotation happens during the safer
+    pick→midpoint leg, not during the longer midpoint→place transit."""
+    grasp_at_midpoint = bowl_hook_grasp(
+        BOWL_MIDPOINT_POSE_TASK,
+        angle_rad=PLACE_ANGLE_RAD,
+        approach_tilt_rad=_tilt_for(PLACE_TO),
+    )
+    return grasp_at_midpoint.grasp_pose
+
+
 def _print_plan(grasp, place_pose: Pose) -> None:
     print("=" * 60)
     print(f"  Arm           : {ARM} (hook gripper)")
@@ -152,6 +179,9 @@ def _print_plan(grasp, place_pose: Pose) -> None:
     print(f"  Place angle   : {np.degrees(PLACE_ANGLE_RAD):+.0f}°")
     print(f"  Tilt (pick)   : {np.degrees(_tilt_for(PICK_FROM)):+.1f}°")
     print(f"  Tilt (place)  : {np.degrees(_tilt_for(PLACE_TO)):+.1f}°")
+    print(f"  Midpoint      : "
+          f"{BOWL_MIDPOINT_POSE_TASK.translation if USE_MIDPOINT else 'disabled'}"
+          f"{' (task)' if USE_MIDPOINT else ''}")
     print(f"  Transit Z     : {CONFIG.transit_z} m")
     if PICK_FROM == "microwave" or PLACE_TO == "microwave":
         print(f"  Microwave entry Z : {MICROWAVE_ENTRY_Z} m")
@@ -184,6 +214,18 @@ def run_on_arm(
         print(f"  ✗ pick FAILED: {pick_result.reason}")
         return False
     print("  ✓ pick succeeded.")
+
+    if USE_MIDPOINT:
+        midpoint_pose = plan_midpoint()
+        print(f"\n→ midpoint @ {BOWL_MIDPOINT_POSE_TASK.translation}")
+        transit_xy(
+            arm,
+            midpoint_pose,
+            config.transit_z,
+            config.transit_speed,
+            config.transit_accel,
+        )
+        print("  ✓ midpoint reached.")
 
     print(f"\n→ place @ {place_pose.translation}  (to {PLACE_TO})")
     if PLACE_TO == "microwave":
