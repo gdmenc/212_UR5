@@ -101,7 +101,7 @@ PRE_ENGAGE_JOINTS_RAD = [
 #  Arc geometry  (door width = 44 cm)
 # ---------------------------------------------------------------------------
 
-DOOR_WIDTH_M = 0.44
+DOOR_WIDTH_M = 0.33
 """Width of the microwave door panel (measured), used as the arc radius."""
 
 # The door swings open in the −X, −Y direction (diagonally toward the
