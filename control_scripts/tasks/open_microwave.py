@@ -372,14 +372,25 @@ def _phase3_arc(
     """
     start_pose_task = arm.to_task(rtde_to_pose(arm.receive.getActualTCPPose()))
     waypoints = _arc_waypoints(door, start_pose_task=start_pose_task)
-    # print(f"Arc waypoints: {waypoints}")
-    # type(waypoints)
-    for wp in waypoints[::-1]:
-        print(wp)
-        # print(f"pose to rtde:{arm.to_base(wp)}")
-    for wp in waypoints[:10]:
+
+    # Convert all waypoints to RTDE base-frame poses up-front, then enforce
+    # rotvec continuity so the UR controller doesn't see axis-angle flips
+    # between consecutive targets (which causes unnecessary wrist spins).
+    rtde_poses = [pose_to_rtde(arm.to_base(wp)) for wp in waypoints]
+    prev_rv = np.array(rtde_poses[0][3:6]) if rtde_poses else None
+    for rp in rtde_poses:
+        rv = np.array(rp[3:6])
+        if prev_rv is not None and np.dot(rv, prev_rv) < 0.0:
+            # Flip to equivalent representation: rotvec ± 2π*axis
+            # For axis-angle, negating gives same rotation when angle → 2π-angle
+            # but the simpler fix is to pick the closer of ±rv.
+            rv = -rv
+            rp[3], rp[4], rp[5] = float(rv[0]), float(rv[1]), float(rv[2])
+        prev_rv = rv
+
+    for rp in rtde_poses:
         arm.control.moveL(
-            pose_to_rtde(arm.to_base(wp)),
+            rp,
             config.approach_speed,
             config.approach_accel,
         )
