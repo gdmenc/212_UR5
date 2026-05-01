@@ -16,9 +16,13 @@ tray height + 1 cm.
 
 Approach angle
 --------------
-At ``GRASP_ANGLE_RAD = π`` the hook approaches from the bowl's −X
-side, putting the wrist in −X and the forearm exiting back through
-the −X microwave door. Don't change this for the microwave side.
+The microwave door faces task -Y. For the wrist to exit cleanly back
+through the door, the hook's forearm should point in -Y, which means
+GRASP_ANGLE_RAD = -π/2 (hook approaches the bowl from the -Y side).
+The current value GRASP_ANGLE_RAD = π was set when the door was
+assumed to face -X — RE-TUNE before running a microwave-side leg
+with the bowl. Plate task is the priority for now; this task is wired
+up for end-to-end test once the bowl is being staged.
 
 Approach tilt
 -------------
@@ -44,6 +48,7 @@ from ..arm import ArmHandle
 from ..config import PickPlaceConfig
 from ..grasps.bowl import bowl_hook_grasp
 from ..microwave import (
+    MICROWAVE_CEILING_Z,
     MICROWAVE_CENTER_XY_TASK,
     MICROWAVE_FLOOR_Z,
     entry_xy_for,
@@ -52,7 +57,7 @@ from ..moves import transit_xy
 from ..pick import pick, pick_from_box
 from ..place import place, place_into_box
 from ..session import default_session
-from ..util.poses import Pose
+from ..util.poses import Pose, offset_along_tool_z
 
 
 # --- Tunables --------------------------------------------------------------
@@ -101,10 +106,23 @@ MICROWAVE_ENTRY_Z = 0.18
 # the descent — same convention as the free-standing pose.
 MICROWAVE_BOWL_Z_OFFSET = 0.01
 
+# In-cavity pregrasp standoff override for the microwave-side leg.
+# Default HOOK_RIM_PREGRASP_OFFSET (5 cm) puts the pregrasp at task z
+# 21.2 cm — only 1.8 cm under the 23 cm ceiling, tight. 3 cm gives
+# 19.2 cm pregrasp, 3.8 cm of margin. Outside the microwave the global
+# 5 cm default still applies (better friction-break before ascent).
+MICROWAVE_HOOK_PREGRASP_OFFSET = 0.03
+
 ARM = "ur_left"
 
 CONFIG = PickPlaceConfig(
     transit_z=0.3,
+    # 3 cm preplace standoff for the microwave place leg. The 10 cm
+    # default would land preplace at task z 26.2 cm — ABOVE the 23 cm
+    # ceiling. 3 cm matches MICROWAVE_HOOK_PREGRASP_OFFSET for symmetric
+    # behaviour between pick and place. Plenty for an open-loop drop;
+    # outside the cavity the moveL distance is harmless.
+    preplace_offset=0.03,
     place_use_contact_descent=False,
     transit_speed=0.1,
     transit_accel=0.2,
@@ -139,11 +157,17 @@ def _tilt_for(side: str) -> float:
 
 
 def plan_pick():
-    return bowl_hook_grasp(
+    grasp = bowl_hook_grasp(
         _bowl_pose_for(PICK_FROM, BOWL_PICK_POSE_TASK),
         angle_rad=GRASP_ANGLE_RAD,
         approach_tilt_rad=_tilt_for(PICK_FROM),
     )
+    if PICK_FROM == "microwave":
+        # Tighter pregrasp standoff so the in-cavity moveL endpoint
+        # stays under the cavity ceiling. See MICROWAVE_HOOK_PREGRASP_OFFSET
+        # docstring above.
+        grasp.pregrasp_offset = MICROWAVE_HOOK_PREGRASP_OFFSET
+    return grasp
 
 
 def plan_place() -> Pose:
@@ -168,6 +192,35 @@ def plan_midpoint() -> Pose:
     return grasp_at_midpoint.grasp_pose
 
 
+def _check_in_cavity_clearance(grasp, place_pose: Pose) -> None:
+    """Loudly warn if any in-cavity TCP pose (place, grasp, preplace,
+    pregrasp) sits above the cavity ceiling minus a small margin.
+    For the hook at angle π / tilt 0 the wrist Z equals the TCP Z
+    (offset is horizontal), so checking TCP Z against the ceiling
+    is the same as checking wrist Z."""
+    margin = 0.01  # 1 cm safety margin under the ceiling
+    ceiling_safe = MICROWAVE_CEILING_Z - margin
+    poses_to_check = []
+    if PICK_FROM == "microwave":
+        pregrasp = offset_along_tool_z(grasp.grasp_pose, grasp.pregrasp_offset)
+        poses_to_check.append(("grasp", grasp.grasp_pose.translation[2]))
+        poses_to_check.append(("pregrasp", pregrasp.translation[2]))
+    if PLACE_TO == "microwave":
+        preplace = offset_along_tool_z(place_pose, CONFIG.preplace_offset)
+        poses_to_check.append(("place", place_pose.translation[2]))
+        poses_to_check.append(("preplace", preplace.translation[2]))
+    overshoots = [(name, z) for name, z in poses_to_check if z > ceiling_safe]
+    if not overshoots:
+        return
+    print("!" * 60)
+    print(" IN-CAVITY CLEARANCE WARNING — pose(s) above ceiling minus margin")
+    print(f"  ceiling z (- {margin*100:.0f} cm margin) = {ceiling_safe*100:.1f} cm")
+    for name, z in overshoots:
+        print(f"  {name:>10} z = {z*100:.1f} cm  (overshoot {(z - ceiling_safe)*100:+.1f} cm)")
+    print(" Reduce MICROWAVE_HOOK_PREGRASP_OFFSET or CONFIG.preplace_offset.")
+    print("!" * 60)
+
+
 def _print_plan(grasp, place_pose: Pose) -> None:
     print("=" * 60)
     print(f"  Arm           : {ARM} (hook gripper)")
@@ -186,12 +239,21 @@ def _print_plan(grasp, place_pose: Pose) -> None:
     if PICK_FROM == "microwave" or PLACE_TO == "microwave":
         print(f"  Microwave entry Z : {MICROWAVE_ENTRY_Z} m")
         if PICK_FROM == "microwave":
-            xy = entry_xy_for(grasp.grasp_pose.translation[:2])
+            pregrasp = offset_along_tool_z(grasp.grasp_pose, grasp.pregrasp_offset)
+            xy = entry_xy_for(pregrasp.translation[:2])
+            print(f"  Pregrasp XY       : {pregrasp.translation[:2]}")
             print(f"  Entry XY (pick)   : {xy}")
+            print(f"  Pregrasp Z (pick) : {pregrasp.translation[2]:.3f} m"
+                  f"  (offset {grasp.pregrasp_offset*100:.0f} cm)")
         if PLACE_TO == "microwave":
-            xy = entry_xy_for(place_pose.translation[:2])
+            preplace = offset_along_tool_z(place_pose, CONFIG.preplace_offset)
+            xy = entry_xy_for(preplace.translation[:2])
+            print(f"  Preplace XY       : {preplace.translation[:2]}")
             print(f"  Entry XY (place)  : {xy}")
+            print(f"  Preplace Z (place): {preplace.translation[2]:.3f} m"
+                  f"  (offset {CONFIG.preplace_offset*100:.0f} cm)")
     print("=" * 60)
+    _check_in_cavity_clearance(grasp, place_pose)
 
 
 # --- Execution -------------------------------------------------------------
@@ -204,7 +266,11 @@ def run_on_arm(
 ) -> bool:
     print(f"\n→ pick: {grasp.description}  (from {PICK_FROM})")
     if PICK_FROM == "microwave":
-        entry_xy = entry_xy_for(grasp.grasp_pose.translation[:2])
+        # Entry XY anchored on the pregrasp (not the grasp). For an
+        # untilted hook grasp these are equal; the abstraction matters
+        # for any future tilted grasp variant.
+        pregrasp = offset_along_tool_z(grasp.grasp_pose, grasp.pregrasp_offset)
+        entry_xy = entry_xy_for(pregrasp.translation[:2])
         pick_result = pick_from_box(
             arm, grasp, entry_xy, MICROWAVE_ENTRY_Z, config
         )
@@ -229,7 +295,9 @@ def run_on_arm(
 
     print(f"\n→ place @ {place_pose.translation}  (to {PLACE_TO})")
     if PLACE_TO == "microwave":
-        entry_xy = entry_xy_for(place_pose.translation[:2])
+        # See note in the pick branch — anchor entry XY on the preplace.
+        preplace = offset_along_tool_z(place_pose, config.preplace_offset)
+        entry_xy = entry_xy_for(preplace.translation[:2])
         place_result = place_into_box(
             arm, place_pose, entry_xy, MICROWAVE_ENTRY_Z, config
         )

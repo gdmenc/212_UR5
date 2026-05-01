@@ -114,8 +114,8 @@ def pick_from_box(
     when grasp_pose is inside a box. Instead this routes:
 
         transit_z → (entry_xy, transit_z) → (entry_xy, entry_z)
-                  → (target_xy, entry_z) → grasp_pose
-                  → close → (target_xy, entry_z) → (entry_xy, entry_z)
+                  → pregrasp → grasp_pose
+                  → close → pregrasp → (entry_xy, entry_z)
                   → (entry_xy, transit_z)
 
     so the gripper stays below the ceiling while inside the box, then
@@ -123,19 +123,21 @@ def pick_from_box(
 
     ``entry_xy`` is the task-frame XY OUTSIDE the box where the descent
     from transit_z to entry_z happens — typically a few cm beyond the
-    door plane, with the same Y as the target. ``entry_z`` is the
-    constrained altitude we traverse at inside the box; must clear both
-    the box floor and any objects on it, and be below the ceiling minus
-    wrist clearance.
+    door plane on the same axis the cavity opens along (e.g. for a
+    -Y-facing microwave door: same X as the target, Y a few cm below
+    the door plane). ``entry_z`` is the OUTSIDE-the-door descent
+    altitude only — it is NOT the in-cavity transit altitude. Once
+    inside the cavity the gripper goes to ``pregrasp`` (which is
+    ``offset_along_tool_z(grasp_pose, grasp.pregrasp_offset)``), so the
+    final descent to grasp_pose is a pure tool +Z move — the same
+    final approach as the standard ``pick``.
 
     The approach orientation is taken from ``grasp.grasp_pose`` and is
     held constant from the entry pose all the way through the box, so
     the gripper does not rotate inside the cavity.
 
     Caller is responsible for choosing a grasp angle that puts the
-    forearm pointing back through the door. The pregrasp_offset on the
-    grasp is NOT used here — the (target_xy, entry_z) waypoint replaces
-    the conventional pregrasp."""
+    forearm pointing back through the door."""
     if config.transit_z is None:
         raise ValueError(
             "config.transit_z is unset — set it from measurements before calling pick_from_box()."
@@ -144,17 +146,13 @@ def pick_from_box(
         raise ValueError(f"arm {arm.name!r} has no gripper attached.")
 
     grasp_pose = grasp.grasp_pose
-    target_xy = grasp_pose.translation[:2]
     entry_xy = np.asarray(entry_xy, dtype=float).reshape(2)
 
     entry_pose = Pose(
         translation=np.array([entry_xy[0], entry_xy[1], entry_z]),
         rotation=grasp_pose.rotation,
     )
-    above_target_at_entry_z = Pose(
-        translation=np.array([target_xy[0], target_xy[1], entry_z]),
-        rotation=grasp_pose.rotation,
-    )
+    pregrasp = offset_along_tool_z(grasp_pose, grasp.pregrasp_offset)
     transit_over_entry = pose_at_altitude(entry_pose, config.transit_z)
 
     # 1. Lift to transit altitude (task frame).
@@ -174,11 +172,15 @@ def pick_from_box(
     arm.gripper.set_speed_pct(config.gripper_open_speed_pct)
     arm.gripper.prepare_for_grasp(target_aperture_mm=config.release_aperture_mm)
 
-    # 4. Translate INTO the box at entry_z, holding orientation.
-    approach_to(arm, above_target_at_entry_z,
-                config.approach_speed, config.approach_accel)
+    # 4. Move from the OUTSIDE-the-door entry pose to the pregrasp
+    # (along tool -Z from grasp_pose). One moveL — combines lateral
+    # motion through the door with any vertical adjustment from
+    # entry_z to pregrasp_z. Orientation held constant.
+    approach_to(arm, pregrasp, config.approach_speed, config.approach_accel)
 
-    # 5. Final descent to grasp pose.
+    # 5. Final descent to grasp pose. With step 4 landing at pregrasp,
+    # this is a pure tool +Z move — the same final approach as the
+    # standard pick().
     approach_to(arm, grasp_pose, config.approach_speed, config.approach_accel)
 
     # 6. Close gripper.
@@ -186,8 +188,7 @@ def pick_from_box(
     held = arm.gripper.grasp(force=grasp.grasp_force)
     if not held:
         # Failure path: retrace the entry sequence.
-        retract_to(arm, above_target_at_entry_z,
-                   config.retract_speed, config.retract_accel)
+        retract_to(arm, pregrasp, config.retract_speed, config.retract_accel)
         retract_to(arm, entry_pose, config.retract_speed, config.retract_accel)
         retract_to(arm, transit_over_entry,
                    config.retract_speed, config.retract_accel)
@@ -195,11 +196,11 @@ def pick_from_box(
                           reason=f"grasp did not detect object ({grasp.description})",
                           grasp=grasp)
 
-    # 7. Lift back to entry_z above the grasp location.
-    retract_to(arm, above_target_at_entry_z,
-               config.retract_speed, config.retract_accel)
+    # 7. Lift along tool -Z back to pregrasp.
+    retract_to(arm, pregrasp, config.retract_speed, config.retract_accel)
 
-    # 8. Translate OUT of the box at entry_z.
+    # 8. Move from pregrasp back out to the entry pose (lateral exit
+    # plus any Z adjustment back to entry_z).
     retract_to(arm, entry_pose, config.retract_speed, config.retract_accel)
 
     # 9. Ascend to transit_z (above the entry XY, outside the box).

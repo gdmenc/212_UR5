@@ -43,11 +43,15 @@ helpers.
 
 Approach angle
 --------------
-The 2F-85 closes along tool +Y. ``GRASP_ANGLE_RAD = -π/2`` puts the
-fingers' close axis along task +X / -X (radial across the rim). Pick
-the angle that orients the wrist along -X so the forearm exits back
-through the -X microwave door. (``plate_rim_grasp_edge`` rotates the
-TCP yaw by ``angle_rad + π``, see ``grasps/plate.py``.)
+The 2F-85 closes along tool +Y. ``plate_rim_grasp_edge`` rotates the
+TCP yaw by ``angle_rad + π``, so picking the rim angle orients the
+wrist on the OPPOSITE side of the plate. The microwave door faces
+task -Y, so for a microwave-side leg the wrist should sit on the +Y
+side of the plate (forearm exits back through the -Y door). The user-
+tuned ``PLACE_ANGLE_RAD = -0.88 rad`` (~-50°) places the wrist at
+~+130° around the plate from center, which is mostly +Y from the
+plate's center — consistent with -Y door exit. Re-tune if door
+geometry changes.
 
 Running
 -------
@@ -76,19 +80,22 @@ from ..moves import transit_xy
 from ..pick import pick, pick_from_box
 from ..place import place, place_into_box
 from ..session import default_session
-from ..util.poses import Pose
+from ..util.poses import Pose, offset_along_tool_z
 
 
 # --- Tunables --------------------------------------------------------------
-
 PICK_FROM: Literal["outside", "microwave"] = "outside"
 PLACE_TO: Literal["outside", "microwave"] = "microwave"
+# PICK_FROM: Literal["outside", "microwave"] = "microwave"
+# PLACE_TO: Literal["outside", "microwave"] = "outside"
 
 # Free-standing plate poses (used when the corresponding side is "outside").
 # 0.025 m is the height of the plate rim that is reasonable for pickup /
 # setdown — same convention as ``pick_place_plate.py``.
+
+# These are the same given these are the outside poses to set these plates down
 PLATE_PICK_POSE_TASK = Pose(translation=[0.295521, -0.1, 0.01])
-PLATE_PLACE_POSE_TASK = Pose(translation=[-0.25, 0.5, 0.09])
+PLATE_PLACE_POSE_TASK = Pose(translation=[0.295521, -0.1, 0.01])
 
 # Intermediate waypoint between pick and place. Z is ignored —
 # transit_z sets the carry altitude. Picked at a Cartesian location
@@ -106,8 +113,11 @@ pick→entry swing."""
 # exits back through the -X microwave door for any microwave-side leg.
 # 2F-85 closes along tool +Y, so the rim-radial axis is tool +X. With
 # ``plate_rim_grasp_edge`` the TCP yaw = angle_rad + π.
+
 GRASP_ANGLE_RAD = 0.0
-PLACE_ANGLE_RAD = -np.radians(51)  # ~-50.6° — same as the non-microwave plate task
+PLACE_ANGLE_RAD = -np.radians(51)
+# GRASP_ANGLE_RAD = -np.radians(51)
+# PLACE_ANGLE_RAD = 0 # ~-50.6° — same as the non-microwave plate task
 
 # Constrained altitude inside the cavity. Plate on tray sits at task z
 # ~10 cm (8 + 2 cm rim). Top of plate rim ~ 11 cm. 14 cm gives ~3 cm
@@ -118,15 +128,15 @@ PLACE_ANGLE_RAD = -np.radians(51)  # ~-50.6° — same as the non-microwave plat
 MICROWAVE_ENTRY_Z = 0.13
 
 # Plate center at task z when sitting on tray = tray + plate rim height.
-MICROWAVE_PLATE_Z = MICROWAVE_FLOOR_Z + PLATE_RIM_HEIGHT  # 0.10 m
+MICROWAVE_PLATE_Z = MICROWAVE_FLOOR_Z + PLATE_RIM_HEIGHT - 0.03  # 0.10 m
 
 ARM = "ur_right"
 
 CONFIG = PickPlaceConfig(
-    transit_z=0.3,
+    transit_z=0.2,
     place_use_contact_descent=False,
-    transit_speed=0.15,
-    transit_accel=0.3,
+    transit_speed=0.1,
+    transit_accel=0.2,
 
     # 25 mm release aperture — clears the plate rim but keeps fingers
     # narrow enough to stay inside the cavity. Same value as the
@@ -218,10 +228,14 @@ def _print_plan(grasp, place_pose: Pose) -> None:
     if PICK_FROM == "microwave" or PLACE_TO == "microwave":
         print(f"  Microwave entry Z : {MICROWAVE_ENTRY_Z} m")
         if PICK_FROM == "microwave":
-            xy = entry_xy_for(grasp.grasp_pose.translation[:2])
+            pregrasp = offset_along_tool_z(grasp.grasp_pose, grasp.pregrasp_offset)
+            xy = entry_xy_for(pregrasp.translation[:2])
+            print(f"  Pregrasp XY       : {pregrasp.translation[:2]}")
             print(f"  Entry XY (pick)   : {xy}")
         if PLACE_TO == "microwave":
-            xy = entry_xy_for(place_pose.translation[:2])
+            preplace = offset_along_tool_z(place_pose, CONFIG.preplace_offset)
+            xy = entry_xy_for(preplace.translation[:2])
+            print(f"  Preplace XY       : {preplace.translation[:2]}")
             print(f"  Entry XY (place)  : {xy}")
     print("=" * 60)
     _check_wrist_clearance()
@@ -237,7 +251,12 @@ def run_on_arm(
 ) -> bool:
     print(f"\n→ pick: {grasp.description}  (from {PICK_FROM})")
     if PICK_FROM == "microwave":
-        entry_xy = entry_xy_for(grasp.grasp_pose.translation[:2])
+        # Entry XY is set on the pregrasp's XY (not the grasp's). For
+        # tilted grasps like plate_rim_grasp_edge the pregrasp is offset
+        # several cm radially-outward from the grasp; using the grasp's
+        # XY would force a sideways jog inside the cavity.
+        pregrasp = offset_along_tool_z(grasp.grasp_pose, grasp.pregrasp_offset)
+        entry_xy = entry_xy_for(pregrasp.translation[:2])
         pick_result = pick_from_box(
             arm, grasp, entry_xy, MICROWAVE_ENTRY_Z, config
         )
@@ -262,7 +281,10 @@ def run_on_arm(
 
     print(f"\n→ place @ {place_pose.translation}  (to {PLACE_TO})")
     if PLACE_TO == "microwave":
-        entry_xy = entry_xy_for(place_pose.translation[:2])
+        # See note in the pick branch — anchor entry XY on the preplace,
+        # not the place pose, so the lateral entry is a pure +Y move.
+        preplace = offset_along_tool_z(place_pose, config.preplace_offset)
+        entry_xy = entry_xy_for(preplace.translation[:2])
         place_result = place_into_box(
             arm, place_pose, entry_xy, MICROWAVE_ENTRY_Z, config
         )
