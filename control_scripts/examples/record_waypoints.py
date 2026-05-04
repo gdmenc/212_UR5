@@ -115,10 +115,10 @@ def _print_paste_snippets(snapshots: List[dict]) -> None:
 
     print("\n# TaskWaypoint(...) entries — for move_l steps")
     for s in snapshots:
-        t = s["task_pose"]["translation"]
-        r = s["task_pose"]["rotvec"]
-        xyz = ", ".join(f"{v:+.4f}" for v in t)
-        rvec = ", ".join(f"{v:+.4f}" for v in r)
+        t = s["base_pose"]["translation"]
+        r = s["base_pose"]["rotvec"]
+        xyz = " ".join(f"{v:+.4f}" for v in t)
+        rvec = " ".join(f"{v:+.4f}" for v in r)
         print(f'    "{s["name"]}": TaskWaypoint("{s["name"]}", '
               f'xyz=[{xyz}], rotvec=[{rvec}]),')
     print()
