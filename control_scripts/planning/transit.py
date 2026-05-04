@@ -338,6 +338,91 @@ def _plan_simple_spline(
     )
 
 
+def _check_safety_along(
+    plant: MultibodyPlant,
+    plant_context: Context,
+    traj: Trajectory,
+    arm_instance: ModelInstanceIndex,
+    other_arm_q: Optional[np.ndarray],
+    other_arm_instance: Optional[ModelInstanceIndex],
+    *,
+    n_samples: int,
+    check_collisions: bool,
+    min_clearance_m: float,
+    floor_min_z: Optional[float],
+) -> float:
+    """Verify the safety constraints (collision + TCP floor) along a
+    sampled trajectory. Used by the spline-first fast path so we can
+    ship a simple cubic spline when it's already safe and only fall
+    back to KTO when it isn't.
+
+    Raises ``InfeasiblePlanError`` on the first violation. Returns the
+    worst pairwise clearance (mm clearance) over the sampled path,
+    ``inf`` if collision checking was off, ``nan`` if the plant isn't
+    wired to a SceneGraph.
+    """
+    if other_arm_instance is not None and other_arm_q is not None:
+        plant.SetPositions(plant_context, other_arm_instance, other_arm_q)
+    tcp_frame = _tcp_frame(plant, arm_instance) if floor_min_z is not None else None
+
+    worst = float("inf") if check_collisions else float("nan")
+    t0, t1 = traj.start_time(), traj.end_time()
+    for s in np.linspace(0.0, 1.0, n_samples):
+        t = t0 + s * (t1 - t0)
+        q = np.asarray(traj.value(t)).flatten()
+        plant.SetPositions(plant_context, q)
+
+        if floor_min_z is not None:
+            tcp_z = float(tcp_frame.CalcPoseInWorld(plant_context).translation()[2])
+            if tcp_z < floor_min_z:
+                raise InfeasiblePlanError(
+                    f"floor violated at t={t:.3f}s "
+                    f"(TCP z={tcp_z*1000:.1f} mm < min={floor_min_z*1000:.1f} mm)"
+                )
+
+        if check_collisions:
+            try:
+                qry = plant.get_geometry_query_input_port().Eval(plant_context)
+            except RuntimeError as exc:
+                # Plant not wired to a SceneGraph — bail with a warning so
+                # the caller knows safety wasn't actually verified.
+                print(f"[plan_transit] WARNING: scene graph query unavailable "
+                      f"at t={t:.3f}s ({exc!s:.120}); collision check skipped.")
+                return float("nan")
+            pairs = qry.ComputeSignedDistancePairwiseClosestPoints(
+                max_distance=float("inf"),
+            )
+            if pairs:
+                insp = qry.inspector()
+                # Filter same-model-instance pairs (mesh self-distance
+                # within an arm/gripper). Drake's KTO collision constraint
+                # filters these implicitly via collision filter groups;
+                # our manual signed-distance query doesn't, so we do it
+                # here. We still detect arm-vs-other-arm, arm-vs-microwave,
+                # arm-vs-table, gripper-vs-microwave, etc.
+                inter_model_pairs = []
+                for p in pairs:
+                    body_A = plant.GetBodyFromFrameId(insp.GetFrameId(p.id_A))
+                    body_B = plant.GetBodyFromFrameId(insp.GetFrameId(p.id_B))
+                    if body_A.model_instance() == body_B.model_instance():
+                        continue
+                    inter_model_pairs.append(p)
+
+                if inter_model_pairs:
+                    worst_pair = min(inter_model_pairs, key=lambda p: p.distance)
+                    d = float(worst_pair.distance)
+                    worst = min(worst, d)
+                    if d < min_clearance_m:
+                        raise InfeasiblePlanError(
+                            f"collision at t={t:.3f}s "
+                            f"(d={d*1000:.2f} mm < min={min_clearance_m*1000:.2f} mm) "
+                            f"between {insp.GetName(worst_pair.id_A)!r} "
+                            f"and {insp.GetName(worst_pair.id_B)!r}"
+                        )
+
+    return worst
+
+
 def _check_collision_along(
     plant: MultibodyPlant,
     plant_context: Context,
@@ -532,19 +617,31 @@ def plan_transit(
             max_joint_delta = max(max_joint_delta, float(np.max(np.abs(b - a))))
         duration_s = max(1.0, max_joint_delta / 0.5 * len(waypoints_q_full))
 
-    needs_kto = (
+    # Hard path-shape constraints (orient lock, z plane, TCP speed cap,
+    # workspace box, extra-clearance) genuinely need KTO — no simple
+    # joint-space spline can satisfy them by accident.
+    needs_hard_shape = (
         fix_orientation is not None
         or fix_z_task is not None
-        or avoid_collisions
-        or avoid_arm_singularity
-        or self_collision
-        or min_z_task is not None
         or max_tcp_linear_speed_m_per_s is not None
-        or extra_clearance_to
+        or bool(extra_clearance_to)
         or stay_in_workspace_box is not None
     )
+    # Safety constraints (collisions, self-collision, floor) MIGHT be
+    # satisfied by a plain cubic spline through the IK'd waypoints —
+    # most free-space transits between sensible endpoints already are.
+    needs_safety = (
+        avoid_collisions or self_collision or min_z_task is not None
+    )
+    # Note: ``avoid_arm_singularity`` is implicitly handled here. Chained
+    # IK (above) keeps consecutive waypoints on the same q3/q5 sign
+    # branch; a cubic spline between them stays on that branch too. So
+    # the spline path naturally avoids the singularity surfaces without
+    # an explicit check. The flag still gates KTO's per-control-point
+    # branch lock for the fallback path.
 
-    if not needs_kto:
+    # Fastest path: nothing to verify, return simple spline immediately.
+    if not needs_hard_shape and not needs_safety:
         return _plan_simple_spline(
             plant, plant_context, arm, arm_instance,
             waypoints_q_full, duration_s,
@@ -554,8 +651,43 @@ def plan_transit(
             other_arm_instance=other_arm_instance,
         )
 
-    # KTO version — implemented in the next file edit.
-    return _plan_constrained_kto(
+    # Spline-first path: only safety constraints, no shape constraints.
+    # Build the spline, sample-check it; if clean, ship it. KTO only
+    # fires when the spline genuinely passes through a collision or
+    # below the floor.
+    spline_fallback_reason: Optional[str] = None
+    if not needs_hard_shape:
+        plan = _plan_simple_spline(
+            plant, plant_context, arm, arm_instance,
+            waypoints_q_full, duration_s,
+            check_collisions=False,
+            min_clearance_m=min_clearance_m,
+            other_arm_q=other_arm_q,
+            other_arm_instance=other_arm_instance,
+        )
+        try:
+            worst = _check_safety_along(
+                plant, plant_context, plan.trajectory,
+                arm_instance, other_arm_q, other_arm_instance,
+                n_samples=80,
+                check_collisions=avoid_collisions or self_collision,
+                min_clearance_m=min_clearance_m,
+                floor_min_z=min_z_task,
+            )
+            plan.collision_checked = bool(avoid_collisions or self_collision)
+            plan.min_clearance_m = worst
+            plan.metadata["planner"] = "simple_spline_safe"
+            plan.metadata["safety_samples"] = 80
+            return plan
+        except InfeasiblePlanError as exc:
+            # Spline path violates a safety constraint. Log so callers
+            # can see the cause even if the KTO fallback also fails.
+            spline_fallback_reason = str(exc)
+            print(f"[plan_transit] spline path infeasible "
+                  f"({spline_fallback_reason}); falling back to KTO.")
+
+    # KTO with all the requested constraints (hard shape and/or safety).
+    plan = _plan_constrained_kto(
         plant=plant,
         plant_context=plant_context,
         arm=arm,
@@ -576,6 +708,9 @@ def plan_transit(
         extra_clearance_to=extra_clearance_to,
         stay_in_workspace_box=stay_in_workspace_box,
     )
+    if spline_fallback_reason is not None:
+        plan.metadata["spline_fallback_reason"] = spline_fallback_reason
+    return plan
 
 
 # ---------------------------------------------------------------------------

@@ -47,14 +47,18 @@ from pydrake.multibody.plant import MultibodyPlant
 # in via ``plan_transit(current_q=...)`` when running offline.
 #
 # Pose chosen by FK+collision sweep against the planning scene
-# (table + vention + microwave + grippers): forearms parallel to the
-# operator-edge of the table, wrists tucked away from the operator
-# (task +y), TCPs beyond the ±0.45 m table x-edges and ~27 cm lower
-# than the previous left HOME. Both arms now mirror in y too — left
-# uses shoulder_pan = +70° (NOT just -sign of right's +130°) because
-# the asymmetric base R matrices mean naive sign-flip doesn't mirror.
-SIM_HOME_Q_LEFT = np.radians([+70.0, -90.0, -90.0, -90.0, -90.0, 0.0])
-SIM_HOME_Q_RIGHT = np.radians([130.0, -90.0, -90.0, -90.0, -90.0, 0.0])
+# (table + vention + microwave + grippers, with the URDF welded at the
+# UR controller's ``base`` frame — see scene/arms.py): forearms parallel
+# to the operator-edge of the table, wrists tucked away from the
+# operator (task +y), TCPs at task xyz ≈ (±0.93, *, ~0.4) — beyond the
+# ±0.45 m table x-edges and well above the floor. Mirror-symmetric in x.
+#
+# Previous values [+70, ...] / [+130, ...] were tuned against the old
+# (incorrect) base_link weld and put the right TCP below the floor
+# (z ≈ -0.014 m) once the welding was fixed. These new shoulder_pans
+# are the 180°-shifted equivalents under the corrected base orientation.
+SIM_HOME_Q_LEFT = np.radians([-110.0, -90.0, -90.0, -90.0, -90.0, 0.0])
+SIM_HOME_Q_RIGHT = np.radians([ -50.0, -90.0, -90.0, -90.0, -90.0, 0.0])
 
 HOME_Q: Dict[str, Optional[np.ndarray]] = {
     "ur_left": SIM_HOME_Q_LEFT,
