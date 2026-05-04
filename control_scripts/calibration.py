@@ -72,7 +72,12 @@ def _build_X_base_task(
 # Left arm (ur_left, 192.168.1.101, hook gripper)
 # ---------------------------------------------------------------------------
 _LEFT_DX_T = 0.090 / 2 + 0.010 + 0.110  # half vertical beam + plate + base-to-beam
-_LEFT_DY_T = 0.225 / 2 + 0.540 / 2      # half mounting plate + half table depth
+_LEFT_DY_T = 0.220 / 2 + 0.550 / 2      # half vention/mount plate + half clear-area depth
+# ^ Task origin is the **centre of the 55 cm "clear" portion of the
+# table** — the part not covered by the Vention stand. With a 77 cm
+# total table and 22 cm Vention coverage, that puts the arm base at
+# 0.220/2 (vention half-width) + 0.550/2 (clear-area half-width) =
+# 38.5 cm in front of the task origin (operator side).
 _LEFT_DZ_T = -0.753                     # task origin is 0.753 m BELOW base along task z
 
 _LEFT_R = np.array([
@@ -90,7 +95,7 @@ X_LEFT_BASE_TASK: Pose = _build_X_base_task(
 # Right arm (ur_right, 192.168.1.102, Robotiq 2F-85)
 # ---------------------------------------------------------------------------
 _RIGHT_DX_T = -(0.090 / 2 + 0.010 + 0.110)  # sign flip — right arm is on the +x side
-_RIGHT_DY_T = 0.225 / 2 + 0.540 / 2
+_RIGHT_DY_T = 0.220 / 2 + 0.550 / 2          # see _LEFT_DY_T comment
 _RIGHT_DZ_T = -0.753
 
 _RIGHT_R = np.array([

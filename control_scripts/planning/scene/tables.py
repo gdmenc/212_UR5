@@ -37,6 +37,16 @@ _TABLE_H = 0.740   # floor → top surface          — placeholder until measur
 
 _LEG_INSET = 0.040 # legs offset inwards from the slab edges
 
+# The task origin is the centre of the **55 cm clear portion** of the
+# table (the part not covered by the Vention stand). The geometric
+# centre of the full 77 cm table is offset by (77-55)/2 = 11 cm toward
+# the operator (-y). This default lines the box up with that convention
+# so the calibration constants in ``calibration.py`` (which place the
+# arm bases at task y = -0.385) land correctly above the Vention end.
+_VENTION_COVERAGE_Y = 0.220
+_CLEAR_AREA_Y = _TOP_D - _VENTION_COVERAGE_Y         # = 0.55, lab-measured
+_TABLE_CENTRE_Y_TASK = -0.5 * (_TOP_D - _CLEAR_AREA_Y)   # = -0.11
+
 _TOP_COLOR = np.array([0.55, 0.40, 0.30, 1.0])
 _LEG_COLOR = np.array([0.30, 0.30, 0.30, 1.0])
 _NO_FRICTION = CoulombFriction(0.5, 0.5)
@@ -62,16 +72,20 @@ def add_workspace_table(
     plant: MultibodyPlant,
     *,
     name: str = "workspace_table",
-    top_centre_world: Tuple[float, float, float] = (0.0, 0.0, 0.0),
+    top_centre_world: Tuple[float, float, float] = (0.0, _TABLE_CENTRE_Y_TASK, 0.0),
     width_x: float = _TOP_W,
     depth_y: float = _TOP_D,
     height: float = _TABLE_H,
 ) -> TableHandles:
     """Add a 4-legged workspace table.
 
-    Default places the **top centre** at the origin of world frame
-    (which is the task frame — see ``planning/__init__.py``), so the
-    top *surface* is at z = 0 and legs extend downward.
+    Default places the table top so its top *surface* sits at world z=0
+    and the **clear-area centre** (not the full-table centre) is at the
+    task origin in xy. This matches the lab calibration convention —
+    see the ``_TABLE_CENTRE_Y_TASK`` derivation above. The full table
+    spans task y ∈ [−0.495, +0.275]; the Vention covers task y ∈
+    [−0.495, −0.275]; the clear area is task y ∈ [−0.275, +0.275],
+    centered on the task origin.
     """
     model_instance = plant.AddModelInstance(name)
     cx, cy, cz_top = top_centre_world
