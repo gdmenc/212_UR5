@@ -73,7 +73,9 @@ def _build_X_base_task(
 # ---------------------------------------------------------------------------
 _LEFT_DX_T = 0.090 / 2 + 0.010 + 0.110  # half vertical beam + plate + base-to-beam
 _LEFT_DY_T = 0.225 / 2 + 0.540 / 2      # half mounting plate + half table depth
-_LEFT_DZ_T = -0.753                     # task origin is 0.753 m BELOW base along task z
+_LEFT_DZ_T = -0.815                     # task origin is 0.815 m BELOW base along task z
+# -0.753 (original hand-measured) - 0.062 (correction from bowl perception 2026-05-03:
+#  bowl base on table was reading -0.062 m instead of 0; shifted task origin down)
 
 _LEFT_R = np.array([
     [ 0.707, 0, -0.707],

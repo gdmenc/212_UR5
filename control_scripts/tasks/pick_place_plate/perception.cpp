@@ -1,14 +1,17 @@
 /**
- * perception.cpp — Cup detection → task-frame position
- * Task: pick_place_cup
+ * perception.cpp — Plate detection → task-frame position
+ * Task: pick_place_plate
+ *
+ * Plate is not a COCO class; using class 45 (bowl) as proxy.
  *
  * Modes
  * -----
- *   default (preview)   detect cup, save annotated JPEG to --save-image path,
- *                       wait for user to press Enter in the terminal before exiting.
- *                       cv::imshow is NOT used because this binary runs under sudo
- *                       which blocks macOS window-server access.
- *   --headless          no image save, no pause, pure JSON stdout.  Used for
+ *   default (preview)   detect plate (via bowl proxy), save annotated JPEG
+ *                       to --save-image path, wait for user to press Enter
+ *                       in the terminal before exiting.
+ *                       cv::imshow is NOT used because this binary runs
+ *                       under sudo which blocks macOS window-server access.
+ *   --headless          no image save, no pause, pure JSON stdout. Used for
  *                       fully autonomous runs (--auto in Python).
  *
  * Args
@@ -22,8 +25,8 @@
  *
  * stdout — JSON:
  *   { "detected": bool, "confidence": float,
- *     "cup_pos_camera_m": [...], "cup_base_task_m": [...],
- *     "cup_rim_task_m": [...], "candidates": [...] }
+ *     "plate_pos_camera_m": [...], "plate_center_task_m": [...],
+ *     "plate_rim_task_m": [...], "candidates": [] }
  *
  * Build:
  *   cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build
@@ -56,17 +59,19 @@ static constexpr float  SCORE_THRESHOLD      = 0.25f;
 static constexpr float  NMS_THRESHOLD        = 0.45f;
 static constexpr float  CONFIDENCE_THRESHOLD = 0.25f;
 
-static constexpr int    COCO_CUP             = 41;
+// Plate is not a COCO class; using class 45 (bowl) as proxy.
+static constexpr int    COCO_PLATE_PROXY     = 45;
 static constexpr int    N_WARMUP             = 15;
 static constexpr int    N_FRAMES             = 10;  // accumulate over more frames for reliability
 
-static constexpr double CUP_RIM_OUTER_RADIUS_M = 0.044;  // measured: 88mm diameter
-static constexpr double CUP_HEIGHT_M            = 0.154;  // measured: 154mm total height
-static constexpr double CUP_PREGRASP_OFFSET     = 0.050;  // 5 cm along tool -Z
-static constexpr double CUP_GRASP_FORCE         = 15.0;   // N — light: thin rim
+// Plate geometry (mirrors control_scripts/grasps/plate.py).
+// The plate is flat on the table — ray-table intersection finds the center XY
+// exactly; Z position is fixed by the known rim height.
+static constexpr double PLATE_OUTER_RADIUS_M = 0.125;   // center to outer rim edge (m)
+static constexpr double PLATE_RIM_HEIGHT_M   = 0.020;   // rim top above table (m)
 
 // ---------------------------------------------------------------------------
-// YOLO detector (cup-only, headless)
+// YOLO detector (plate proxy via bowl class, headless)
 // ---------------------------------------------------------------------------
 
 enum class YOLOVersion { UNKNOWN, YOLOV5, YOLOV8_11 };
@@ -102,7 +107,7 @@ public:
         return detectVersion();
     }
 
-    // Returns true + fills best_conf/best_box if cup found in this frame.
+    // Returns true + fills best_conf/best_box if plate proxy (bowl class) found.
     bool runFrame(const cv::Mat& bgr, float conf_thr,
                   float& best_conf, cv::Rect& best_box)
     {
@@ -146,7 +151,7 @@ public:
     }
 
     // Verify the bounding-box has valid depth in a plausible range.
-    // Used only as a sanity / false-positive filter — NOT for position.
+    // Used as a sanity / false-positive filter only — NOT for position.
     bool depthSanity(const cv::Rect& box, const rs2::depth_frame& depth,
                      float min_m = 0.20f, float max_m = 3.0f) const
     {
@@ -168,16 +173,15 @@ public:
     // Ray-plane intersection: trace the camera ray through the bbox centre
     // until it hits the table plane (Z = 0 in task frame).
     //
-    // This avoids all depth-based Z errors: the camera looks into the cup
-    // from above so depth gives a noisy interior reading.  Since the cup
-    // always rests on the table we set base Z = 0 directly and derive rim
-    // Z from the known cup height.  XY accuracy comes from the camera
-    // ray direction (calibration-quality) rather than noisy depth.
+    // The plate lies flat on the table, so the table-plane intersection
+    // finds the plate center XY directly. Z = 0 is set exactly (the plate
+    // itself is ~2.5 mm thick but we treat it as resting on Z = 0), and
+    // the rim height is added separately in the caller.
     static bool rayTableIntersect(
         const cv::Rect& box,
         const rs2_intrinsics& intr,
         const Eigen::Matrix4d& T_task_cam,
-        Eigen::Vector3d& out_base_task)
+        Eigen::Vector3d& out_center_task)
     {
         int cx = box.x + box.width / 2;
         int cy = box.y + box.height / 2;
@@ -198,8 +202,8 @@ public:
         double lam = -t.z() / ray_task.z();
         if (lam < 0.0) return false;  // intersection behind camera
 
-        out_base_task = t + lam * ray_task;
-        out_base_task.z() = 0.0;  // snap exactly to table surface
+        out_center_task = t + lam * ray_task;
+        out_center_task.z() = 0.0;  // snap exactly to table surface
         return true;
     }
 
@@ -233,7 +237,7 @@ private:
             cv::Point cl; double ms;
             cv::minMaxLoc(sc, nullptr, &ms, nullptr, &cl);
             float conf = obj * (float)ms;
-            if (cl.x != COCO_CUP || conf < thr) continue;
+            if (cl.x != COCO_PLATE_PROXY || conf < thr) continue;
             float x=data[0],y=data[1],w=data[2],h=data[3];
             boxes.emplace_back((int)((x-w/2)*xf),(int)((y-h/2)*yf),(int)(w*xf),(int)(h*yf));
             confs.push_back(conf);
@@ -252,7 +256,7 @@ private:
             cv::Point cl; double ms;
             cv::minMaxLoc(sc, nullptr, &ms, nullptr, &cl);
             float conf = (float)ms;
-            if (cl.x != COCO_CUP || conf < thr) continue;
+            if (cl.x != COCO_PLATE_PROXY || conf < thr) continue;
             float x=data[0],y=data[1],w=data[2],h=data[3];
             boxes.emplace_back((int)((x-w/2)*xf),(int)((y-h/2)*yf),(int)(w*xf),(int)(h*yf));
             confs.push_back(conf);
@@ -272,16 +276,16 @@ static std::string v3(const Eigen::Vector3d& v) {
 
 static void emit_json(std::ostream& os, bool detected, float conf,
                       const Eigen::Vector3d& pos_cam,
-                      const Eigen::Vector3d& cup_base,
-                      const Eigen::Vector3d& cup_rim)
+                      const Eigen::Vector3d& plate_center,
+                      const Eigen::Vector3d& plate_rim)
 {
     os<<"{\n";
     os<<"  \"detected\": "<<(detected?"true":"false")<<",\n";
     if (!detected) { os<<"  \"candidates\": []\n}\n"; return; }
     os<<"  \"confidence\": "<<conf<<",\n";
-    os<<"  \"cup_pos_camera_m\": "<<v3(pos_cam)<<",\n";
-    os<<"  \"cup_base_task_m\": " <<v3(cup_base)<<",\n";
-    os<<"  \"cup_rim_task_m\": "  <<v3(cup_rim)<<",\n";
+    os<<"  \"plate_pos_camera_m\": "   <<v3(pos_cam)    <<",\n";
+    os<<"  \"plate_center_task_m\": "  <<v3(plate_center)<<",\n";
+    os<<"  \"plate_rim_task_m\": "     <<v3(plate_rim)   <<",\n";
     os<<"  \"candidates\": []\n}\n";
 }
 
@@ -292,7 +296,7 @@ static void emit_json(std::ostream& os, bool detected, float conf,
 static void save_annotated_frame(
     const cv::Mat& bgr,
     const cv::Rect& box, float conf,
-    const Eigen::Vector3d& base_task,
+    const Eigen::Vector3d& center_task,
     const Eigen::Vector3d& rim_task,
     bool detected,
     const std::string& save_path)
@@ -310,7 +314,7 @@ static void save_annotated_frame(
         cv::rectangle(disp, box, cv::Scalar(0,255,0), 2);
 
         std::ostringstream ct; ct<<std::fixed; ct.precision(2);
-        ct<<"cup  conf="<<conf;
+        ct<<"plate  conf="<<conf<<" (via bowl proxy)";
         cv::putText(disp, ct.str(),
                     cv::Point(box.x, std::max(0, box.y-8)),
                     cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(0,255,0), 2);
@@ -318,13 +322,13 @@ static void save_annotated_frame(
         std::ostringstream b, r;
         b<<std::fixed; b.precision(3);
         r<<std::fixed; r.precision(3);
-        b<<"base_task [m]: "<<base_task[0]<<", "<<base_task[1]<<", "<<base_task[2];
-        r<<"rim_task  [m]: "<<rim_task[0] <<", "<<rim_task[1] <<", "<<rim_task[2];
+        b<<"center_task [m]: "<<center_task[0]<<", "<<center_task[1]<<", "<<center_task[2];
+        r<<"rim_task    [m]: "<<rim_task[0]   <<", "<<rim_task[1]   <<", "<<rim_task[2];
         put(b.str(), 0);
         put(r.str(), 1);
-        put("CUP DETECTED", 2, cv::Scalar(0,200,255));
+        put("PLATE DETECTED", 2, cv::Scalar(0,200,255));
     } else {
-        put("No cup detected", 0, cv::Scalar(0,80,255));
+        put("No plate detected", 0, cv::Scalar(0,80,255));
     }
 
     if (!cv::imwrite(save_path, disp))
@@ -340,7 +344,7 @@ static void save_annotated_frame(
 int main(int argc, char** argv) {
     std::string model_path   = "../../../../212_Perception/build/yolo11n.onnx";
     std::string classes_path = "../../../../212_Perception/build/coco-classes.txt";
-    std::string save_image   = "/tmp/cup_detection_preview.jpg";
+    std::string save_image   = "/tmp/plate_detection_preview.jpg";
     float conf_threshold     = 0.40f;
     bool  headless           = false;
 
@@ -364,6 +368,7 @@ int main(int argc, char** argv) {
 
     std::cerr<<"[INFO] T_task_camera:\n"<<T_task_cam<<"\n";
     std::cerr<<"[INFO] Mode: "<<(headless?"headless":"preview (saves JPEG)")<<"\n";
+    std::cerr<<"[INFO] Plate detection uses COCO class 45 (bowl) as proxy.\n";
 
     YOLODetector detector;
     if (!detector.loadModel(model_path, classes_path)) return 1;
@@ -424,38 +429,39 @@ int main(int argc, char** argv) {
     }
     pipe.stop();
 
-    // Compute cup position via ray-plane intersection (table Z = 0).
-    // We do NOT use depth for position — instead we project the camera ray
-    // through the bounding-box centre until it hits the table plane; that
-    // gives the cup base XY exactly, and Z = 0.  Rim Z = CUP_HEIGHT_M.
-    Eigen::Vector3d cup_base_task, cup_rim_task;
+    // Compute plate center position via ray-plane intersection (table Z = 0).
+    // The plate is flat on the table so the table-plane intersection gives the
+    // plate center XY exactly. Rim height is a known constant added to Z.
+    Eigen eigen_unused;  // suppress unused warning
+    (void)eigen_unused;
+    Eigen::Vector3d plate_center_task, plate_rim_task;
     Eigen::Vector3d pos_cam(0,0,0);  // kept for JSON completeness only
     if (found) {
-        std::cerr<<"[INFO] Cup detected  conf="<<best_conf
+        std::cerr<<"[INFO] Plate detected  conf="<<best_conf
                  <<"  bbox=["<<best_box.x<<","<<best_box.y
                  <<" "<<best_box.width<<"x"<<best_box.height<<"]\n";
 
-        if (!YOLODetector::rayTableIntersect(best_box, intr, T_task_cam, cup_base_task)) {
+        if (!YOLODetector::rayTableIntersect(best_box, intr, T_task_cam, plate_center_task)) {
             std::cerr<<"[WARN] Ray-table intersection failed (camera looking up?). "
-                     <<"Falling back to no detection.\n";
+                     <<"Falling back to no-detection.\n";
             found = false;
         } else {
-            cup_rim_task    = cup_base_task;
-            cup_rim_task.z() = CUP_HEIGHT_M;
-            std::cerr<<"[INFO] Cup base task ("<<cup_base_task.transpose()<<") m\n";
-            std::cerr<<"[INFO] Cup rim  task ("<<cup_rim_task.transpose()<<") m\n";
+            plate_rim_task    = plate_center_task;
+            plate_rim_task.z() = PLATE_RIM_HEIGHT_M;
+            std::cerr<<"[INFO] Plate center task ("<<plate_center_task.transpose()<<") m\n";
+            std::cerr<<"[INFO] Plate rim    task ("<<plate_rim_task.transpose()<<") m\n";
         }
     } else {
-        std::cerr<<"[WARN] No cup detected (conf≥"<<conf_threshold<<").\n";
+        std::cerr<<"[WARN] No plate detected (conf>="<<conf_threshold<<").\n";
     }
 
     // Save annotated JPEG (unless headless)
     if (!headless && !best_frame.empty()) {
         save_annotated_frame(best_frame, best_box, best_conf,
-                             cup_base_task, cup_rim_task, found, save_image);
+                             plate_center_task, plate_rim_task, found, save_image);
     }
 
     // Emit JSON
-    emit_json(std::cout, found, best_conf, pos_cam, cup_base_task, cup_rim_task);
+    emit_json(std::cout, found, best_conf, pos_cam, plate_center_task, plate_rim_task);
     return 0;
 }

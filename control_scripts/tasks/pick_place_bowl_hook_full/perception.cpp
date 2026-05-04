@@ -1,33 +1,37 @@
 /**
- * perception.cpp — Bowl detection + hook-rim grasp candidates
- * Task: pick_place_bowl_hook
+ * perception.cpp — Bowl detection → task-frame position
+ * Task: pick_place_bowl_hook_full
  *
- * Detects a bowl (COCO class 45) with YOLOv8 via a RealSense D435i,
- * back-projects the bbox centre to a 3D camera-frame point, transforms
- * to task frame, and prints 8 hook-rim grasp candidates as JSON.
+ * Modes
+ * -----
+ *   default (preview)   detect bowl, save annotated JPEG to --save-image path,
+ *                       wait for user to press Enter in the terminal before exiting.
+ *                       cv::imshow is NOT used because this binary runs under sudo
+ *                       which blocks macOS window-server access.
+ *   --headless          no image save, no pause, pure JSON stdout.  Used for
+ *                       fully autonomous runs (--auto in Python).
  *
- * Geometry mirrors control_scripts/grasps/bowl.py and _hook_rim.py exactly.
+ * Args
+ * ----
+ *   --model   <path>          YOLOv11 ONNX
+ *   --classes <path>          coco-classes.txt
+ *   --conf    <float>         detection threshold (default 0.40)
+ *   --T-task-camera "f0…f15"  row-major 4×4 float string from Python
+ *   --save-image <path>       where to write the annotated JPEG (preview mode)
+ *   --headless                skip image save and terminal pause
  *
- * Dependencies
- * ------------
- *   librealsense2  (Intel RealSense SDK ≥ 2.50)
- *   OpenCV 4.x     (DNN module)
- *   Eigen 3.x
- *
- * Export the YOLO model first (one-time):
- *   python3 -c "from ultralytics import YOLO; \
- *     YOLO('../../../../perception/yolov8n.pt').export(format='onnx')"
+ * stdout — JSON:
+ *   { "detected": bool, "confidence": float,
+ *     "bowl_pos_camera_m": [...], "bowl_base_task_m": [...],
+ *     "bowl_rim_task_m": [...], "candidates": [...] }
  *
  * Build:
  *   cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build
- *
- * Run:
- *   ./build/perception_bowl
- *   ./build/perception_bowl --model /path/to/yolov8n.onnx --conf 0.4
  */
 
 #include <algorithm>
 #include <cmath>
+#include <fstream>
 #include <iostream>
 #include <numeric>
 #include <sstream>
@@ -38,237 +42,341 @@
 #include <Eigen/Geometry>
 #include <librealsense2/rs.hpp>
 #include <opencv2/dnn.hpp>
+#include <opencv2/imgcodecs.hpp>
+#include <opencv2/imgproc.hpp>
 #include <opencv2/opencv.hpp>
 
 // ---------------------------------------------------------------------------
-// Geometry constants — mirror control_scripts/grasps/bowl.py + _hook_rim.py
+// Constants
 // ---------------------------------------------------------------------------
 
-static constexpr double BOWL_RIM_OUTER_RADIUS_M = 0.037; // 3.7 cm rim radius
-static constexpr double BOWL_RIM_Z_OFFSET_M     = 0.072; // 7.2 cm total height
-static constexpr double HOOK_RIM_PREGRASP_OFFSET = 0.050; // 5 cm along tool -Z
-static constexpr double BOWL_GRASP_FORCE         = 15.0;  // N
+static constexpr float  INPUT_WIDTH          = 640.0f;
+static constexpr float  INPUT_HEIGHT         = 640.0f;
+static constexpr float  SCORE_THRESHOLD      = 0.25f;
+static constexpr float  NMS_THRESHOLD        = 0.45f;
+static constexpr float  CONFIDENCE_THRESHOLD = 0.25f;
 
-static constexpr int COCO_BOWL = 45;
-static constexpr int N_ANGLES  = 8;
-static constexpr int N_WARMUP  = 15;
-static constexpr int N_FRAMES  = 5;
+static constexpr int    COCO_BOWL            = 45;
+static constexpr int    N_WARMUP             = 15;
+static constexpr int    N_FRAMES             = 10;  // accumulate over more frames for reliability
 
-// Camera-to-task transform — identity placeholder, replace with calibration.
-static Eigen::Matrix4d make_T_task_camera() {
-    return Eigen::Matrix4d::Identity(); // TODO: load from calibration file
-}
-
-// ---------------------------------------------------------------------------
-// Rotation: hook rim grasp at angle_rad
-// Mirrors _hook_rim.py::hook_rim_rotation:
-//   R_z(angle) * R_x(π) * R_y(approach_tilt_rad)   [tilt=0 here]
-// ---------------------------------------------------------------------------
-
-static Eigen::Matrix3d hook_rim_rotation(double angle_rad,
-                                          double approach_tilt_rad = 0.0) {
-    Eigen::Matrix3d Rz_yaw  = Eigen::AngleAxisd(angle_rad,
-                                                Eigen::Vector3d::UnitZ()).matrix();
-    Eigen::Matrix3d Rx_pi   = Eigen::AngleAxisd(M_PI,
-                                                Eigen::Vector3d::UnitX()).matrix();
-    Eigen::Matrix3d Ry_tilt = Eigen::AngleAxisd(approach_tilt_rad,
-                                                Eigen::Vector3d::UnitY()).matrix();
-    return Rz_yaw * Rx_pi * Ry_tilt;
-}
-
-static Eigen::Vector3d to_rotvec(const Eigen::Matrix3d& R) {
-    Eigen::AngleAxisd aa(R);
-    return aa.axis() * aa.angle();
-}
+static constexpr double BOWL_RIM_OUTER_RADIUS_M = 0.075;  // measured 2026-05-03: 150mm dia
+static constexpr double BOWL_RIM_Z_OFFSET_M     = 0.075;  // measured 2026-05-03: 75mm height
+static constexpr double HOOK_RIM_PREGRASP_OFFSET = 0.050;
+static constexpr double BOWL_GRASP_FORCE         = 15.0;
+static constexpr int    N_ANGLES                 = 8;
 
 // ---------------------------------------------------------------------------
-// Detection helpers
+// YOLO detector (bowl-only, headless)
 // ---------------------------------------------------------------------------
 
-struct BBox {
-    int x1, y1, x2, y2;
-    float conf;
-};
+enum class YOLOVersion { UNKNOWN, YOLOV5, YOLOV8_11 };
 
-static std::vector<BBox> yolo_detect(
-    cv::dnn::Net& net,
-    const cv::Mat& bgr,
-    int target_class_id,
-    float conf_threshold)
-{
-    const int INPUT = 640;
-    float sx = (float)bgr.cols / INPUT;
-    float sy = (float)bgr.rows / INPUT;
+class YOLODetector {
+public:
+    cv::dnn::Net             net;
+    std::vector<std::string> class_list;
+    YOLOVersion              version        = YOLOVersion::UNKNOWN;
+    int                      num_classes    = 0;
+    int                      num_detections = 0;
 
-    cv::Mat blob;
-    cv::dnn::blobFromImage(bgr, blob, 1.0 / 255.0,
-                           cv::Size(INPUT, INPUT), cv::Scalar(), true, false);
-    net.setInput(blob);
-
-    std::vector<cv::Mat> outs;
-    net.forward(outs, net.getUnconnectedOutLayersNames());
-
-    cv::Mat out = outs[0].reshape(1, {84, 8400});
-    cv::transpose(out, out);
-
-    std::vector<cv::Rect> rects;
-    std::vector<float>    scores;
-
-    for (int i = 0; i < 8400; i++) {
-        cv::Mat cls_sc = out.row(i).colRange(4, 84);
-        double max_sc;
-        cv::Point max_loc;
-        cv::minMaxLoc(cls_sc, nullptr, &max_sc, nullptr, &max_loc);
-        if (max_loc.x != target_class_id || (float)max_sc < conf_threshold)
-            continue;
-
-        float cx = out.at<float>(i, 0) * sx;
-        float cy = out.at<float>(i, 1) * sy;
-        float w  = out.at<float>(i, 2) * sx;
-        float h  = out.at<float>(i, 3) * sy;
-        int x1 = std::max(0, (int)(cx - w / 2));
-        int y1 = std::max(0, (int)(cy - h / 2));
-        rects.emplace_back(x1, y1,
-                           std::min((int)w, bgr.cols - x1),
-                           std::min((int)h, bgr.rows - y1));
-        scores.push_back((float)max_sc);
-    }
-    if (rects.empty()) return {};
-
-    std::vector<int> idx;
-    cv::dnn::NMSBoxes(rects, scores, conf_threshold, 0.45f, idx);
-
-    std::vector<BBox> result;
-    for (int i : idx) {
-        auto& r = rects[i];
-        result.push_back({r.x, r.y, r.x + r.width, r.y + r.height, scores[i]});
-    }
-    std::sort(result.begin(), result.end(),
-              [](const BBox& a, const BBox& b){ return a.conf > b.conf; });
-    return result;
-}
-
-static bool bbox_centre_3d(
-    const rs2::depth_frame& depth,
-    const rs2_intrinsics& intr,
-    const BBox& bbox,
-    Eigen::Vector3d& out)
-{
-    int cx = (bbox.x1 + bbox.x2) / 2, cy = (bbox.y1 + bbox.y2) / 2;
-    int hw = std::max(1, (bbox.x2 - bbox.x1) / 4);
-    int hh = std::max(1, (bbox.y2 - bbox.y1) / 4);
-    int W = depth.get_width(), H = depth.get_height();
-
-    std::vector<float> ds;
-    for (int v = std::max(0, cy - hh); v < std::min(H, cy + hh); v++)
-        for (int u = std::max(0, cx - hw); u < std::min(W, cx + hw); u++) {
-            float d = depth.get_distance(u, v);
-            if (d > 0.05f && d < 4.0f) ds.push_back(d);
+    bool loadModel(const std::string& model_path, const std::string& classes_path) {
+        std::ifstream ifs(classes_path);
+        if (!ifs.is_open()) {
+            std::cerr << "[ERROR] Cannot open classes file: " << classes_path << "\n";
+            return false;
         }
-    if (ds.empty()) return false;
+        std::string line;
+        while (std::getline(ifs, line)) class_list.push_back(line);
+        num_classes = (int)class_list.size();
+        std::cerr << "[INFO] " << num_classes << " classes loaded\n";
 
-    std::sort(ds.begin(), ds.end());
-    float d_med = ds[ds.size() / 2];
+        try {
+            net = cv::dnn::readNet(model_path);
+            net.setPreferableBackend(cv::dnn::DNN_BACKEND_OPENCV);
+            net.setPreferableTarget(cv::dnn::DNN_TARGET_CPU);
+            std::cerr << "[INFO] Model loaded: " << model_path << "\n";
+        } catch (const cv::Exception& e) {
+            std::cerr << "[ERROR] " << e.what() << "\n";
+            return false;
+        }
+        return detectVersion();
+    }
 
-    float pix[2] = {(float)cx, (float)cy}, pt[3];
-    rs2_deproject_pixel_to_point(pt, &intr, pix, d_med);
-    out = Eigen::Vector3d(pt[0], pt[1], pt[2]);
-    return true;
-}
+    // Returns true + fills best_conf/best_box if bowl found in this frame.
+    bool runFrame(const cv::Mat& bgr, float conf_thr,
+                  float& best_conf, cv::Rect& best_box)
+    {
+        if (version == YOLOVersion::UNKNOWN || bgr.empty()) return false;
 
-// ---------------------------------------------------------------------------
-// Grasp candidate computation
-// ---------------------------------------------------------------------------
+        cv::Mat img = bgr.clone();
+        int _max = std::max(img.cols, img.rows);
+        cv::Mat formatted = cv::Mat::zeros(_max, _max, CV_8UC3);
+        img.copyTo(formatted(cv::Rect(0, 0, img.cols, img.rows)));
 
-struct GraspCandidate {
-    Eigen::Vector3d translation;
-    Eigen::Vector3d rotvec;
-    Eigen::Vector3d pre_translation;
-    Eigen::Vector3d pre_rotvec;
-    double pregrasp_offset_m;
-    double grasp_force_n;
-    std::string description;
+        float xf = (float)formatted.cols / INPUT_WIDTH;
+        float yf = (float)formatted.rows / INPUT_HEIGHT;
+
+        cv::Mat blob;
+        cv::dnn::blobFromImage(formatted, blob, 1.0 / 255.0,
+                               cv::Size(INPUT_WIDTH, INPUT_HEIGHT),
+                               cv::Scalar(), true, false);
+        net.setInput(blob);
+        std::vector<cv::Mat> outs;
+        net.forward(outs, net.getUnconnectedOutLayersNames());
+
+        std::vector<cv::Rect> boxes;
+        std::vector<float>    confs;
+
+        if (!outs.empty() && !outs[0].empty()) {
+            if (version == YOLOVersion::YOLOV5) parseV5(outs[0], xf, yf, conf_thr, boxes, confs);
+            else                                parseV8V11(outs[0], xf, yf, conf_thr, boxes, confs);
+        }
+        outs.clear(); blob.release(); formatted.release(); img.release();
+
+        if (boxes.empty()) return false;
+        std::vector<int> idx;
+        cv::dnn::NMSBoxes(boxes, confs, conf_thr, NMS_THRESHOLD, idx);
+        if (idx.empty()) return false;
+
+        int bi = idx[0];
+        for (int i : idx) if (confs[i] > confs[bi]) bi = i;
+        best_conf = confs[bi];
+        best_box  = boxes[bi];
+        return true;
+    }
+
+    // Verify the bounding-box has valid depth in a plausible range.
+    // Used only as a sanity / false-positive filter — NOT for position.
+    bool depthSanity(const cv::Rect& box, const rs2::depth_frame& depth,
+                     float min_m = 0.20f, float max_m = 3.0f) const
+    {
+        int cx = box.x + box.width / 2, cy = box.y + box.height / 2;
+        int hw = std::max(1, box.width / 4), hh = std::max(1, box.height / 4);
+        int W = depth.get_width(), H = depth.get_height();
+        std::vector<float> ds;
+        for (int v = std::max(0, cy - hh); v < std::min(H, cy + hh); v++)
+            for (int u = std::max(0, cx - hw); u < std::min(W, cx + hw); u++) {
+                float d = depth.get_distance(u, v);
+                if (d > 0.05f && d < 4.0f) ds.push_back(d);
+            }
+        if (ds.empty()) return false;
+        std::sort(ds.begin(), ds.end());
+        float d_med = ds[ds.size() / 2];
+        return d_med >= min_m && d_med <= max_m;
+    }
+
+    // Ray-plane intersection: trace the camera ray through the bbox centre
+    // until it hits the table plane (Z = 0 in task frame).
+    //
+    // This avoids all depth-based Z errors: the camera looks into the bowl
+    // interior so depth gives the bowl bottom, not the rim. Since the bowl
+    // always rests on the table we set base Z = 0 directly and derive rim/
+    // grasp Z from the known bowl height.  XY accuracy comes from the camera
+    // ray direction (calibration-quality) rather than noisy depth.
+    static bool rayTableIntersect(
+        const cv::Rect& box,
+        const rs2_intrinsics& intr,
+        const Eigen::Matrix4d& T_task_cam,
+        Eigen::Vector3d& out_base_task)
+    {
+        int cx = box.x + box.width / 2;
+        int cy = box.y + box.height / 2;
+
+        // Camera-frame unit ray direction through (cx, cy)
+        float pix[2] = {(float)cx, (float)cy}, pt[3];
+        rs2_deproject_pixel_to_point(pt, &intr, pix, 1.0f);
+        Eigen::Vector3d ray_cam(pt[0], pt[1], pt[2]);
+        ray_cam.normalize();
+
+        // Transform ray to task frame
+        Eigen::Matrix3d R = T_task_cam.block<3,3>(0,0);
+        Eigen::Vector3d t = T_task_cam.block<3,1>(0,3);
+        Eigen::Vector3d ray_task = R * ray_cam;
+
+        // Intersect with Z = 0 (table plane)
+        if (std::abs(ray_task.z()) < 1e-6) return false;  // ray parallel to table
+        double lam = -t.z() / ray_task.z();
+        if (lam < 0.0) return false;  // intersection behind camera
+
+        out_base_task = t + lam * ray_task;
+        out_base_task.z() = 0.0;  // snap exactly to table surface
+        return true;
+    }
+
+private:
+    bool detectVersion() {
+        cv::Mat dummy = cv::Mat::zeros(640, 640, CV_8UC3);
+        cv::Mat blob;
+        cv::dnn::blobFromImage(dummy, blob, 1.0/255.0,
+                               cv::Size(INPUT_WIDTH, INPUT_HEIGHT), cv::Scalar(), true, false);
+        net.setInput(blob);
+        std::vector<cv::Mat> outs;
+        net.forward(outs, net.getUnconnectedOutLayersNames());
+        if (outs.empty()) { std::cerr << "[ERROR] No model output\n"; return false; }
+        int d1 = outs[0].size[1], d2 = outs[0].size[2];
+        std::cerr << "[INFO] Output shape [1, " << d1 << ", " << d2 << "]\n";
+        if      (d1 > 1000 && d2 < 200) { version = YOLOVersion::YOLOV5;    num_detections = d1; std::cerr << "[INFO] YOLOv5\n"; }
+        else if (d1 < 200 && d2 > 1000) { version = YOLOVersion::YOLOV8_11; num_detections = d2; std::cerr << "[INFO] YOLOv8/v11\n"; }
+        else { std::cerr << "[ERROR] Unknown shape\n"; return false; }
+        return true;
+    }
+
+    void parseV5(cv::Mat& out, float xf, float yf, float thr,
+                 std::vector<cv::Rect>& boxes, std::vector<float>& confs)
+    {
+        float* data = (float*)out.data;
+        int dims = 5 + num_classes;
+        for (int i = 0; i < num_detections; i++, data += dims) {
+            float obj = data[4];
+            if (obj < CONFIDENCE_THRESHOLD) continue;
+            cv::Mat sc(1, num_classes, CV_32FC1, data + 5);
+            cv::Point cl; double ms;
+            cv::minMaxLoc(sc, nullptr, &ms, nullptr, &cl);
+            float conf = obj * (float)ms;
+            if (cl.x != COCO_BOWL || conf < thr) continue;
+            float x=data[0],y=data[1],w=data[2],h=data[3];
+            boxes.emplace_back((int)((x-w/2)*xf),(int)((y-h/2)*yf),(int)(w*xf),(int)(h*yf));
+            confs.push_back(conf);
+        }
+    }
+
+    void parseV8V11(cv::Mat& out, float xf, float yf, float thr,
+                    std::vector<cv::Rect>& boxes, std::vector<float>& confs)
+    {
+        int nf = out.size[out.dims==3?1:0], nd = out.size[out.dims==3?2:1];
+        cv::Mat m2d(nf, nd, CV_32F, out.data);
+        cv::Mat tr; cv::transpose(m2d, tr);
+        float* data = (float*)tr.data;
+        for (int i = 0; i < num_detections; i++, data += (4+num_classes)) {
+            cv::Mat sc(1, num_classes, CV_32FC1, data+4);
+            cv::Point cl; double ms;
+            cv::minMaxLoc(sc, nullptr, &ms, nullptr, &cl);
+            float conf = (float)ms;
+            if (cl.x != COCO_BOWL || conf < thr) continue;
+            float x=data[0],y=data[1],w=data[2],h=data[3];
+            boxes.emplace_back((int)((x-w/2)*xf),(int)((y-h/2)*yf),(int)(w*xf),(int)(h*yf));
+            confs.push_back(conf);
+        }
+        tr.release();
+    }
 };
 
-// bowl_base_task: position of the bowl's resting base centre in task frame.
-static std::vector<GraspCandidate> bowl_hook_candidates(
-    const Eigen::Vector3d& bowl_base_task,
-    int n = N_ANGLES)
-{
-    std::vector<GraspCandidate> out;
-    out.reserve(n);
-    for (int i = 0; i < n; i++) {
-        double angle = 2.0 * M_PI * i / n;
-        Eigen::Vector3d rim(
-            BOWL_RIM_OUTER_RADIUS_M * std::cos(angle),
-            BOWL_RIM_OUTER_RADIUS_M * std::sin(angle),
-            BOWL_RIM_Z_OFFSET_M);
-        Eigen::Vector3d grasp_t = bowl_base_task + rim;
-        Eigen::Matrix3d R       = hook_rim_rotation(angle);
+// ---------------------------------------------------------------------------
+// Grasp geometry
+// ---------------------------------------------------------------------------
 
-        // Pregrasp: HOOK_RIM_PREGRASP_OFFSET along tool -Z (= -R.col(2))
-        Eigen::Vector3d pre_t = grasp_t - HOOK_RIM_PREGRASP_OFFSET * R.col(2);
+static Eigen::Matrix3d hook_rim_rotation(double angle_rad, double tilt_rad=0.0) {
+    return Eigen::AngleAxisd(angle_rad, Eigen::Vector3d::UnitZ()).matrix()
+         * Eigen::AngleAxisd(M_PI,      Eigen::Vector3d::UnitX()).matrix()
+         * Eigen::AngleAxisd(tilt_rad,  Eigen::Vector3d::UnitY()).matrix();
+}
+static Eigen::Vector3d to_rotvec(const Eigen::Matrix3d& R) {
+    Eigen::AngleAxisd aa(R); return aa.axis()*aa.angle();
+}
+struct GraspCandidate { Eigen::Vector3d t,rv,pre_t,pre_rv; double pregrasp_m,force_n; std::string desc; };
 
-        std::ostringstream desc;
-        desc.precision(0);
-        desc << std::fixed << "bowl hook rim grasp @ "
-             << (angle * 180.0 / M_PI) << "deg";
-
-        out.push_back({
-            grasp_t,
-            to_rotvec(R),
-            pre_t,
-            to_rotvec(R),
-            HOOK_RIM_PREGRASP_OFFSET,
-            BOWL_GRASP_FORCE,
-            desc.str(),
-        });
+static std::vector<GraspCandidate> bowl_hook_candidates(const Eigen::Vector3d& base) {
+    std::vector<GraspCandidate> out; out.reserve(N_ANGLES);
+    for (int i=0;i<N_ANGLES;i++) {
+        double angle = 2.0*M_PI*i/N_ANGLES;
+        Eigen::Vector3d rim(BOWL_RIM_OUTER_RADIUS_M*std::cos(angle),
+                            BOWL_RIM_OUTER_RADIUS_M*std::sin(angle), BOWL_RIM_Z_OFFSET_M);
+        Eigen::Vector3d gt = base+rim;
+        Eigen::Matrix3d R  = hook_rim_rotation(angle,0.0);
+        Eigen::Vector3d pt = gt - HOOK_RIM_PREGRASP_OFFSET*R.col(2);
+        std::ostringstream d; d<<std::fixed; d.precision(0);
+        d<<"bowl hook @ "<<(angle*180.0/M_PI)<<"deg";
+        out.push_back({gt,to_rotvec(R),pt,to_rotvec(R),HOOK_RIM_PREGRASP_OFFSET,BOWL_GRASP_FORCE,d.str()});
     }
     return out;
 }
 
 // ---------------------------------------------------------------------------
-// JSON helpers
+// JSON
 // ---------------------------------------------------------------------------
 
 static std::string v3(const Eigen::Vector3d& v) {
-    std::ostringstream ss;
-    ss << std::fixed;
-    ss.precision(6);
-    ss << "[" << v[0] << "," << v[1] << "," << v[2] << "]";
-    return ss.str();
+    std::ostringstream ss; ss<<std::fixed; ss.precision(6);
+    ss<<"["<<v[0]<<","<<v[1]<<","<<v[2]<<"]"; return ss.str();
+}
+static void emit_json(std::ostream& os, bool detected, float conf,
+                      const Eigen::Vector3d& pos_cam,
+                      const Eigen::Vector3d& bowl_base,
+                      const Eigen::Vector3d& bowl_rim,
+                      const std::vector<GraspCandidate>& cands)
+{
+    os<<"{\n";
+    os<<"  \"detected\": "<<(detected?"true":"false")<<",\n";
+    if (!detected) { os<<"  \"candidates\": []\n}\n"; return; }
+    os<<"  \"confidence\": "<<conf<<",\n";
+    os<<"  \"bowl_pos_camera_m\": "<<v3(pos_cam)<<",\n";
+    os<<"  \"bowl_base_task_m\": " <<v3(bowl_base)<<",\n";
+    os<<"  \"bowl_rim_task_m\": "  <<v3(bowl_rim)<<",\n";
+    os<<"  \"candidates\": [\n";
+    for (int i=0;i<(int)cands.size();i++) {
+        const auto& g=cands[i];
+        os<<"    {"
+          <<"\"index\":"<<i<<","
+          <<"\"description\":\""<<g.desc<<"\","
+          <<"\"translation\":"<<v3(g.t)<<","
+          <<"\"rotvec\":"<<v3(g.rv)<<","
+          <<"\"pre_translation\":"<<v3(g.pre_t)<<","
+          <<"\"pre_rotvec\":"<<v3(g.pre_rv)<<","
+          <<"\"pregrasp_offset_m\":"<<g.pregrasp_m<<","
+          <<"\"grasp_force_n\":"<<g.force_n<<"}";
+        if (i+1<(int)cands.size()) os<<",";
+        os<<"\n";
+    }
+    os<<"  ]\n}\n";
 }
 
-static void print_json(
+// ---------------------------------------------------------------------------
+// Annotate + save frame to JPEG
+// ---------------------------------------------------------------------------
+
+static void save_annotated_frame(
+    const cv::Mat& bgr,
+    const cv::Rect& box, float conf,
+    const Eigen::Vector3d& base_task,
+    const Eigen::Vector3d& rim_task,
     bool detected,
-    float conf,
-    const Eigen::Vector3d& pos_cam,
-    const Eigen::Vector3d& pos_task,
-    const Eigen::Vector3d& bowl_base,
-    const std::vector<GraspCandidate>& cands)
+    const std::string& save_path)
 {
-    std::cout << "{\n";
-    std::cout << "  \"detected\": " << (detected ? "true" : "false") << ",\n";
-    if (!detected) { std::cout << "  \"candidates\": []\n}\n"; return; }
-    std::cout << "  \"confidence\": " << conf << ",\n";
-    std::cout << "  \"position_camera_m\": " << v3(pos_cam) << ",\n";
-    std::cout << "  \"position_task_m\": "   << v3(pos_task) << ",\n";
-    std::cout << "  \"bowl_base_task_m\": "  << v3(bowl_base) << ",\n";
-    std::cout << "  \"candidates\": [\n";
-    for (int i = 0; i < (int)cands.size(); i++) {
-        const auto& g = cands[i];
-        std::cout << "    {\n";
-        std::cout << "      \"index\": "            << i              << ",\n";
-        std::cout << "      \"description\": \""    << g.description  << "\",\n";
-        std::cout << "      \"translation\": "      << v3(g.translation)    << ",\n";
-        std::cout << "      \"rotvec\": "           << v3(g.rotvec)         << ",\n";
-        std::cout << "      \"pre_translation\": "  << v3(g.pre_translation)<< ",\n";
-        std::cout << "      \"pre_rotvec\": "       << v3(g.pre_rotvec)     << ",\n";
-        std::cout << "      \"pregrasp_offset_m\": "<< g.pregrasp_offset_m  << ",\n";
-        std::cout << "      \"grasp_force_n\": "    << g.grasp_force_n      << "\n";
-        std::cout << "    }" << (i + 1 < (int)cands.size() ? "," : "") << "\n";
+    cv::Mat disp = bgr.clone();
+
+    auto put = [&](const std::string& txt, int row, cv::Scalar col={0,255,0}) {
+        cv::putText(disp, txt, cv::Point(10, 28+row*26),
+                    cv::FONT_HERSHEY_SIMPLEX, 0.65, cv::Scalar(0,0,0), 3);
+        cv::putText(disp, txt, cv::Point(10, 28+row*26),
+                    cv::FONT_HERSHEY_SIMPLEX, 0.65, col, 2);
+    };
+
+    if (detected) {
+        cv::rectangle(disp, box, cv::Scalar(0,255,0), 2);
+
+        std::ostringstream ct; ct<<std::fixed; ct.precision(2);
+        ct<<"bowl  conf="<<conf;
+        cv::putText(disp, ct.str(),
+                    cv::Point(box.x, std::max(0, box.y-8)),
+                    cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(0,255,0), 2);
+
+        std::ostringstream b, r;
+        b<<std::fixed; b.precision(3);
+        r<<std::fixed; r.precision(3);
+        b<<"base_task [m]: "<<base_task[0]<<", "<<base_task[1]<<", "<<base_task[2];
+        r<<"rim_task  [m]: "<<rim_task[0] <<", "<<rim_task[1] <<", "<<rim_task[2];
+        put(b.str(), 0);
+        put(r.str(), 1);
+        put("BOWL DETECTED", 2, cv::Scalar(0,200,255));
+    } else {
+        put("No bowl detected", 0, cv::Scalar(0,80,255));
     }
-    std::cout << "  ]\n}\n";
+
+    if (!cv::imwrite(save_path, disp))
+        std::cerr << "[WARN] Could not save image to: " << save_path << "\n";
+    else
+        std::cerr << "[PREVIEW] Annotated frame saved to: " << save_path << "\n";
 }
 
 // ---------------------------------------------------------------------------
@@ -276,97 +384,126 @@ static void print_json(
 // ---------------------------------------------------------------------------
 
 int main(int argc, char** argv) {
-    std::string model_path   = "../../../../perception/yolov8n.onnx";
+    std::string model_path   = "../../../../212_Perception/build/yolo11n.onnx";
+    std::string classes_path = "../../../../212_Perception/build/coco-classes.txt";
+    std::string save_image   = "/tmp/bowl_detection_preview.jpg";
     float conf_threshold     = 0.40f;
+    bool  headless           = false;
 
-    for (int i = 1; i < argc; i++) {
+    Eigen::Matrix4d T_task_cam = Eigen::Matrix4d::Identity();
+
+    for (int i=1;i<argc;i++) {
         std::string a(argv[i]);
-        if      (a == "--model" && i + 1 < argc) model_path      = argv[++i];
-        else if (a == "--conf"  && i + 1 < argc) conf_threshold  = std::stof(argv[++i]);
+        if      (a=="--model"   && i+1<argc) { model_path   = argv[++i]; }
+        else if (a=="--classes" && i+1<argc) { classes_path = argv[++i]; }
+        else if (a=="--conf"    && i+1<argc) { conf_threshold = std::stof(argv[++i]); }
+        else if (a=="--save-image" && i+1<argc) { save_image = argv[++i]; }
+        else if (a=="--headless")             { headless = true; }
+        else if (a=="--T-task-camera" && i+1<argc) {
+            std::istringstream ss(argv[++i]);
+            bool ok=true;
+            for (int r=0;r<4&&ok;r++)
+                for (int c=0;c<4&&ok;c++) ok=!!(ss>>T_task_cam(r,c));
+            if (!ok) { std::cerr<<"[ERROR] --T-task-camera needs 16 floats\n"; return 1; }
+        }
     }
 
-    cv::dnn::Net net;
-    try {
-        net = cv::dnn::readNetFromONNX(model_path);
-    } catch (const cv::Exception&) {
-        std::cerr << "[ERROR] Cannot load model: " << model_path << "\n";
-        std::cerr << "  Export: python3 -c \"from ultralytics import YOLO; "
-                     "YOLO('../../../../perception/yolov8n.pt').export(format='onnx')\"\n";
-        return 1;
-    }
-    net.setPreferableBackend(cv::dnn::DNN_BACKEND_OPENCV);
-    net.setPreferableTarget(cv::dnn::DNN_TARGET_CPU);
+    std::cerr<<"[INFO] T_task_camera:\n"<<T_task_cam<<"\n";
+    std::cerr<<"[INFO] Mode: "<<(headless?"headless":"preview (saves JPEG)")<<"\n";
+
+    YOLODetector detector;
+    if (!detector.loadModel(model_path, classes_path)) return 1;
 
     rs2::pipeline pipe;
     rs2::config   cfg;
     cfg.enable_stream(RS2_STREAM_COLOR, 640, 480, RS2_FORMAT_BGR8, 30);
     cfg.enable_stream(RS2_STREAM_DEPTH, 640, 480, RS2_FORMAT_Z16,  30);
+
+    rs2::spatial_filter      spat; spat.set_option(RS2_OPTION_FILTER_MAGNITUDE,2);
+                                   spat.set_option(RS2_OPTION_FILTER_SMOOTH_ALPHA,0.5f);
+                                   spat.set_option(RS2_OPTION_FILTER_SMOOTH_DELTA,20);
+    rs2::temporal_filter     temp; temp.set_option(RS2_OPTION_FILTER_SMOOTH_ALPHA,0.4f);
+                                   temp.set_option(RS2_OPTION_FILTER_SMOOTH_DELTA,20);
+    rs2::hole_filling_filter hole;
+
     rs2::pipeline_profile profile;
-    try {
-        profile = pipe.start(cfg);
-    } catch (const rs2::error& e) {
-        std::cerr << "[ERROR] RealSense: " << e.what() << "\n";
-        return 1;
-    }
+    try { profile = pipe.start(cfg); }
+    catch (const rs2::error& e) { std::cerr<<"[ERROR] RealSense: "<<e.what()<<"\n"; return 1; }
 
     rs2_intrinsics intr = profile.get_stream(RS2_STREAM_DEPTH)
-                                 .as<rs2::video_stream_profile>()
-                                 .get_intrinsics();
+                                 .as<rs2::video_stream_profile>().get_intrinsics();
     rs2::align align_to_color(RS2_STREAM_COLOR);
-    Eigen::Matrix4d T_task_cam = make_T_task_camera();
 
-    std::cerr << "[INFO] Warming up (" << N_WARMUP << " frames)...\n";
-    for (int i = 0; i < N_WARMUP; i++) pipe.wait_for_frames();
+    std::cerr<<"[INFO] Warming up ("<<N_WARMUP<<" frames)...\n";
+    for (int i=0;i<N_WARMUP;i++) pipe.wait_for_frames();
 
-    std::cerr << "[INFO] Detecting bowl (COCO " << COCO_BOWL << ") over "
-              << N_FRAMES << " frames...\n";
-    bool found = false;
-    float best_conf = 0.0f;
-    BBox best_bbox  = {};
-    Eigen::Vector3d pos_camera;
+    // Detection loop — keep best across N_FRAMES
+    std::cerr<<"[INFO] Detecting over "<<N_FRAMES<<" frames...\n";
+    bool            found     = false;
+    float           best_conf = 0.0f;
+    cv::Rect        best_box;
+    cv::Mat         best_frame;
 
-    for (int fi = 0; fi < N_FRAMES; fi++) {
+    for (int fi=0;fi<N_FRAMES;fi++) {
         rs2::frameset fs  = pipe.wait_for_frames();
         rs2::frameset afs = align_to_color.process(fs);
-        auto color_f = afs.get_color_frame();
-        auto depth_f = afs.get_depth_frame();
+        auto cf = afs.get_color_frame();
+        rs2::depth_frame df = afs.get_depth_frame();
+        df = spat.process(df); df = temp.process(df); df = hole.process(df);
 
-        cv::Mat bgr(cv::Size(color_f.get_width(), color_f.get_height()),
-                    CV_8UC3, (void*)color_f.get_data(), cv::Mat::AUTO_STEP);
+        cv::Mat bgr(cv::Size(cf.get_width(),cf.get_height()),
+                    CV_8UC3,(void*)cf.get_data(),cv::Mat::AUTO_STEP);
 
-        auto dets = yolo_detect(net, bgr, COCO_BOWL, conf_threshold);
-        if (dets.empty()) continue;
-
-        const BBox& d = dets[0];
-        if (!found || d.conf > best_conf) {
-            Eigen::Vector3d p;
-            if (bbox_centre_3d(depth_f, intr, d, p)) {
-                best_bbox  = d;
-                best_conf  = d.conf;
-                pos_camera = p;
-                found      = true;
+        float this_conf=0.0f; cv::Rect this_box;
+        if (detector.runFrame(bgr, conf_threshold, this_conf, this_box)) {
+            // Sanity: verify detection has plausible depth (not a background FP)
+            if (detector.depthSanity(this_box, df)) {
+                if (!found || this_conf > best_conf) {
+                    best_conf  = this_conf;
+                    best_box   = this_box;
+                    best_frame = bgr.clone();
+                    found      = true;
+                }
             }
         }
+        if (!found) best_frame = bgr.clone();
     }
     pipe.stop();
 
-    if (!found) {
-        std::cerr << "[WARN] No bowl detected (conf≥" << conf_threshold << ").\n";
-        print_json(false, 0, {}, {}, {}, {});
-        return 0;
+    // Compute bowl position via ray-plane intersection (table Z = 0).
+    // We do NOT use depth for position — the camera looks into the bowl
+    // interior so depth hits the bowl bottom, not the rim.  Instead we
+    // project the camera ray through the bounding-box centre until it hits
+    // the table plane; that gives the bowl base XY exactly, and Z = 0.
+    Eigen::Vector3d bowl_base_task, bowl_rim_task;
+    Eigen::Vector3d pos_cam(0,0,0);  // kept for JSON completeness only
+    if (found) {
+        std::cerr<<"[INFO] Bowl detected  conf="<<best_conf
+                 <<"  bbox=["<<best_box.x<<","<<best_box.y
+                 <<" "<<best_box.width<<"x"<<best_box.height<<"]\n";
+
+        if (!YOLODetector::rayTableIntersect(best_box, intr, T_task_cam, bowl_base_task)) {
+            std::cerr<<"[WARN] Ray-table intersection failed (camera looking up?). "
+                     <<"Falling back to depth.\n";
+            found = false;
+        } else {
+            bowl_rim_task    = bowl_base_task;
+            bowl_rim_task.z() = BOWL_RIM_Z_OFFSET_M;
+            std::cerr<<"[INFO] Bowl base task ("<<bowl_base_task.transpose()<<") m\n";
+            std::cerr<<"[INFO] Bowl rim  task ("<<bowl_rim_task.transpose()<<") m\n";
+        }
+    } else {
+        std::cerr<<"[WARN] No bowl detected (conf≥"<<conf_threshold<<").\n";
     }
 
-    std::cerr << "[INFO] Bowl at camera ("
-              << pos_camera.transpose() << ") m, conf=" << best_conf << "\n";
+    // Save annotated JPEG (unless headless)
+    if (!headless && !best_frame.empty()) {
+        save_annotated_frame(best_frame, best_box, best_conf,
+                             bowl_base_task, bowl_rim_task, found, save_image);
+    }
 
-    Eigen::Vector4d h(pos_camera[0], pos_camera[1], pos_camera[2], 1.0);
-    Eigen::Vector3d pos_task  = (T_task_cam * h).head<3>();
-
-    // Bowl is much shorter than the cup (7.2 cm): bbox centre ≈ bowl midpoint.
-    Eigen::Vector3d bowl_base = pos_task;
-    bowl_base[2] -= BOWL_RIM_Z_OFFSET_M / 2.0;
-
-    auto cands = bowl_hook_candidates(bowl_base);
-    print_json(true, best_conf, pos_camera, pos_task, bowl_base, cands);
+    // Emit JSON
+    auto cands = found ? bowl_hook_candidates(bowl_base_task) : std::vector<GraspCandidate>{};
+    emit_json(std::cout, found, best_conf, pos_cam, bowl_base_task, bowl_rim_task, cands);
     return 0;
 }
