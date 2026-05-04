@@ -77,13 +77,13 @@ def _capture(arm: ArmHandle, name: str) -> dict:
 
 
 def _print_capture(snap: dict) -> None:
-    t = snap["task_pose"]["translation"]
-    r = snap["task_pose"]["rotvec"]
+    t = snap["base_pose"]["translation"]
+    r = snap["base_pose"]["rotvec"]
     j = snap["joints_deg"]
     print(f"  ✓ captured {snap['name']!r}")
     print(f"    joints_deg : [{', '.join(f'{v:+7.2f}' for v in j)}]")
-    print(f"    task xyz   : [{t[0]:+.4f}, {t[1]:+.4f}, {t[2]:+.4f}]")
-    print(f"    task rvec  : [{r[0]:+.4f}, {r[1]:+.4f}, {r[2]:+.4f}]")
+    print(f"    base xyz   : [{t[0]:+.4f}, {t[1]:+.4f}, {t[2]:+.4f}]")
+    print(f"    base rvec  : [{r[0]:+.4f}, {r[1]:+.4f}, {r[2]:+.4f}]")
 
 
 def _save(snapshots: List[dict], out_path: str, arm_name: str) -> None:
@@ -205,9 +205,9 @@ def run(arm_name: str, out_path: Optional[str], no_freedrive: bool) -> int:
                     if not snapshots:
                         print("  (no snapshots yet)")
                     for i, s in enumerate(snapshots):
-                        t = s["task_pose"]["translation"]
+                        t = s["base_pose"]["translation"]
                         print(f"  [{i:02d}] {s['name']:<20s}  "
-                              f"task xyz=[{t[0]:+.3f}, {t[1]:+.3f}, {t[2]:+.3f}]")
+                              f"base xyz=[{t[0]:+.3f}, {t[1]:+.3f}, {t[2]:+.3f}]")
                     continue
                 if line == "d":
                     if snapshots:

@@ -84,7 +84,7 @@ Set to 0 to fall back to pure vertical descent. See
 ARM = "ur_left"
 
 CONFIG = PickPlaceConfig(
-    transit_z=0.3,
+    transit_z=0.25,
     place_use_contact_descent=False,  # open-loop descent to the place pose
     transit_speed=0.1,
     transit_accel=0.2,

@@ -942,4 +942,23 @@ CMakeFiles/calibrate_camera.dir/calibrate_camera.cpp.o: \
   /opt/homebrew/Cellar/opencv/4.13.0_7/include/opencv4/opencv2/imgcodecs.hpp \
   /opt/homebrew/Cellar/opencv/4.13.0_7/include/opencv4/opencv2/videoio.hpp \
   /opt/homebrew/Cellar/opencv/4.13.0_7/include/opencv4/opencv2/imgproc.hpp \
-  /opt/homebrew/Cellar/opencv/4.13.0_7/include/opencv4/opencv2/./imgproc/segmentation.hpp
+  /opt/homebrew/Cellar/opencv/4.13.0_7/include/opencv4/opencv2/./imgproc/segmentation.hpp \
+  /usr/local/include/apriltag/apriltag.h \
+  /usr/local/include/apriltag/common/matd.h \
+  /usr/local/include/apriltag/common/image_u8.h \
+  /usr/local/include/apriltag/common/image_types.h \
+  /usr/local/include/apriltag/common/zarray.h \
+  /usr/local/include/apriltag/common/workerpool.h \
+  /usr/local/include/apriltag/common/timeprofile.h \
+  /usr/local/include/apriltag/common/time_util.h \
+  /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/sys/time.h \
+  /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/sys/_types/_timeval64.h \
+  /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/sys/_select.h \
+  /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/sys/unistd.h \
+  /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/sys/_types/_posix_vdisable.h \
+  /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/sys/select.h \
+  /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/sys/_types/_uuid_t.h \
+  /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/gethostuuid.h \
+  /usr/local/include/apriltag/common/pthreads_cross.h \
+  /usr/local/include/apriltag/apriltag_pose.h \
+  /usr/local/include/apriltag/tag36h11.h
