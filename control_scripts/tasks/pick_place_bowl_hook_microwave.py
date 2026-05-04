@@ -62,12 +62,12 @@ from ..util.poses import Pose, offset_along_tool_z
 
 # --- Tunables --------------------------------------------------------------
 
-PICK_FROM: Literal["outside", "microwave"] = "outside"
+PICK_FROM: Literal["outside", "microwave"] = "microwave"
 PLACE_TO: Literal["outside", "microwave"] = "outside"
 
 # Free-standing bowl poses (used when the corresponding side is "outside").
 BOWL_PICK_POSE_TASK = Pose(translation=[0.05, -0.125, -0.01])
-BOWL_PLACE_POSE_TASK = Pose(translation=[-0.1, 0.2, -0.01])
+BOWL_PLACE_POSE_TASK = Pose(translation=[-0.1, 0.1, -0.01])
 
 # Intermediate waypoint between pick and place. The transit_z is what
 # actually sets the carry altitude; the Z below is ignored. Picked at a
@@ -85,8 +85,8 @@ pick↔place geometry."""
 # Bowl-frame angle at which to engage the rim. π = approach from −X
 # side; forearm exits back through the −X microwave door. Keep at π
 # for any microwave-side leg.
-GRASP_ANGLE_RAD = float(np.radians(180-30))
-PLACE_ANGLE_RAD = float(-np.radians(90 + 30))
+GRASP_ANGLE_RAD = float(-np.radians(90 + 10))
+PLACE_ANGLE_RAD = float(np.radians(180-30)) 
 MIDPOINT_ANGLE_RAD = PLACE_ANGLE_RAD
 """Bowl-frame angle used at the midpoint. Mirrors the plate microwave task:
 the midpoint has an explicit orientation knob rather than inferring from
@@ -105,11 +105,16 @@ APPROACH_TILT_RAD_MICROWAVE = 0.0
 # horizontal, see calibration.TCP_OFFSET_HOOK). 18 cm gives ~3 cm
 # clearance over the rim during in-cavity transit and ~5 cm clearance
 # below the 23 cm ceiling.
-MICROWAVE_ENTRY_Z = 0.18
+MICROWAVE_ENTRY_Z = 0.165
+
+BOWL_ENTRY_CLEARANCE = 0.15
+"""Distance outside the microwave door before lowering to ``MICROWAVE_ENTRY_Z``.
+Keep this larger than the hook TCP envelope plus the bowl rim diameter so
+the bowl/hook clears the front lip before descending."""
 
 # Bowl center sits 1 cm above the glass tray to avoid scraping it on
 # the descent — same convention as the free-standing pose.
-MICROWAVE_BOWL_Z_OFFSET = 0.01
+MICROWAVE_BOWL_Z_OFFSET = 0.0
 
 # In-cavity pregrasp standoff override for the microwave-side leg.
 # Default HOOK_RIM_PREGRASP_OFFSET (5 cm) puts the pregrasp at task z
@@ -121,7 +126,7 @@ MICROWAVE_HOOK_PREGRASP_OFFSET = 0.03
 ARM = "ur_left"
 
 CONFIG = PickPlaceConfig(
-    transit_z=0.3,
+    transit_z=0.35,
     # 3 cm preplace standoff for the microwave place leg. The 10 cm
     # default would land preplace at task z 26.2 cm — ABOVE the 23 cm
     # ceiling. 3 cm matches MICROWAVE_HOOK_PREGRASP_OFFSET for symmetric
@@ -129,12 +134,12 @@ CONFIG = PickPlaceConfig(
     # outside the cavity the moveL distance is harmless.
     preplace_offset=0.03,
     place_use_contact_descent=False,
-    transit_speed=0.1,
-    transit_accel=0.2,
-    approach_speed=0.05,
-    approach_accel=0.2,
+    transit_speed=0.2,
+    transit_accel=0.4,
+    approach_speed=0.1,
+    approach_accel=0.25,
     retract_speed=0.1,
-    retract_accel=0.2,
+    retract_accel=0.25,
     release_aperture_mm=None,  # hook has no continuous aperture
     gripper_open_speed_pct=40,
     gripper_close_speed_pct=30,
@@ -250,14 +255,21 @@ def _print_plan(grasp, place_pose: Pose) -> None:
     print(f"  Transit Z     : {CONFIG.transit_z} m")
     if PICK_FROM == "microwave" or PLACE_TO == "microwave":
         print(f"  Microwave entry Z : {MICROWAVE_ENTRY_Z} m")
+        print(f"  Entry clearance   : {BOWL_ENTRY_CLEARANCE} m")
         if PICK_FROM == "microwave":
-            xy = entry_xy_for_pose(grasp.grasp_pose)
+            xy = entry_xy_for_pose(
+                grasp.grasp_pose,
+                clearance=BOWL_ENTRY_CLEARANCE,
+            )
             pregrasp = offset_along_tool_z(grasp.grasp_pose, grasp.pregrasp_offset)
             print(f"  Entry XY (pick)   : {xy}")
             print(f"  Pregrasp Z (pick) : {pregrasp.translation[2]:.3f} m"
                   f"  (offset {grasp.pregrasp_offset*100:.0f} cm)")
         if PLACE_TO == "microwave":
-            xy = entry_xy_for_pose(place_pose)
+            xy = entry_xy_for_pose(
+                place_pose,
+                clearance=BOWL_ENTRY_CLEARANCE,
+            )
             preplace = offset_along_tool_z(place_pose, CONFIG.preplace_offset)
             print(f"  Entry XY (place)  : {xy}")
             print(f"  Preplace Z (place): {preplace.translation[2]:.3f} m"
@@ -276,7 +288,10 @@ def run_on_arm(
 ) -> bool:
     print(f"\n→ pick: {grasp.description}  (from {PICK_FROM})")
     if PICK_FROM == "microwave":
-        entry_xy = entry_xy_for_pose(grasp.grasp_pose)
+        entry_xy = entry_xy_for_pose(
+            grasp.grasp_pose,
+            clearance=BOWL_ENTRY_CLEARANCE,
+        )
         pick_result = pick_from_box(
             arm, grasp, entry_xy, MICROWAVE_ENTRY_Z, config
         )
@@ -301,7 +316,10 @@ def run_on_arm(
 
     print(f"\n→ place @ {place_pose.translation}  (to {PLACE_TO})")
     if PLACE_TO == "microwave":
-        entry_xy = entry_xy_for_pose(place_pose)
+        entry_xy = entry_xy_for_pose(
+            place_pose,
+            clearance=BOWL_ENTRY_CLEARANCE,
+        )
         place_result = place_into_box(
             arm, place_pose, entry_xy, MICROWAVE_ENTRY_Z, config
         )

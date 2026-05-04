@@ -1,0 +1,103 @@
+<?xml version='1.0'?>
+<!--
+  Robotiq 2F-85 with custom 3-in fingers — STATIC CLOSED variant.
+
+  This is a single rigid body for visualisation + collision in Drake.
+  The Robotiq's parallel-jaw kinematics are NOT modelled; we don't need
+  open/close in sim.
+
+  Frame convention (matches the xacro):
+    origin: at the wrist-3 flange face (= where the gripper bolts on)
+    +z    : toward the fingers
+    +y    : along the fingertip-stroke axis
+    +x    : "side" of gripper
+
+  Geometry summary (closed = fingertip pads touching at y=0):
+    base body : 85 × 60 × 55 mm collision box (visual = base_link mesh)
+    each finger:
+      base section  : 22 × 19.23 × 15.75 mm  (z 54.9..70.65)
+      tip / pad     : 22 ×  7.19 × 60.45 mm  (z 70.65..131.1)
+
+  TCP_OFFSET_ROBOTIQ_2F85[2] = 0.184 m sits 53 mm beyond the fingertip
+  end (z = 131.1 mm) — covered separately by the FixedOffsetFrame
+  added in planning/scene/grippers.py.
+-->
+<sdf xmlns:drake="http://drake.mit.edu" version="1.8">
+  <model name="robotiq_2f_85">
+    <link name="robotiq_2f_85">
+      <inertial>
+        <pose>0.0 0.0 0.060 0 0 0</pose>
+        <mass>0.93</mass>
+        <inertia>
+          <ixx>1.5e-3</ixx><ixy>0</ixy><ixz>0</ixz>
+          <iyy>1.5e-3</iyy><iyz>0</iyz>
+          <izz>5.0e-4</izz>
+        </inertia>
+      </inertial>
+
+      <!-- Base body: visual = real Robotiq base_link mesh, collision = bounding box -->
+      <visual name="base_visual">
+        <pose>0 0 0 0 0 0</pose>
+        <geometry>
+          <mesh>
+            <uri>../../../ur_description/robotiq_2f_85_gripper_visualization/meshes/visual/robotiq_arg2f_85_base_link.dae</uri>
+            <scale>0.001 0.001 0.001</scale>
+          </mesh>
+        </geometry>
+      </visual>
+      <collision name="base_collision">
+        <pose>0 0 0.0275 0 0 0</pose>
+        <geometry>
+          <box><size>0.085 0.060 0.055</size></box>
+        </geometry>
+      </collision>
+
+      <!-- ============== RIGHT finger (at +y) ==============
+           Visual: stepped (base + tip) for fidelity.
+           Collision: ONE box at base thickness running the full length.
+           This conservative envelope (overestimates the thin pad by
+           ~6 mm per side) avoids checking two collision pairs per
+           finger and removes the convex-hull cost on the stepped step. -->
+      <visual name="right_finger_base_visual">
+        <pose>0 +0.00962 0.06278 0 0 0</pose>
+        <geometry>
+          <box><size>0.022 0.01923 0.01575</size></box>
+        </geometry>
+        <material><diffuse>0.45 0.45 0.50 1</diffuse></material>
+      </visual>
+      <visual name="right_finger_tip_visual">
+        <pose>0 +0.00360 0.10093 0 0 0</pose>
+        <geometry>
+          <box><size>0.022 0.00719 0.06045</size></box>
+        </geometry>
+        <material><diffuse>0.55 0.55 0.60 1</diffuse></material>
+      </visual>
+      <collision name="right_finger_collision">
+        <!-- z centred on full finger length (54.9..131.1 mm) → 93.0 mm.
+             y centred on the base-thickness envelope. -->
+        <pose>0 +0.00962 0.0930 0 0 0</pose>
+        <geometry><box><size>0.022 0.01923 0.0762</size></box></geometry>
+      </collision>
+
+      <!-- ============== LEFT finger (at -y) ============== -->
+      <visual name="left_finger_base_visual">
+        <pose>0 -0.00962 0.06278 0 0 0</pose>
+        <geometry>
+          <box><size>0.022 0.01923 0.01575</size></box>
+        </geometry>
+        <material><diffuse>0.45 0.45 0.50 1</diffuse></material>
+      </visual>
+      <visual name="left_finger_tip_visual">
+        <pose>0 -0.00360 0.10093 0 0 0</pose>
+        <geometry>
+          <box><size>0.022 0.00719 0.06045</size></box>
+        </geometry>
+        <material><diffuse>0.55 0.55 0.60 1</diffuse></material>
+      </visual>
+      <collision name="left_finger_collision">
+        <pose>0 -0.00962 0.0930 0 0 0</pose>
+        <geometry><box><size>0.022 0.01923 0.0762</size></box></geometry>
+      </collision>
+    </link>
+  </model>
+</sdf>

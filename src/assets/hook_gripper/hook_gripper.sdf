@@ -23,21 +23,26 @@
           </mesh>
         </geometry>
       </visual>
+      <!-- Collision: bounding box of the OBJ mesh's AABB.
+           Replaces the original mesh-based collision. The OBJ has
+           2495 vertices and is non-convex (throat cavity); Drake
+           would convex-hull it for collision queries, which fills
+           the throat anyway. A single primitive box is cheaper AND
+           geometrically equivalent for free-space planning.
+
+           AABB in this link's local frame:
+             x ∈ [-0.0414, +0.0988]  span 0.1402
+             y ∈ [-0.0374, +0.0381]  span 0.0755
+             z ∈ [-0.0375, +0.0375]  span 0.0750
+             centroid ≈ (0.0287, 0.0003, 0.0000) -->
       <collision name='collision'>
-        <pose>0.0 0.0 0.0 0 0 0</pose>
+        <pose>0.0287 0.0003 0.0 0 0 0</pose>
         <geometry>
-          <mesh>
-            <uri>hook_gripper.obj</uri>
-            <scale>1.0 1.0 1.0</scale>
-          </mesh>
+          <box><size>0.1402 0.0755 0.0750</size></box>
         </geometry>
-        <!-- The proximity properties immediately below enable the hydroelastic
-             contact model for this body. To use point contact instead, delete
-             or comment out the <drake:rigid_hydroelastic> element. -->
         <drake:proximity_properties>
           <drake:mu_dynamic>0.5</drake:mu_dynamic>
           <drake:mu_static>0.5</drake:mu_static>
-          <drake:rigid_hydroelastic/>
         </drake:proximity_properties>
       </collision>
     </link>

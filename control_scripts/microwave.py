@@ -42,9 +42,9 @@ MICROWAVE_INTERIOR_DEPTH = 0.26
 ``MICROWAVE_CENTER_XY_TASK[1] - MICROWAVE_INTERIOR_DEPTH/2``.
 PLACEHOLDER — typical microwaves are 25-30 cm."""
 
-MICROWAVE_FLOOR_Z = 0.08
+MICROWAVE_FLOOR_Z = 0.06
 """Top surface of the rotating glass tray, in task z. From user spec:
-microwave 3 cm off the ground + 5 cm to glass tray top = 8 cm."""
+microwave 3.5 cm off the ground + 2.5 cm to glass tray top = 8.5 cm."""
 
 MICROWAVE_CEILING_Z = 0.23
 """Interior ceiling, in task z. From user spec: microwave 3 cm off the

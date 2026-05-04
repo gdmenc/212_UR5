@@ -13,10 +13,11 @@ with ``HOOK_TCP_Z_M`` here.
 Actuation is hardware-TBD. This class supports two paths:
 
     1. ``actuation="do_pin"`` (IMPLEMENTED): toggle a digital output pin
-       on the tool I/O connector via ``rtde_io.RTDEIOInterface.setToolDigitalOut``.
-       UR splits motion (``RTDEControlInterface``) from IO (``RTDEIOInterface``);
-       Session opens both and passes the IO handle here. Wire the hook's servo
-       or solenoid to tool digital output 0 or 1.
+       on the tool I/O connector via an object exposing
+       ``setToolDigitalOut(pin, state)``. Prefer the existing
+       ``RTDEControlInterface`` when it provides that method; opening a
+       separate ``RTDEIOInterface`` can fail on controllers whose RTDE input
+       registers are already reserved by fieldbus adapters.
     2. ``actuation="serial"`` (STUB): USB-serial to a microcontroller on
        the hook (hobby servo or smart motor). Gives position + force
        feedback at the cost of an extra cable + driver. Left raising
@@ -136,7 +137,7 @@ class HookGripper(Gripper):
 
     def __init__(
         self,
-        rtde_io: Any,
+        tool_io: Any,
         actuation: str = "do_pin",
         do_pin: int = DEFAULT_DO_PIN,
         close_settle_s: float = DEFAULT_CLOSE_SETTLE_S,
@@ -147,16 +148,32 @@ class HookGripper(Gripper):
             )
         if close_settle_s < 0.0:
             raise ValueError("close_settle_s must be non-negative")
-        if actuation == "do_pin" and rtde_io is None:
+        if actuation == "do_pin" and tool_io is None:
             raise ValueError(
-                "HookGripper(do_pin path) requires an RTDEIOInterface instance "
-                "(use Session with needs_rtde_io=True)."
+                "HookGripper(do_pin path) requires an object with "
+                "setToolDigitalOut(pin, state)."
             )
-        self._rtde_io = rtde_io
+        self._tool_io = tool_io
         self._actuation = actuation
         self._do_pin = do_pin
         self._close_settle_s = close_settle_s
         self._extended: Optional[bool] = None
+
+    def _set_tool_digital_out(self, signal_level: bool) -> None:
+        """Set tool DO without requiring a separate RTDEIOInterface client."""
+        if hasattr(self._tool_io, "setToolDigitalOut"):
+            self._tool_io.setToolDigitalOut(self._do_pin, signal_level)
+            return
+        if hasattr(self._tool_io, "sendCustomScriptFunction"):
+            self._tool_io.sendCustomScriptFunction(
+                f"HOOK_TOOL_DO_{self._do_pin}",
+                f"set_tool_digital_out({int(self._do_pin)}, {bool(signal_level)})",
+            )
+            return
+        raise AttributeError(
+            "HookGripper tool_io must provide setToolDigitalOut(...) or "
+            "sendCustomScriptFunction(...)."
+        )
 
     def activate(self) -> None:
         """No-op on DO-pin path (the pin is always available). Serial
@@ -167,7 +184,7 @@ class HookGripper(Gripper):
     def open(self) -> None:
         """Extend the finger — opens the throat, releases any held object."""
         if self._actuation == "do_pin":
-            self._rtde_io.setToolDigitalOut(self._do_pin, not RETRACT_HIGH)
+            self._set_tool_digital_out(not RETRACT_HIGH)
             self._extended = True
         else:
             raise NotImplementedError("serial actuation not yet implemented")
@@ -175,7 +192,7 @@ class HookGripper(Gripper):
     def close(self) -> None:
         """Retract the finger — closes the throat, clamps the rim."""
         if self._actuation == "do_pin":
-            self._rtde_io.setToolDigitalOut(self._do_pin, RETRACT_HIGH)
+            self._set_tool_digital_out(RETRACT_HIGH)
             self._extended = False
         else:
             raise NotImplementedError("serial actuation not yet implemented")
@@ -206,6 +223,6 @@ class HookGripper(Gripper):
         }
 
     def disconnect(self) -> None:
-        """Close the RTDE IO connection opened for tool digital outputs."""
-        if self._rtde_io is not None and hasattr(self._rtde_io, "disconnect"):
-            self._rtde_io.disconnect()
+        """Close the tool IO connection if this gripper owns one."""
+        if self._tool_io is not None and hasattr(self._tool_io, "disconnect"):
+            self._tool_io.disconnect()

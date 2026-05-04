@@ -39,6 +39,7 @@ from .util.poses import Pose
 
 
 # --- Default network config for the 212 rig --------------------------------
+# DEFAULT_LEFT_IP = "192.168.137.2"
 DEFAULT_LEFT_IP = "192.168.1.101"
 DEFAULT_RIGHT_IP = "192.168.1.102"
 DEFAULT_CONNECT_TRIES = 3
@@ -123,7 +124,8 @@ class Session:
 
     # --- lifecycle --------------------------------------------------------
     def __enter__(self) -> "Session":
-        ControlCls, ReceiveCls, IOCls = self._resolve_rtde_classes()
+        needs_io = any(spec.needs_rtde_io for spec in self._specs.values())
+        ControlCls, ReceiveCls, IOCls = self._resolve_rtde_classes(needs_io)
 
         for name, spec in self._specs.items():
             rtde_c = ControlCls(spec.ip)
@@ -133,6 +135,8 @@ class Session:
 
             rtde_io = None
             if spec.needs_rtde_io:
+                if IOCls is None:
+                    raise RuntimeError("RTDEIOInterface was requested but not resolved.")
                 rtde_io = IOCls(spec.ip)
                 self._ensure_connected(rtde_io, spec.ip)
 
@@ -182,7 +186,7 @@ class Session:
             arm.control.moveJ(list(home))
 
     # --- internals --------------------------------------------------------
-    def _resolve_rtde_classes(self) -> Tuple[type, type, type]:
+    def _resolve_rtde_classes(self, needs_io: bool) -> Tuple[type, type, Optional[type]]:
         if self._rtde_control_cls is not None and self._rtde_receive_cls is not None:
             ctl, rcv = self._rtde_control_cls, self._rtde_receive_cls
         else:
@@ -192,7 +196,7 @@ class Session:
             from rtde_receive import RTDEReceiveInterface
             ctl, rcv = RTDEControlInterface, RTDEReceiveInterface
         io_cls = self._rtde_io_cls
-        if io_cls is None:
+        if needs_io and io_cls is None:
             from rtde_io import RTDEIOInterface
             io_cls = RTDEIOInterface
         return ctl, rcv, io_cls
@@ -240,10 +244,10 @@ def default_session(
     unnecessary connection to the unused hook arm.
 
     Gripper drivers are wired from the team's known rig state:
-      ur_left  → Hook Gripper (``RTDEIOInterface`` + ``setToolDigitalOut``)
+      ur_left  → Hook Gripper (tool DO via the existing RTDE control channel)
       ur_right → Robotiq 2F-85
-    The hook uses ``needs_rtde_io=True`` so tool outputs are toggled via
-    ``rtde_io``, not ``RTDEControlInterface``.
+    We avoid opening a separate ``RTDEIOInterface`` for the hook because some
+    UR controllers reserve those RTDE input registers for fieldbus adapters.
     """
     specs: Dict[str, ArmSpec] = {}
     if left:
@@ -252,9 +256,8 @@ def default_session(
             ip=left_ip,
             X_base_task=X_LEFT_BASE_TASK,
             tcp_offset=TCP_OFFSET_HOOK,
-            needs_rtde_io=True,
             gripper_factory=lambda rtde_c, rtde_r, rtde_io=None: HookGripper(
-                rtde_io,
+                rtde_c,
             ),
             home_q_rad=HOME_Q_RAD_LEFT,
         )
