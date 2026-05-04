@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(realsense2   REQUIRED)
-find_package(OpenCV       REQUIRED COMPONENTS core imgproc dnn)
+find_package(OpenCV       REQUIRED COMPONENTS core imgproc dnn imgcodecs)
 find_package(Eigen3       REQUIRED NO_MODULE)
 
 add_executable(perception_bottle perception.cpp)

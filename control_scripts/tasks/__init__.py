@@ -22,11 +22,23 @@ Parameters that need physical measurement are marked TODO in each file
 and will raise a clear error until set.
 """
 
-from . import pick_place_cup, pick_place_plate, press_button
+from . import (
+    pick_place_bowl_hook_microwave,
+    pick_place_cup,
+    pick_place_plate,
+    pick_place_plate_microwave,
+    pour_bottle,
+    pour_bottle_hook,
+    press_button,
+)
 
 # Maps CLI task name → main(dry: bool = False) -> int.
 TASKS = {
+    "pick_place_bowl_hook_microwave": pick_place_bowl_hook_microwave.main,
     "pick_place_plate": pick_place_plate.main,
+    "pick_place_plate_microwave": pick_place_plate_microwave.main,
     "pick_place_cup": pick_place_cup.main,
+    "pour_bottle": pour_bottle.main,
+    "pour_bottle_hook": pour_bottle_hook.main,
     "press_button": press_button.main,
 }

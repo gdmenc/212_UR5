@@ -432,8 +432,6 @@ int main(int argc, char** argv) {
     // Compute plate center position via ray-plane intersection (table Z = 0).
     // The plate is flat on the table so the table-plane intersection gives the
     // plate center XY exactly. Rim height is a known constant added to Z.
-    Eigen eigen_unused;  // suppress unused warning
-    (void)eigen_unused;
     Eigen::Vector3d plate_center_task, plate_rim_task;
     Eigen::Vector3d pos_cam(0,0,0);  // kept for JSON completeness only
     if (found) {
