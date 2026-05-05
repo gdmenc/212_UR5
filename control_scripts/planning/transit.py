@@ -44,6 +44,7 @@ from typing import Dict, List, Optional, Tuple, Union
 import numpy as np
 from pydrake.math import RigidTransform, RotationMatrix
 from pydrake.multibody.inverse_kinematics import (
+    AngleBetweenVectorsConstraint,
     InverseKinematics,
     MinimumDistanceLowerBoundConstraint,
     OrientationConstraint,
@@ -252,6 +253,8 @@ def _pose_chain_to_joints(
     seed_q_full: np.ndarray,
     other_arm_instance: Optional[ModelInstanceIndex] = None,
     other_arm_q: Optional[np.ndarray] = None,
+    pos_tolerance_m: float = 0.005,
+    rot_tolerance_rad: float = 0.05,
 ) -> List[np.ndarray]:
     """IK every waypoint in order, seeding each with the previous IK result.
 
@@ -270,6 +273,8 @@ def _pose_chain_to_joints(
             plant, plant_context, arm_instance,
             other_arm_instance, other_arm_q,
             wp, seed_q_full=seeded,
+            pos_tolerance_m=pos_tolerance_m,
+            rot_tolerance_rad=rot_tolerance_rad,
         )
         out.append(q_full)
         seeded = q_full
@@ -497,6 +502,10 @@ def plan_transit(
 
     # Geometric path constraints
     fix_orientation: Optional[object] = None,    # Rotation
+    fix_orientation_tolerance_rad: float = 0.04,
+    align_tcp_axis: Optional[np.ndarray] = None,
+    align_tcp_axis_world: Optional[np.ndarray] = None,
+    align_tcp_axis_tolerance_rad: float = 0.05,
     fix_z_task: Optional[float] = None,
     z_tolerance_m: float = 0.01,
 
@@ -512,6 +521,26 @@ def plan_transit(
     extra_clearance_to: Optional[Dict[str, float]] = None,
     stay_in_workspace_box: Optional[Tuple[Tuple[float, float, float],
                                           Tuple[float, float, float]]] = None,
+
+    # IK tolerances applied at every waypoint pose. Loosen the
+    # rotation bound (default 0.05 rad ≈ 2.86°) when waypoint poses
+    # come from rig recordings whose calibration drifts slightly from
+    # the planning sim — typical for hook-gripper TCPs where the URDF
+    # frame doesn't exactly match the rig's ``setTcp`` value.
+    ik_pos_tolerance_m: float = 0.005,
+    ik_rot_tolerance_rad: float = 0.05,
+
+    # Optional sampling-based fallback after KTO. Requires a RobotDiagram
+    # built from the same plant; plain DiagramBuilder scenes cannot back
+    # Drake's SceneGraphCollisionChecker.
+    use_rrt_fallback: bool = False,
+    rrt_diagram: Optional[object] = None,
+    rrt_max_iters: int = 10000,
+    rrt_step_size: float = 0.2,
+    rrt_goal_bias: float = 0.2,
+    rrt_seed: int = 4,
+    rrt_edge_step_size: float = 0.03,
+    rrt_shortcut_attempts: int = 100,
 ) -> TransitPlan:
     """Plan a transit between task-frame TCP poses.
 
@@ -608,6 +637,8 @@ def plan_transit(
         seed_q_full,
         other_arm_instance=other_arm_instance,
         other_arm_q=other_arm_q,
+        pos_tolerance_m=ik_pos_tolerance_m,
+        rot_tolerance_rad=ik_rot_tolerance_rad,
     )
 
     if duration_s is None:
@@ -622,6 +653,7 @@ def plan_transit(
     # joint-space spline can satisfy them by accident.
     needs_hard_shape = (
         fix_orientation is not None
+        or align_tcp_axis is not None
         or fix_z_task is not None
         or max_tcp_linear_speed_m_per_s is not None
         or bool(extra_clearance_to)
@@ -687,35 +719,286 @@ def plan_transit(
                   f"({spline_fallback_reason}); falling back to KTO.")
 
     # KTO with all the requested constraints (hard shape and/or safety).
-    plan = _plan_constrained_kto(
-        plant=plant,
-        plant_context=plant_context,
-        arm=arm,
-        arm_instance=arm_instance,
-        other_arm_instance=other_arm_instance,
-        other_arm_q=other_arm_q,
-        waypoints_q_full=waypoints_q_full,
-        duration_s=duration_s,
-        fix_orientation=fix_orientation,
-        fix_z_task=fix_z_task,
-        z_tolerance_m=z_tolerance_m,
-        avoid_collisions=avoid_collisions,
-        min_clearance_m=min_clearance_m,
-        avoid_arm_singularity=avoid_arm_singularity,
-        self_collision=self_collision,
-        min_z_task=min_z_task,
-        max_tcp_linear_speed_m_per_s=max_tcp_linear_speed_m_per_s,
-        extra_clearance_to=extra_clearance_to,
-        stay_in_workspace_box=stay_in_workspace_box,
-    )
-    if spline_fallback_reason is not None:
-        plan.metadata["spline_fallback_reason"] = spline_fallback_reason
-    return plan
+    try:
+        plan = _plan_constrained_kto(
+            plant=plant,
+            plant_context=plant_context,
+            arm=arm,
+            arm_instance=arm_instance,
+            other_arm_instance=other_arm_instance,
+            other_arm_q=other_arm_q,
+            waypoints_q_full=waypoints_q_full,
+            duration_s=duration_s,
+            fix_orientation=fix_orientation,
+            fix_orientation_tolerance_rad=fix_orientation_tolerance_rad,
+            align_tcp_axis=align_tcp_axis,
+            align_tcp_axis_world=align_tcp_axis_world,
+            align_tcp_axis_tolerance_rad=align_tcp_axis_tolerance_rad,
+            fix_z_task=fix_z_task,
+            z_tolerance_m=z_tolerance_m,
+            avoid_collisions=avoid_collisions,
+            min_clearance_m=min_clearance_m,
+            avoid_arm_singularity=avoid_arm_singularity,
+            self_collision=self_collision,
+            min_z_task=min_z_task,
+            max_tcp_linear_speed_m_per_s=max_tcp_linear_speed_m_per_s,
+            extra_clearance_to=extra_clearance_to,
+            stay_in_workspace_box=stay_in_workspace_box,
+        )
+        if spline_fallback_reason is not None:
+            plan.metadata["spline_fallback_reason"] = spline_fallback_reason
+        return plan
+    except InfeasiblePlanError as kto_exc:
+        if not use_rrt_fallback or rrt_diagram is None:
+            raise
+
+        rrt_supported = (
+            fix_orientation is None
+            and fix_z_task is None
+            and max_tcp_linear_speed_m_per_s is None
+            and not bool(extra_clearance_to)
+            and stay_in_workspace_box is None
+        )
+        if not rrt_supported:
+            raise
+
+        print(f"[plan_transit] KTO path infeasible "
+              f"({kto_exc}); falling back to RRT.")
+        plan = _plan_rrt_transit(
+            diagram=rrt_diagram,
+            plant=plant,
+            plant_context=plant_context,
+            arm=arm,
+            arm_instance=arm_instance,
+            waypoints=waypoints,
+            start_q_full=waypoints_q_full[0],
+            duration_s=duration_s,
+            align_tcp_axis=align_tcp_axis,
+            align_tcp_axis_world=align_tcp_axis_world,
+            align_tcp_axis_tolerance_rad=align_tcp_axis_tolerance_rad,
+            avoid_collisions=avoid_collisions,
+            avoid_arm_singularity=avoid_arm_singularity,
+            self_collision=self_collision,
+            min_clearance_m=min_clearance_m,
+            min_z_task=min_z_task,
+            max_iters=rrt_max_iters,
+            step_size=rrt_step_size,
+            goal_bias=rrt_goal_bias,
+            seed=rrt_seed,
+            edge_step_size=rrt_edge_step_size,
+            shortcut_attempts=rrt_shortcut_attempts,
+        )
+        if spline_fallback_reason is not None:
+            plan.metadata["spline_fallback_reason"] = spline_fallback_reason
+        plan.metadata["kto_fallback_reason"] = str(kto_exc)
+        return plan
 
 
 # ---------------------------------------------------------------------------
 #  Constrained KTO planner
 # ---------------------------------------------------------------------------
+
+def _plan_rrt_transit(
+    *,
+    diagram,
+    plant: MultibodyPlant,
+    plant_context: Context,
+    arm: str,
+    arm_instance: ModelInstanceIndex,
+    waypoints: List[Pose],
+    start_q_full: np.ndarray,
+    duration_s: float,
+    align_tcp_axis: Optional[np.ndarray],
+    align_tcp_axis_world: Optional[np.ndarray],
+    align_tcp_axis_tolerance_rad: float,
+    avoid_collisions: bool,
+    avoid_arm_singularity: bool,
+    self_collision: bool,
+    min_clearance_m: float,
+    min_z_task: Optional[float],
+    max_iters: int,
+    step_size: float,
+    goal_bias: float,
+    seed: int,
+    edge_step_size: float,
+    shortcut_attempts: int,
+) -> TransitPlan:
+    """Sampling-based transit through TCP waypoints."""
+    if len(waypoints) < 2:
+        raise ValueError("Need at least 2 waypoints for RRT transit.")
+    if not avoid_collisions and not self_collision:
+        raise InfeasiblePlanError("RRT requires collision checking to be enabled")
+    from .rrt import (
+        RRTFailure,
+        make_collision_checker,
+        path_length,
+        rrt_connect_to_tcp_pose,
+        shortcut_path,
+    )
+
+    arm_idx = _arm_position_indices(plant, arm_instance)
+    validators = []
+    if align_tcp_axis is not None:
+        axis_ctx = plant.CreateDefaultContext()
+        tcp_frame = _tcp_frame(plant, arm_instance)
+        axis_tcp = np.asarray(align_tcp_axis, dtype=float).reshape(3)
+        axis_tcp = axis_tcp / np.linalg.norm(axis_tcp)
+        axis_world = (
+            np.array([0.0, 0.0, 1.0])
+            if align_tcp_axis_world is None
+            else np.asarray(align_tcp_axis_world, dtype=float).reshape(3)
+        )
+        axis_world = axis_world / np.linalg.norm(axis_world)
+        max_angle = float(align_tcp_axis_tolerance_rad)
+
+        def _axis_alignment_valid(q_full: np.ndarray) -> bool:
+            plant.SetPositions(axis_ctx, np.asarray(q_full, dtype=float))
+            R_world_tcp = tcp_frame.CalcPoseInWorld(axis_ctx).rotation().matrix()
+            axis_in_world = R_world_tcp @ axis_tcp
+            axis_in_world = axis_in_world / np.linalg.norm(axis_in_world)
+            angle = float(np.arccos(np.clip(
+                float(np.dot(axis_in_world, axis_world)), -1.0, 1.0,
+            )))
+            return angle <= max_angle
+
+        validators.append(("plate-level axis", _axis_alignment_valid))
+    if min_z_task is not None:
+        floor_ctx = plant.CreateDefaultContext()
+        tcp_frame = _tcp_frame(plant, arm_instance)
+
+        def _floor_valid(q_full: np.ndarray) -> bool:
+            plant.SetPositions(floor_ctx, np.asarray(q_full, dtype=float))
+            tcp_z = float(tcp_frame.CalcPoseInWorld(floor_ctx).translation()[2])
+            return tcp_z >= min_z_task
+
+        validators.append(("TCP floor", _floor_valid))
+    if avoid_arm_singularity and len(arm_idx) >= 5:
+        q_start_arm = np.asarray(start_q_full, dtype=float)[arm_idx]
+        q_start_wrapped = (q_start_arm + np.pi) % (2.0 * np.pi) - np.pi
+        q3_sign = 1.0 if q_start_wrapped[2] >= 0 else -1.0
+        q5_sign = 1.0 if q_start_wrapped[4] >= 0 else -1.0
+        eps = 0.10
+
+        def _same_branch_valid(q_full: np.ndarray) -> bool:
+            q_arm = np.asarray(q_full, dtype=float)[arm_idx]
+            q_arm = (q_arm + np.pi) % (2.0 * np.pi) - np.pi
+            q3 = q_arm[2]
+            q5 = q_arm[4]
+            if q3_sign > 0 and not (eps <= q3 <= np.pi - eps):
+                return False
+            if q3_sign < 0 and not (-np.pi + eps <= q3 <= -eps):
+                return False
+            if q5_sign > 0 and not (eps <= q5 <= np.pi - eps):
+                return False
+            if q5_sign < 0 and not (-np.pi + eps <= q5 <= -eps):
+                return False
+            return True
+
+        validators.append(("q3/q5 singularity branch", _same_branch_valid))
+
+    validity_fn = (
+        None if not validators
+        else lambda q_full: all(valid(q_full) for _, valid in validators)
+    )
+
+    checker = make_collision_checker(
+        diagram,
+        plant,
+        arm,
+        edge_step_size=edge_step_size,
+        env_padding=min_clearance_m,
+    )
+
+    q_current = np.asarray(start_q_full, dtype=float).copy()
+    failed_start_constraints = [
+        name for name, valid in validators if not valid(q_current)
+    ]
+    if failed_start_constraints:
+        raise InfeasiblePlanError(
+            "RRT start configuration violates validity constraint(s): "
+            + ", ".join(failed_start_constraints)
+        )
+
+    full_path: List[np.ndarray] = [q_current.copy()]
+    reports = []
+    try:
+        for segment_i, goal_pose in enumerate(waypoints[1:], start=1):
+            segment_plan, report = rrt_connect_to_tcp_pose(
+                checker,
+                q_start_full=q_current,
+                tcp_pose_task=goal_pose,
+                planning_arm_name=arm,
+                max_iters=max_iters,
+                step_size=step_size,
+                goal_bias=goal_bias,
+                seed=seed + segment_i - 1,
+                validity_fn=validity_fn,
+                validity_edge_step_size=edge_step_size,
+            )
+            segment_path = shortcut_path(
+                checker,
+                segment_plan.path_full,
+                attempts=shortcut_attempts,
+                seed=seed + 1000 + segment_i,
+                validity_fn=validity_fn,
+                validity_edge_step_size=edge_step_size,
+            )
+            full_path.extend(
+                np.asarray(q, dtype=float).copy() for q in segment_path[1:]
+            )
+            q_current = full_path[-1]
+            reports.append(report)
+    except RRTFailure as exc:
+        raise InfeasiblePlanError(str(exc)) from exc
+
+    if len(full_path) < 2:
+        raise InfeasiblePlanError("RRT returned an empty path")
+
+    # Preserve RRT's checked straight joint-space edges. A cubic through
+    # these nodes could leave the validated corridor.
+    q_samples = np.array(full_path).T
+    seg_lengths = [
+        float(np.linalg.norm(b[arm_idx] - a[arm_idx]))
+        for a, b in zip(full_path[:-1], full_path[1:])
+    ]
+    total_len = sum(seg_lengths)
+    if total_len <= 1e-9:
+        times = np.linspace(0.0, duration_s, len(full_path))
+    else:
+        cumulative = np.concatenate(([0.0], np.cumsum(seg_lengths)))
+        times = duration_s * cumulative / total_len
+    traj = PiecewisePolynomial.FirstOrderHold(times, q_samples)
+
+    worst = _check_safety_along(
+        plant,
+        plant_context,
+        traj,
+        arm_instance,
+        other_arm_q=None,
+        other_arm_instance=None,
+        n_samples=200,
+        check_collisions=avoid_collisions or self_collision,
+        min_clearance_m=min_clearance_m,
+        floor_min_z=min_z_task,
+    )
+
+    return TransitPlan(
+        trajectory=traj,
+        arm=arm,
+        duration_s=duration_s,
+        waypoints_q=[q[arm_idx] for q in full_path],
+        collision_checked=bool(avoid_collisions or self_collision),
+        min_clearance_m=worst,
+        metadata={
+            "planner": "rrt",
+            "rrt_segment_planners": [r.chosen_planner for r in reports],
+            "rrt_nodes": len(full_path),
+            "rrt_path_length": path_length(full_path, arm_idx),
+            "rrt_edge_step_size": edge_step_size,
+            "rrt_shortcut_attempts": shortcut_attempts,
+        },
+    )
+
 
 def _plan_constrained_kto(
     plant: MultibodyPlant,
@@ -728,6 +1011,10 @@ def _plan_constrained_kto(
     duration_s: float,
     *,
     fix_orientation: Optional[object],
+    fix_orientation_tolerance_rad: float,
+    align_tcp_axis: Optional[np.ndarray],
+    align_tcp_axis_world: Optional[np.ndarray],
+    align_tcp_axis_tolerance_rad: float,
     fix_z_task: Optional[float],
     z_tolerance_m: float,
     avoid_collisions: bool,
@@ -852,7 +1139,7 @@ def _plan_constrained_kto(
     # Fix-orientation: keep TCP rotation matched throughout.
     if fix_orientation is not None:
         R_target = RotationMatrix(np.asarray(fix_orientation.as_matrix(), dtype=float))
-        theta_bound = 0.04   # ~2.3°
+        theta_bound = float(fix_orientation_tolerance_rad)
         orient_constraint = OrientationConstraint(
             plant=plant,
             frameAbar=world_frame,
@@ -864,6 +1151,31 @@ def _plan_constrained_kto(
         )
         for s in s_samples:
             trajopt.AddPathPositionConstraint(orient_constraint, float(s))
+
+    # Axis alignment: keep a TCP-frame direction within an angular tolerance
+    # of a world-frame direction. Useful for "held plate stays level" without
+    # locking yaw or roll around the plate normal.
+    if align_tcp_axis is not None:
+        axis_tcp = np.asarray(align_tcp_axis, dtype=float).reshape(3)
+        axis_tcp = axis_tcp / np.linalg.norm(axis_tcp)
+        axis_world = (
+            np.array([0.0, 0.0, 1.0])
+            if align_tcp_axis_world is None
+            else np.asarray(align_tcp_axis_world, dtype=float).reshape(3)
+        )
+        axis_world = axis_world / np.linalg.norm(axis_world)
+        axis_constraint = AngleBetweenVectorsConstraint(
+            plant=plant,
+            frameA=world_frame,
+            a_A=axis_world,
+            frameB=tcp_frame,
+            b_B=axis_tcp,
+            angle_lower=0.0,
+            angle_upper=float(align_tcp_axis_tolerance_rad),
+            plant_context=plant_context,
+        )
+        for s in s_samples:
+            trajopt.AddPathPositionConstraint(axis_constraint, float(s))
 
     # Fix-z: keep TCP z within ±z_tolerance_m of fix_z_task.
     if fix_z_task is not None:

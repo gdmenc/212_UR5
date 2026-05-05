@@ -1,13 +1,13 @@
-"""Dry-run motion planning for pick_place_plate_microwave: entrance test.
+"""Dry-run motion planning for pick_place_bowl_hook_microwave: entrance test.
 
-Plans the four task-frame transits the real task would issue, animates
+Plans the four task-frame transits the real bowl task would issue, animates
 each in Meshcat, and prints the ``moveJ(path=...)`` payload that
 ``execute_plan`` *would* send to RTDE — without connecting to the arm.
 
-Legs (right arm only — left stays parked at sim HOME):
+Legs (left arm only — right stays parked at sim HOME):
     1. HOME            -> hover above grasp              (free-space)
-    2. hover           -> grasp pose                     (descent; sim ignores plate)
-    3. grasp pose      -> hover                          (transit_z lift)
+    2. hover           -> pregrasp -> grasp pose         (descent; sim ignores bowl)
+    3. grasp pose      -> pregrasp -> hover              (transit_z lift)
     4. hover           -> midpoint? -> microwave entrance hover
 
 Each leg is an independent ``plan_transit`` call. Legs 2-4 seed their
@@ -19,28 +19,31 @@ payload (matching the natural stop-grip-lift flow on the real arm).
 Planner stack
 -------------
 ``plan_transit`` IKs the task-frame TCP waypoints into joint targets. For the
-held-plate carry it tries Drake ``KinematicTrajectoryOptimization`` first, then
+held-bowl carry it tries Drake ``KinematicTrajectoryOptimization`` first, then
 falls back to constrained RRT if KTO cannot find a valid path. The live task
 streams the planned trajectory with ``execute_plan(..., method="servoJ")`` for
 smoother KTO carries; this dry-run still prints a ``moveJ(path=...)`` payload
 for inspection.
 
 The first three legs are planned in a scene without a held object. Leg 4 is
-planned in a second scene with the plate welded to the Robotiq TCP, matching
-the live task's post-pick carry. Meshcat uses that attached-plate scene so the
-carry-to-entrance path shows the plate in hand.
+planned in a second scene with the bowl welded to the hook TCP, matching the
+live task's post-pick carry. Meshcat uses that attached-bowl scene so the
+carry-to-entrance path shows the bowl in hand. The cup-with-stick is kept on
+the table as a static obstacle in every planning scene so the carry routes
+around it (matching the live task's ``INCLUDE_CUP_WITH_STICK_OBSTACLE``).
 
-With ``KEEP_PLATE_LEVEL_DURING_CARRY`` enabled in the task module, leg 4 passes
-an axis-alignment constraint to ``plan_transit``: the plate normal, expressed
-in the TCP frame at carry start, must stay close to task +Z. This uses Drake's
-``AngleBetweenVectorsConstraint`` at KTO path samples, so yaw/rotation around
-vertical remains free while spill-causing tilt is bounded.
+With ``KEEP_BOWL_LEVEL_DURING_CARRY`` enabled in the task module, leg 4 passes
+an axis-alignment constraint to ``plan_transit``: the bowl's body-fixed +Z
+axis, expressed in the TCP frame at carry start, must stay close to task +Z
+during the carry. This uses Drake's ``AngleBetweenVectorsConstraint`` at KTO
+path samples, so yaw/rotation around vertical remains free while the bowl tilt
+established at pick time stays put.
 
 Run::
 
-    python3.11 -m control_scripts.planning.dryrun_pick_plate
-    python3.11 -m control_scripts.planning.dryrun_pick_plate --animate-seconds 3
-    python3.11 -m control_scripts.planning.dryrun_pick_plate --direct-to-entry
+    python3.11 -m control_scripts.planning.dryrun_pick_bowl
+    python3.11 -m control_scripts.planning.dryrun_pick_bowl --animate-seconds 3
+    python3.11 -m control_scripts.planning.dryrun_pick_bowl --direct-to-entry
 """
 
 from __future__ import annotations
@@ -68,19 +71,21 @@ from .transit import (
     _arm_position_indices,
     plan_transit,
 )
-from ..tasks.pick_place_plate_microwave import (
+from ..tasks.pick_place_bowl_hook_microwave import (
     ARM, CONFIG,
+    CARRY_BOWL_LEVEL_TOLERANCE_RAD,
     CARRY_MIN_CLEARANCE_M,
-    CARRY_PLATE_LEVEL_TOLERANCE_RAD,
-    MIDPOINT_ANGLE_RAD,
+    INCLUDE_CUP_WITH_STICK_OBSTACLE,
+    KEEP_BOWL_LEVEL_DURING_CARRY,
     MICROWAVE_DOOR_OPEN_ANGLE_RAD,
+    MIDPOINT_ANGLE_RAD,
     MOTION_PLAN_BLEND_R_M,
     MOTION_PLAN_EXECUTION_METHOD,
-    MOTION_PLAN_SERVO_TIME_SCALE,
-    _hover_before_place,
-    KEEP_PLATE_LEVEL_DURING_CARRY,
     MOTION_PLAN_RRT_FALLBACK,
-    _plate_normal_axis_in_tcp,
+    MOTION_PLAN_SERVO_TIME_SCALE,
+    USE_MIDPOINT,
+    _bowl_up_axis_in_tcp,
+    _hover_before_place,
     plan_midpoint,
     plan_pick,
     plan_place,
@@ -92,6 +97,16 @@ from ..util.rotations import Rotation
 _DEFAULT_SPEED = 1.0    # rad/s — joint speed cap for moveJ_path
 _DEFAULT_ACCEL = 1.4    # rad/s²
 _BLEND_R = MOTION_PLAN_BLEND_R_M
+
+
+# Static-object skip list mirroring the live task's _build_planning_context.
+# Keeping the cup-with-stick on the table so the planner routes around it.
+_SCENE_SKIP_OBJECTS = (
+    ("plate", "cup", "bowl", "bottle", "tray")
+    if INCLUDE_CUP_WITH_STICK_OBSTACLE
+    else ()
+)
+_SCENE_INCLUDE_OBJECTS = INCLUDE_CUP_WITH_STICK_OBSTACLE
 
 
 def _set_marker(meshcat, path, xyz, color, radius=0.012):
@@ -201,7 +216,7 @@ def _plan_leg(plant, plant_ctx, label: str, waypoints: List[Pose],
 
 
 def _resolve_task_poses(plant, plant_ctx):
-    """Build task-frame TCP poses matching the live plate task."""
+    """Build task-frame TCP poses matching the live bowl task."""
     grasp = plan_pick()
     grasp_pose = grasp.grasp_pose
     pregrasp_pose = offset_along_tool_z(grasp_pose, grasp.pregrasp_offset)
@@ -231,6 +246,7 @@ def _resolve_task_poses(plant, plant_ctx):
 def _plan_all_legs(
     plant,
     plant_ctx,
+    pre_carry_rrt_diagram,
     carry_plant,
     carry_plant_ctx,
     carry_rrt_diagram,
@@ -243,17 +259,23 @@ def _plan_all_legs(
     previous leg's terminal IK. Returns a list of (label, plan) tuples
     or None if any leg fails."""
     home_tcp, hover, pregrasp, grasp, midpoint, entrance_hover = poses
-    other_q = home_q[_arm_position_indices(plant, _arm_model_instance(plant, "ur_left"))]
-    right_q = home_q[_arm_position_indices(plant, _arm_model_instance(plant, "ur_right"))]
 
-    carry_waypoints = [hover, entrance_hover] if direct_to_entry else [
-        hover, midpoint, entrance_hover,
+    # The bowl task plans on ur_left, so freeze ur_right at HOME and chain
+    # ur_left's terminal q across legs.
+    other_arm = "ur_right"
+    other_q = home_q[
+        _arm_position_indices(plant, _arm_model_instance(plant, other_arm))
     ]
-    carry_label = (
-        "4: hover -> entrance hover (direct)"
-        if direct_to_entry
-        else "4: hover -> midpoint -> entrance hover"
-    )
+    left_q = home_q[
+        _arm_position_indices(plant, _arm_model_instance(plant, ARM))
+    ]
+
+    if direct_to_entry or not USE_MIDPOINT:
+        carry_waypoints = [hover, entrance_hover]
+        carry_label = "4: hover -> entrance hover (direct)"
+    else:
+        carry_waypoints = [hover, midpoint, entrance_hover]
+        carry_label = "4: hover -> midpoint -> entrance hover"
 
     pre_carry_specs = [
         ("1: HOME -> hover (free-space)", [home_tcp, hover]),
@@ -262,28 +284,33 @@ def _plan_all_legs(
     ]
     out = []
     for label, wps in pre_carry_specs:
+        # Pass the no-bowl RRT diagram so KTO can fall back to RRT if the
+        # spline path collides with the (open) microwave door or the cup-
+        # with-stick — e.g. the wide HOME -> hover sweep on the left arm
+        # routes around the door instead of straight through it.
         plan = _plan_leg(
             plant, plant_ctx, label, waypoints=wps,
-            current_q={"ur_left": other_q, "ur_right": right_q},
+            current_q={ARM: left_q, other_arm: other_q},
+            rrt_diagram=pre_carry_rrt_diagram,
         )
         if plan is None:
             return None
         out.append((label, plan))
-        right_q = _terminal_q_for_arm(plan, plant)
+        left_q = _terminal_q_for_arm(plan, plant)
 
     plan = _plan_leg(
         carry_plant,
         carry_plant_ctx,
         carry_label,
         waypoints=carry_waypoints,
-        current_q={"ur_left": other_q, "ur_right": right_q},
+        current_q={ARM: left_q, other_arm: other_q},
         rrt_diagram=carry_rrt_diagram,
         align_tcp_axis=(
-            _plate_normal_axis_in_tcp(hover)
-            if KEEP_PLATE_LEVEL_DURING_CARRY else None
+            _bowl_up_axis_in_tcp(hover)
+            if KEEP_BOWL_LEVEL_DURING_CARRY else None
         ),
         align_tcp_axis_world=np.array([0.0, 0.0, 1.0]),
-        align_tcp_axis_tolerance_rad=CARRY_PLATE_LEVEL_TOLERANCE_RAD,
+        align_tcp_axis_tolerance_rad=CARRY_BOWL_LEVEL_TOLERANCE_RAD,
         min_clearance_m=CARRY_MIN_CLEARANCE_M,
     )
     if plan is None:
@@ -324,9 +351,6 @@ def _run_interactive(meshcat, diagram, plant, sim_ctx, legs,
 
     def play(idx):
         label, plan = legs[idx - 1]
-        # Start the arm at the leg's start q so the animation is the
-        # full motion from beginning to end every time, regardless of
-        # what was on screen before.
         q0 = np.asarray(plan.trajectory.value(plan.trajectory.start_time())).flatten()
         plant.SetPositions(plant_ctx, q0)
         diagram.ForcedPublish(sim_ctx)
@@ -389,10 +413,11 @@ def main(animate_seconds: float = 2.5, cycle: bool = False,
     meshcat = StartMeshcat()
     print(f"[dryrun] Meshcat → {meshcat.web_url()}")
 
-    # Planning scene for approach/lift legs: no stale demo objects and no
-    # in-hand plate yet.
+    # Approach/lift legs share a planning scene with no in-hand bowl yet but
+    # WITH the cup-with-stick on the table (matching the live task setup).
     scene = build_scene(
-        include_objects=False,
+        include_objects=_SCENE_INCLUDE_OBJECTS,
+        skip_static_objects=_SCENE_SKIP_OBJECTS,
         robotiq_mode=gripper_mode,
         microwave_door_open_angle_rad=MICROWAVE_DOOR_OPEN_ANGLE_RAD,
     )
@@ -400,13 +425,15 @@ def main(animate_seconds: float = 2.5, cycle: bool = False,
     root_ctx = scene.diagram.CreateDefaultContext()
     plant_ctx = plant.GetMyMutableContextFromRoot(root_ctx)
 
-    # Carry scene: same arm/microwave layout, with the plate welded to the TCP.
-    # This is both the leg-4 planning scene and the Meshcat visualization scene.
+    # Carry scene: same arm/microwave/cup-with-stick layout, with the bowl
+    # welded to the hook TCP. This is both the leg-4 visualization scene and
+    # the source of the carry render in Meshcat.
     carry_scene = build_scene(
-        include_objects=False,
+        include_objects=_SCENE_INCLUDE_OBJECTS,
+        skip_static_objects=_SCENE_SKIP_OBJECTS,
         robotiq_mode=gripper_mode,
         microwave_door_open_angle_rad=MICROWAVE_DOOR_OPEN_ANGLE_RAD,
-        attached_objects=(("plate", ARM, None),),
+        attached_objects=(("bowl", ARM, None),),
         meshcat=meshcat,
     )
     diagram, carry_plant = carry_scene.diagram, carry_scene.plant
@@ -415,11 +442,24 @@ def main(animate_seconds: float = 2.5, cycle: bool = False,
     sim_ctx = sim.get_mutable_context()
     carry_plant_ctx = carry_plant.GetMyMutableContextFromRoot(sim_ctx)
 
-    carry_rrt_diagram, carry_rrt_plant, _, _ = build_planning_scene(
-        include_objects=False,
+    # Pre-carry RRT scene: RobotDiagram-backed plant with the cup-with-stick
+    # on the table but no in-hand bowl yet. Used as the RRT fallback for the
+    # HOME -> hover and approach legs so they can route around the open door.
+    pre_carry_rrt_diagram, _, _, _ = build_planning_scene(
+        include_objects=_SCENE_INCLUDE_OBJECTS,
+        skip_static_objects=_SCENE_SKIP_OBJECTS,
         robotiq_mode=gripper_mode,
         microwave_door_open_angle_rad=MICROWAVE_DOOR_OPEN_ANGLE_RAD,
-        attached_objects=(("plate", ARM, None),),
+    )
+
+    # Carry RRT scene: RobotDiagram-backed plant with the bowl welded and the
+    # cup-with-stick still on the table. Matches the live ``_build_planning_context``.
+    carry_rrt_diagram, carry_rrt_plant, _, _ = build_planning_scene(
+        include_objects=_SCENE_INCLUDE_OBJECTS,
+        skip_static_objects=_SCENE_SKIP_OBJECTS,
+        robotiq_mode=gripper_mode,
+        microwave_door_open_angle_rad=MICROWAVE_DOOR_OPEN_ANGLE_RAD,
+        attached_objects=(("bowl", ARM, None),),
     )
     carry_rrt_root_ctx = carry_rrt_diagram.CreateDefaultContext()
     carry_rrt_plant_ctx = carry_rrt_plant.GetMyMutableContextFromRoot(
@@ -456,7 +496,7 @@ def main(animate_seconds: float = 2.5, cycle: bool = False,
 
     print()
     print("=" * 78)
-    print(f"  Dry-run pick_place_plate_microwave   (arm={ARM})")
+    print(f"  Dry-run pick_place_bowl_hook_microwave   (arm={ARM})")
     print(f"  HOME      TCP xyz = {np.round(home_tcp_pose.translation, 3)}")
     print(f"  hover     TCP xyz = {np.round(hover_pose.translation, 3)}")
     print(f"  pregrasp  TCP xyz = {np.round(pregrasp_pose.translation, 3)}")
@@ -464,24 +504,26 @@ def main(animate_seconds: float = 2.5, cycle: bool = False,
     print(f"  midpoint  TCP xyz = {np.round(midpoint_carry_pose.translation, 3)}")
     print(f"  entrance  TCP xyz = {np.round(entrance_hover_pose.translation, 3)}")
     print(f"  transit_z         = {transit_z}")
-    print(f"  Carry path         = {'direct to entrance' if direct_to_entry else 'via midpoint'}")
+    print(f"  Carry path         = {'direct to entrance' if (direct_to_entry or not USE_MIDPOINT) else 'via midpoint'}")
     print("  Motion planner     = plan_transit (IK -> KTO first -> RRT fallback)")
     print(f"  Microwave door     = open ({np.degrees(MICROWAVE_DOOR_OPEN_ANGLE_RAD):.0f}°)")
+    print(f"  Cup-with-stick     = {'on table (obstacle)' if INCLUDE_CUP_WITH_STICK_OBSTACLE else 'omitted'}")
     attitude = (
-        f"plate normal within ±{np.degrees(CARRY_PLATE_LEVEL_TOLERANCE_RAD):.1f}° of task +Z"
-        if KEEP_PLATE_LEVEL_DURING_CARRY else "unconstrained"
+        f"bowl-up axis within ±{np.degrees(CARRY_BOWL_LEVEL_TOLERANCE_RAD):.1f}° of task +Z"
+        if KEEP_BOWL_LEVEL_DURING_CARRY else "unconstrained"
     )
-    print(f"  Plate attitude     = {attitude}")
+    print(f"  Bowl attitude      = {attitude}")
     print(f"  Execution method   = execute_plan(method='{MOTION_PLAN_EXECUTION_METHOD}')")
     if MOTION_PLAN_EXECUTION_METHOD == "servoJ":
         print(f"  Servo time scale   = {MOTION_PLAN_SERVO_TIME_SCALE:.1f}x")
-    print("  Held plate model   = welded to TCP for leg 4 and Meshcat display")
+    print("  Held bowl model    = welded to TCP for leg 4 and Meshcat display")
     print(f"  Carry clearance    = {CARRY_MIN_CLEARANCE_M * 1000:.1f} mm")
     print(f"  Mode              = {'cycle' if cycle else 'interactive'}")
     print("=" * 78)
 
     legs = _plan_all_legs(
-        plant, plant_ctx, carry_rrt_plant, carry_rrt_plant_ctx,
+        plant, plant_ctx, pre_carry_rrt_diagram,
+        carry_rrt_plant, carry_rrt_plant_ctx,
         carry_rrt_diagram, home_q,
         (
             home_tcp_pose,
@@ -501,7 +543,6 @@ def main(animate_seconds: float = 2.5, cycle: bool = False,
     if cycle:
         for label, plan in legs:
             print(f"[cycle] leg: {label}")
-            # Reset to leg start so each animation is the full motion.
             q0 = np.asarray(plan.trajectory.value(plan.trajectory.start_time())).flatten()
             carry_plant.SetPositions(carry_plant_ctx, q0)
             diagram.ForcedPublish(sim_ctx)
@@ -521,7 +562,7 @@ def main(animate_seconds: float = 2.5, cycle: bool = False,
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(
-        description="Dry-run pick_place_plate_microwave: plan once, "
+        description="Dry-run pick_place_bowl_hook_microwave: plan once, "
                     "replay any leg interactively in Meshcat."
     )
     ap.add_argument(

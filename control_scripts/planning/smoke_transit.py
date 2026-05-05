@@ -59,11 +59,12 @@ def _animate(diagram, plant, traj, meshcat, *, seconds: float = 4.0):
         time.sleep(0.02)
 
 
-def _run(constraint_set: str, animate_seconds: float):
+def _run(constraint_set: str, animate_seconds: float,
+         gripper_mode: str = "closed"):
     meshcat = StartMeshcat()
     print(f"[smoke] Meshcat → {meshcat.web_url()}")
 
-    scene = build_scene(meshcat=meshcat)
+    scene = build_scene(meshcat=meshcat, robotiq_mode=gripper_mode)
     diagram, plant = scene.diagram, scene.plant
     diag_ctx = diagram.CreateDefaultContext()
     plant_ctx = plant.GetMyMutableContextFromRoot(diag_ctx)
@@ -209,8 +210,12 @@ def main() -> None:
         default="default",
     )
     ap.add_argument("--animate-seconds", type=float, default=4.0)
+    ap.add_argument(
+        "--gripper-mode", choices=["closed", "open"], default="closed",
+        help="Robotiq 2F-85 finger configuration to load (default: closed).",
+    )
     args = ap.parse_args()
-    _run(args.constraints, args.animate_seconds)
+    _run(args.constraints, args.animate_seconds, args.gripper_mode)
 
 
 if __name__ == "__main__":

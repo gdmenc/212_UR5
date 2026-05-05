@@ -48,10 +48,38 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 _UR5E_URDF = _REPO_ROOT / "ur_description" / "urdf" / "ur5e.urdf"
 
 
+def _swap_visual_meshes_to_collision(text: str) -> str:
+    """Rewrite mesh paths inside ``<visual>`` blocks from
+    ``meshes/ur5e/visual/*.obj`` to ``meshes/ur5e/collision/*.obj``.
+
+    The visual OBJs total ~12 MB per arm and overwhelm Meshcat. The
+    collision OBJs are pre-decimated ~445 KB / arm — same body
+    geometry, lower triangle count, ~27× lighter on the WebSocket.
+    Render quality is "obviously a UR5e" but lower-poly. Targets
+    ``<visual>`` blocks only; ``<collision>`` blocks are untouched, so
+    collision queries are unaffected.
+
+    Only the UR5e URDF is patched here — microwave / gripper / object
+    URDFs/SDFs use their own (cheaper) geometry and don't go through
+    this code path, so they keep their full visual fidelity.
+    """
+    def _rewrite(match: re.Match) -> str:
+        return match.group(0).replace(
+            "meshes/ur5e/visual/", "meshes/ur5e/collision/",
+        )
+    return re.sub(
+        r'<visual>.*?</visual>', _rewrite, text, flags=re.DOTALL,
+    )
+
+
 def _read_ur5e_urdf_without_world_weld() -> str:
     """Return the URDF text with ``<link name="world"/>`` and the
     ``base_joint`` element removed, so the parsed model has
-    ``base_link`` as a free root link we can weld ourselves."""
+    ``base_link`` as a free root link we can weld ourselves.
+
+    Also rewrites ``<visual>`` mesh references to the pre-decimated
+    collision OBJs — see ``_swap_visual_meshes_to_collision``.
+    """
     text = _UR5E_URDF.read_text()
     # Match a self-closing or paired world link tag.
     text = re.sub(
@@ -64,6 +92,9 @@ def _read_ur5e_urdf_without_world_weld() -> str:
     text = re.sub(
         r'<joint\s+name="base_joint"[\s\S]*?</joint>', "", text, count=1,
     )
+    # Swap heavy visual meshes for the lightweight collision OBJs so
+    # Meshcat renders cheap geometry. <collision> blocks untouched.
+    text = _swap_visual_meshes_to_collision(text)
     return text
 
 

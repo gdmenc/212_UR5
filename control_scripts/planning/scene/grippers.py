@@ -105,6 +105,18 @@ def add_hook_gripper(
     The hook SDF is authored with origin at the TCP and +x pointing
     back toward the flange. We weld at TCP_OFFSET_HOOK so the
     gripper origin (= TCP) lands at the calibrated TCP location.
+
+    User-observed correction: the SDF mesh comes out rotated 90° from
+    the real-world hook orientation around the WRIST z (the gripper's
+    actuation axis — the line along which the moving finger slides).
+    We pre-multiply the weld with R_z(+π/2) about wrist z to bring the
+    visual + collision back in line with the real hook. Wrist z passes
+    through the TCP point (TCP_OFFSET is a pure +z translation followed
+    by a rotation), so rotating about wrist z keeps the TCP location
+    fixed — only the hook's "which direction does the finger face"
+    changes. The TCP frame is added separately on the wrist (not via
+    the gripper body), so this rotation only affects the gripper
+    geometry, not anything that keys off the TCP.
     """
     if not _HOOK_SDF.exists():
         raise FileNotFoundError(f"Hook gripper SDF missing: {_HOOK_SDF}")
@@ -116,6 +128,14 @@ def add_hook_gripper(
     wrist = plant.GetFrameByName("wrist_3_link", arm_handle.model_instance)
     gripper_frame = plant.GetFrameByName("hook_gripper", gripper_instance)
     X_wrist_gripper = _tcp_offset_to_rigid_transform(TCP_OFFSET_HOOK)
+    # Pre-multiply: rotate the gripper body 90° CCW about WRIST z
+    # (= the gripper's actuation axis) before placing it via TCP_OFFSET.
+    # Wrist z runs through the TCP since TCP_OFFSET's translation is
+    # purely along wrist z, so the TCP point is unchanged.
+    X_wrist_gripper = (
+        RigidTransform(RotationMatrix.MakeZRotation(np.pi / 2))
+        @ X_wrist_gripper
+    )
     plant.WeldFrames(wrist, gripper_frame, X_wrist_gripper)
 
     tcp_frame_name = _add_tcp_frame(

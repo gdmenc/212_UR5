@@ -44,12 +44,40 @@ def main() -> None:
         help="Skip tabletop objects (plate/cup/bowl/bottle/tray).",
     )
     ap.add_argument(
+        "--gripper-mode",
+        choices=["closed", "open"],
+        default="closed",
+        help="Robotiq 2F-85 finger configuration to load (default: closed).",
+    )
+    ap.add_argument(
+        "--in-hand",
+        action="append",
+        default=[],
+        metavar="KIND:ARM",
+        help=(
+            "Weld a copy of object KIND to ARM's gripper instead of "
+            "placing it on the table. Repeat for multiple. "
+            "Example: --in-hand bowl:ur_right --in-hand cup:ur_left"
+        ),
+    )
+    ap.add_argument(
         "--show-collision",
         action="store_true",
         help=(
             "Also render collision geometry as green wireframes. "
             "Useful for verifying box placement; doubles the geometry "
             "Meshcat has to draw."
+        ),
+    )
+    ap.add_argument(
+        "--microwave-door-open-deg",
+        type=float,
+        default=0.0,
+        help=(
+            "Weld the microwave door at the given open angle (degrees). "
+            "0 = closed (default). 90 = perpendicular to front face. "
+            "~105 = typical mechanical hinge stop. The door swings "
+            "toward the operator (-y) about the outer-left edge."
         ),
     )
     ap.add_argument(
@@ -60,10 +88,29 @@ def main() -> None:
     )
     args = ap.parse_args()
 
+    # Parse --in-hand pairs (kind:arm) into the build_scene kwargs.
+    attached: list = []
+    skip: list = []
+    for raw in args.in_hand:
+        if ":" not in raw:
+            ap.error(f"--in-hand requires KIND:ARM, got {raw!r}")
+        kind, arm = raw.split(":", 1)
+        attached.append((kind, arm, None))   # None → default mount pose
+        # Also drop the default static placement so we don't have two
+        # copies of the same kind in the scene.
+        if kind not in skip:
+            skip.append(kind)
+
+    import math
+
     meshcat = StartMeshcat()
     scene = build_scene(
         include_microwave=not args.no_microwave,
         include_objects=not args.no_objects,
+        robotiq_mode=args.gripper_mode,
+        skip_static_objects=tuple(skip),
+        attached_objects=tuple(attached),
+        microwave_door_open_angle_rad=math.radians(args.microwave_door_open_deg),
         meshcat=meshcat,
         show_collision=args.show_collision,
     )

@@ -18,9 +18,16 @@
       base section  : 22 × 19.23 × 15.75 mm  (z 54.9..70.65)
       tip / pad     : 22 ×  7.19 × 60.45 mm  (z 70.65..131.1)
 
-  TCP_OFFSET_ROBOTIQ_2F85[2] = 0.184 m sits 53 mm beyond the fingertip
-  end (z = 131.1 mm) — covered separately by the FixedOffsetFrame
-  added in planning/scene/grippers.py.
+  Update for the actual lab Robotiq + 3-in fingers: the SDF originally
+  modeled the base body as 55 mm tall, but the real Robotiq 2F-85
+  housing on this rig is closer to 123 mm. With a 123 mm base and
+  76.2 mm fingers stacked on top, the fingertips land at 199 mm —
+  TCP_OFFSET_ROBOTIQ_2F85 = 184 mm sits 61 mm into the fingers, 15 mm
+  before the fingertip end. So a welded held object (plate, cup, ...)
+  with its rim at TCP is "inside the fingers" by 15 mm. The base is
+  modeled as a 40 mm radius cylinder spanning z ∈ [0, 123] mm; the
+  finger boxes are unchanged in size but shifted up by 68 mm so they
+  sit on top of the new base.
 -->
 <sdf xmlns:drake="http://drake.mit.edu" version="1.8">
   <model name="robotiq_2f_85">
@@ -35,7 +42,10 @@
         </inertia>
       </inertial>
 
-      <!-- Base body: visual = real Robotiq base_link mesh, collision = bounding box -->
+      <!-- Base body: visual = real Robotiq base_link mesh + cylinder
+           extension to fill the gap up to the fingers (the mesh alone is
+           too short for the actual lab Robotiq + 3-in fingers).
+           Collision = the full 12.3 cm cylinder. -->
       <visual name="base_visual">
         <pose>0 0 0 0 0 0</pose>
         <geometry>
@@ -45,10 +55,17 @@
           </mesh>
         </geometry>
       </visual>
-      <collision name="base_collision">
-        <pose>0 0 0.0275 0 0 0</pose>
+      <visual name="base_extension_visual">
+        <pose>0 0 0.0615 0 0 0</pose>
         <geometry>
-          <box><size>0.085 0.060 0.055</size></box>
+          <cylinder><radius>0.040</radius><length>0.123</length></cylinder>
+        </geometry>
+        <material><diffuse>0.45 0.45 0.50 1</diffuse></material>
+      </visual>
+      <collision name="base_collision">
+        <pose>0 0 0.0615 0 0 0</pose>
+        <geometry>
+          <cylinder><radius>0.040</radius><length>0.123</length></cylinder>
         </geometry>
       </collision>
 
@@ -59,43 +76,44 @@
            ~6 mm per side) avoids checking two collision pairs per
            finger and removes the convex-hull cost on the stepped step. -->
       <visual name="right_finger_base_visual">
-        <pose>0 +0.00962 0.06278 0 0 0</pose>
+        <pose>0 +0.00962 0.13078 0 0 0</pose>
         <geometry>
           <box><size>0.022 0.01923 0.01575</size></box>
         </geometry>
         <material><diffuse>0.45 0.45 0.50 1</diffuse></material>
       </visual>
       <visual name="right_finger_tip_visual">
-        <pose>0 +0.00360 0.10093 0 0 0</pose>
+        <pose>0 +0.00360 0.16893 0 0 0</pose>
         <geometry>
           <box><size>0.022 0.00719 0.06045</size></box>
         </geometry>
         <material><diffuse>0.55 0.55 0.60 1</diffuse></material>
       </visual>
       <collision name="right_finger_collision">
-        <!-- z centred on full finger length (54.9..131.1 mm) → 93.0 mm.
-             y centred on the base-thickness envelope. -->
-        <pose>0 +0.00962 0.0930 0 0 0</pose>
+        <!-- Shifted up 68 mm from original (0.0930 → 0.1610) so the
+             3-in finger sits on top of the new 123-mm base cylinder.
+             Full finger span: 122.9..199.1 mm. -->
+        <pose>0 +0.00962 0.1610 0 0 0</pose>
         <geometry><box><size>0.022 0.01923 0.0762</size></box></geometry>
       </collision>
 
       <!-- ============== LEFT finger (at -y) ============== -->
       <visual name="left_finger_base_visual">
-        <pose>0 -0.00962 0.06278 0 0 0</pose>
+        <pose>0 -0.00962 0.13078 0 0 0</pose>
         <geometry>
           <box><size>0.022 0.01923 0.01575</size></box>
         </geometry>
         <material><diffuse>0.45 0.45 0.50 1</diffuse></material>
       </visual>
       <visual name="left_finger_tip_visual">
-        <pose>0 -0.00360 0.10093 0 0 0</pose>
+        <pose>0 -0.00360 0.16893 0 0 0</pose>
         <geometry>
           <box><size>0.022 0.00719 0.06045</size></box>
         </geometry>
         <material><diffuse>0.55 0.55 0.60 1</diffuse></material>
       </visual>
       <collision name="left_finger_collision">
-        <pose>0 -0.00962 0.0930 0 0 0</pose>
+        <pose>0 -0.00962 0.1610 0 0 0</pose>
         <geometry><box><size>0.022 0.01923 0.0762</size></box></geometry>
       </collision>
     </link>

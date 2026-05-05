@@ -56,18 +56,19 @@ from ..microwave import (
 from ..moves import transit_xy
 from ..pick import pick, pick_from_box
 from ..place import place, place_into_box
-from ..session import default_session
-from ..util.poses import Pose, offset_along_tool_z
+from ..session import Session, default_session
+from ..util.poses import Pose, offset_along_tool_z, pose_at_altitude
+from ..util.rtde_convert import rtde_to_pose
 
 
 # --- Tunables --------------------------------------------------------------
 
-PICK_FROM: Literal["outside", "microwave"] = "microwave"
-PLACE_TO: Literal["outside", "microwave"] = "outside"
+PICK_FROM: Literal["outside", "microwave"] = "outside"
+PLACE_TO: Literal["outside", "microwave"] = "microwave"
 
 # Free-standing bowl poses (used when the corresponding side is "outside").
 BOWL_PICK_POSE_TASK = Pose(translation=[0.05, -0.125, -0.01])
-BOWL_PLACE_POSE_TASK = Pose(translation=[-0.1, 0.1, -0.01])
+BOWL_PLACE_POSE_TASK = Pose(translation=[0.05, -0.125, -0.01])
 
 # Intermediate waypoint between pick and place. The transit_z is what
 # actually sets the carry altitude; the Z below is ignored. Picked at a
@@ -85,8 +86,8 @@ pick↔place geometry."""
 # Bowl-frame angle at which to engage the rim. π = approach from −X
 # side; forearm exits back through the −X microwave door. Keep at π
 # for any microwave-side leg.
-GRASP_ANGLE_RAD = float(-np.radians(90 + 10))
-PLACE_ANGLE_RAD = float(np.radians(180-30)) 
+GRASP_ANGLE_RAD = float(np.radians(180-30)) 
+PLACE_ANGLE_RAD = float(-np.radians(90 + 10))  
 MIDPOINT_ANGLE_RAD = PLACE_ANGLE_RAD
 """Bowl-frame angle used at the midpoint. Mirrors the plate microwave task:
 the midpoint has an explicit orientation knob rather than inferring from
@@ -144,6 +145,49 @@ CONFIG = PickPlaceConfig(
     gripper_open_speed_pct=40,
     gripper_close_speed_pct=30,
 )
+
+MICROWAVE_DOOR_OPEN_ANGLE_RAD = 1.8
+"""Door angle used by planning scenes for bowl-to-microwave motions.
+Matches the tuned open-microwave task value (~103°), so the door does not
+appear as an obstacle to the carry-to-entry plan."""
+
+USE_MOTION_PLANNING = True
+"""Use Drake ``plan_transit`` + ``execute_plan`` for free-space carry segments.
+``False`` falls back to the original sequential ``transit_xy`` moveL routing."""
+
+MOTION_PLAN_RRT_FALLBACK = True
+"""Try RRT after KTO when the optimizer cannot find a planned transit."""
+
+KEEP_BOWL_LEVEL_DURING_CARRY = True
+"""Constrain the post-pick planned carry so the bowl orientation does not
+drift much from the orientation it had at the start of the carry. This is the
+hook-bowl analog of ``KEEP_PLATE_LEVEL_DURING_CARRY`` in the plate task."""
+
+CARRY_BOWL_LEVEL_TOLERANCE_RAD = float(np.radians(3.0))
+"""Allowed bowl-up-axis tilt away from task +Z during the in-hand carry."""
+
+CARRY_MIN_CLEARANCE_M = 0.005
+"""Minimum clearance for the in-hand carry. The default planner clearance is
+1 cm but the welded bowl + cup-with-stick obstacle leave only millimetres of
+margin in places — keep this positive so penetration still fails, but allow a
+tighter corridor."""
+
+INCLUDE_CUP_WITH_STICK_OBSTACLE = True
+"""When True, the cup-with-stick is treated as a static obstacle on the table
+during planning so the bowl carry routes around it. Other tabletop objects are
+still skipped because the bowl itself is welded to the gripper for planning."""
+
+MOTION_PLAN_N_WAYPOINTS = 30
+MOTION_PLAN_BLEND_R_M = 0.005
+MOTION_PLAN_EXECUTION_METHOD = "servoJ"
+"""Execution method for planned transits.
+
+``servoJ`` streams dense setpoints from the planned trajectory and is smoother
+for KTO carries. Set to ``"moveJ_path"`` to use sparse blended waypoints.
+"""
+MOTION_PLAN_SERVO_DT_S = 0.008
+MOTION_PLAN_SERVO_TIME_SCALE = 2.0
+"""Stretch servoJ execution in time. 2.0 means half-speed playback."""
 
 
 # --- Pose / grasp planning -------------------------------------------------
@@ -205,6 +249,183 @@ def plan_midpoint(
         approach_tilt_rad=approach_tilt_rad,
     )
     return grasp_at_midpoint.grasp_pose
+
+
+def _current_q(session: Session) -> dict[str, np.ndarray]:
+    """Current connected-arm joint positions for seeding Drake IK."""
+    return {
+        name: np.asarray(arm.receive.getActualQ(), dtype=float)
+        for name, arm in session.arms.items()
+    }
+
+
+def _current_tcp_pose_task(arm: ArmHandle) -> Pose:
+    """Read the real TCP pose and convert it into the shared task frame."""
+    return arm.to_task(rtde_to_pose(arm.receive.getActualTCPPose()))
+
+
+def _bowl_up_axis_in_tcp(carry_start_pose: Pose) -> np.ndarray:
+    """Task-frame +Z expressed in the TCP frame at the start of the carry.
+
+    Constraining this body-fixed axis to stay near task +Z during the carry
+    keeps the bowl orientation roughly the same as it was right after the
+    pick (up to yaw around world up). The hook grasp leaves the bowl tilted
+    by the approach tilt angle, so this is "preserve the carry-start tilt"
+    rather than "force the bowl level" — which is what we want anyway for
+    not splashing whatever is in the bowl.
+    """
+    return carry_start_pose.rotation.inv().apply([0.0, 0.0, 1.0])
+
+
+def _build_planning_context(*, attached_bowl: bool):
+    """Build a planning scene for a single live planned transit.
+
+    Tabletop demo objects are skipped so stale defaults do not block a live
+    run, except for the cup-with-stick which we deliberately keep as an
+    obstacle (the user setup has it remaining on the table during the bowl
+    pick-and-place). During the post-pick carry, weld a bowl to the active
+    TCP so collision checks include the object in hand.
+    """
+    from ..planning.rrt import build_planning_scene
+
+    if INCLUDE_CUP_WITH_STICK_OBSTACLE:
+        include_objects = True
+        skip_static_objects = ("plate", "cup", "bowl", "bottle", "tray")
+    else:
+        include_objects = False
+        skip_static_objects = ()
+
+    attached_objects = (("bowl", ARM, None),) if attached_bowl else ()
+    diagram, plant, _, _ = build_planning_scene(
+        include_objects=include_objects,
+        skip_static_objects=skip_static_objects,
+        robotiq_mode="closed",
+        microwave_door_open_angle_rad=MICROWAVE_DOOR_OPEN_ANGLE_RAD,
+        attached_objects=attached_objects,
+    )
+    root_context = diagram.CreateDefaultContext()
+    plant_context = plant.GetMyMutableContextFromRoot(root_context)
+    return diagram, plant, plant_context
+
+
+def _hover_before_place(place_pose: Pose, config: PickPlaceConfig) -> Pose:
+    """The transit-altitude pose that ``place`` / ``place_into_box`` will
+    target before descending."""
+    if PLACE_TO == "microwave":
+        entry_xy = entry_xy_for_pose(
+            place_pose,
+            clearance=BOWL_ENTRY_CLEARANCE,
+        )
+        entry_pose = Pose(
+            translation=np.array([entry_xy[0], entry_xy[1], MICROWAVE_ENTRY_Z]),
+            rotation=place_pose.rotation,
+        )
+        return pose_at_altitude(entry_pose, config.transit_z)
+
+    preplace = offset_along_tool_z(place_pose, config.preplace_offset)
+    return pose_at_altitude(preplace, config.transit_z)
+
+
+def _planned_or_linear_transit(
+    session: Session,
+    arm: ArmHandle,
+    label: str,
+    waypoints: list[Pose],
+    config: PickPlaceConfig,
+    *,
+    attached_bowl: bool,
+) -> bool:
+    """Move through hover/free-space waypoints.
+
+    ``USE_MOTION_PLANNING=False`` preserves the old moveL behavior while still
+    honoring multiple waypoints.
+    """
+    print(f"\n→ planned transit: {label}")
+    for i, wp in enumerate(waypoints):
+        print(f"  wp {i}: xyz={np.round(wp.translation, 3)}")
+
+    if not USE_MOTION_PLANNING:
+        print("  motion planning disabled; using sequential transit_xy moveL")
+        for wp in waypoints[1:]:
+            transit_xy(
+                arm, wp, config.transit_z,
+                config.transit_speed, config.transit_accel,
+            )
+        return True
+
+    from ..planning.execute import execute_plan
+    from ..planning.transit import InfeasiblePlanError, plan_transit
+
+    bowl_up_tcp = (
+        _bowl_up_axis_in_tcp(waypoints[0])
+        if attached_bowl and KEEP_BOWL_LEVEL_DURING_CARRY
+        else None
+    )
+    if bowl_up_tcp is not None:
+        print("  carry bowl level: bowl-up axis within "
+              f"±{np.degrees(CARRY_BOWL_LEVEL_TOLERANCE_RAD):.1f}° of task +Z")
+
+    current_tcp = _current_tcp_pose_task(arm)
+    tcp_xyz_err = np.asarray(current_tcp.translation) - np.asarray(waypoints[0].translation)
+    tcp_rot_delta = waypoints[0].rotation.inv() * current_tcp.rotation
+    print("  live TCP vs wp0: "
+          f"dxyz={np.round(tcp_xyz_err * 1000.0, 1)} mm, "
+          f"drot={np.degrees(np.linalg.norm(tcp_rot_delta.as_rotvec())):.2f}°")
+    if bowl_up_tcp is not None:
+        live_bowl_up = current_tcp.rotation.apply(bowl_up_tcp)
+        live_bowl_up = live_bowl_up / np.linalg.norm(live_bowl_up)
+        live_tilt = np.degrees(np.arccos(np.clip(
+            float(np.dot(live_bowl_up, np.array([0.0, 0.0, 1.0]))),
+            -1.0,
+            1.0,
+        )))
+        print(f"  live bowl tilt estimate: {live_tilt:.2f}° from task +Z")
+
+    diagram, plant, plant_context = _build_planning_context(
+        attached_bowl=attached_bowl,
+    )
+    try:
+        plan = plan_transit(
+            plant=plant,
+            arm=ARM,
+            waypoints=waypoints,
+            plant_context=plant_context,
+            current_q=_current_q(session),
+            use_rrt_fallback=MOTION_PLAN_RRT_FALLBACK,
+            rrt_diagram=diagram,
+            align_tcp_axis=bowl_up_tcp,
+            align_tcp_axis_world=np.array([0.0, 0.0, 1.0]),
+            align_tcp_axis_tolerance_rad=CARRY_BOWL_LEVEL_TOLERANCE_RAD,
+            min_clearance_m=CARRY_MIN_CLEARANCE_M if attached_bowl else 0.01,
+        )
+    except InfeasiblePlanError as exc:
+        print(f"  ✗ motion plan infeasible: {exc}")
+        return False
+
+    print(f"  planner={plan.metadata.get('planner')}  "
+          f"duration={plan.duration_s:.2f}s  "
+          f"clearance={plan.min_clearance_m * 1000:.1f}mm")
+    fallback = plan.metadata.get("spline_fallback_reason")
+    if fallback:
+        print(f"  (spline fell back to KTO: {fallback})")
+    kto_fallback = plan.metadata.get("kto_fallback_reason")
+    if kto_fallback:
+        print(f"  (KTO fell back to RRT: {kto_fallback})")
+
+    result = execute_plan(
+        plan,
+        session,
+        method=MOTION_PLAN_EXECUTION_METHOD,
+        n_waypoints=MOTION_PLAN_N_WAYPOINTS,
+        dt=MOTION_PLAN_SERVO_DT_S,
+        servo_time_scale=MOTION_PLAN_SERVO_TIME_SCALE,
+        blend_r_m=MOTION_PLAN_BLEND_R_M,
+    )
+    if not result.success:
+        print(f"  ✗ planned transit execution failed: {result.reason}")
+        return False
+    print("  ✓ planned transit reached.")
+    return True
 
 
 def _check_in_cavity_clearance(grasp, place_pose: Pose) -> None:
@@ -281,6 +502,7 @@ def _print_plan(grasp, place_pose: Pose) -> None:
 # --- Execution -------------------------------------------------------------
 
 def run_on_arm(
+    session: Session,
     arm: ArmHandle,
     grasp,
     place_pose: Pose,
@@ -302,18 +524,28 @@ def run_on_arm(
         return False
     print("  ✓ pick succeeded.")
 
+    carry_waypoints = [_current_tcp_pose_task(arm)]
     if USE_MIDPOINT:
         midpoint_pose = plan_midpoint(angle_rad=MIDPOINT_ANGLE_RAD)
-        print(f"\n→ midpoint @ {BOWL_MIDPOINT_POSE_TASK.translation}")
-        transit_xy(
-            arm,
-            midpoint_pose,
-            config.transit_z,
-            config.transit_speed,
-            config.transit_accel,
-        )
-        print("  ✓ midpoint reached.")
+        carry_waypoints.append(pose_at_altitude(midpoint_pose, config.transit_z))
+    carry_waypoints.append(_hover_before_place(place_pose, config))
+    if not _planned_or_linear_transit(
+        session,
+        arm,
+        "post-pick carry to place hover",
+        carry_waypoints,
+        config,
+        attached_bowl=True,
+    ):
+        return False
 
+    if USE_MIDPOINT:
+        print("  ✓ carried through midpoint.")
+
+    # ``place`` / ``place_into_box`` will re-issue its own transit-to-hover
+    # command. Because the planned transit ends at that same hover pose, that
+    # call becomes a short alignment/no-op before the straight Cartesian
+    # descent/contact sequence.
     print(f"\n→ place @ {place_pose.translation}  (to {PLACE_TO})")
     if PLACE_TO == "microwave":
         entry_xy = entry_xy_for_pose(
@@ -332,20 +564,20 @@ def run_on_arm(
 
     print("\nDone — arm retracted to transit altitude.")
 
-    # Match the plate microwave task: after completing the place flow,
-    # return to the shared midpoint at transit height for a predictable
-    # post-task arm location.
     if USE_MIDPOINT:
         midpoint_pose = plan_midpoint(angle_rad=MIDPOINT_ANGLE_RAD)
-        print(f"\n→ midpoint @ {BOWL_MIDPOINT_POSE_TASK.translation}")
-        transit_xy(
+        if not _planned_or_linear_transit(
+            session,
             arm,
-            midpoint_pose,
-            config.transit_z,
-            config.transit_speed,
-            config.transit_accel,
-        )
-        print("  ✓ midpoint reached.")
+            "post-place return to midpoint",
+            [
+                _current_tcp_pose_task(arm),
+                pose_at_altitude(midpoint_pose, config.transit_z),
+            ],
+            config,
+            attached_bowl=False,
+        ):
+            return False
     return True
 
 
@@ -362,7 +594,7 @@ def main(dry: bool = False) -> int:
     right = ARM == "ur_right"
     with default_session(left=left, right=right) as session:
         arm = session.arms[ARM]
-        return 0 if run_on_arm(arm, grasp, place_pose, CONFIG) else 1
+        return 0 if run_on_arm(session, arm, grasp, place_pose, CONFIG) else 1
 
 
 if __name__ == "__main__":

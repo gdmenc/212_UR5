@@ -71,17 +71,48 @@ from scipy.spatial.transform import Rotation as ScipyRotation
 from ..arm import ArmHandle
 from ..calibration import TCP_OFFSET_ROBOTIQ_2F85
 from ..config import PickPlaceConfig
+from ..microwave import (
+    MICROWAVE_HINGE_X,
+    MICROWAVE_OUTER_W_X,
+    WHITE_TABLE_TOP_Z,
+    door_plane_y,
+)
 from ..moves import approach_to, lift_to_transit, move_until_contact, retract_to
 from ..session import default_session
 from ..util.poses import Pose, pose_at_altitude
 from ..util.rotations import Rotation
 
 
+# --- Button location, derived from microwave geometry ---------------------
+# Source-of-truth for the microwave lives in ``control_scripts/microwave.py``.
+# Edit there and these update automatically.
+_BUTTON_FROM_OUTER_RIGHT_X = 0.0675
+"""How far the button sits in (toward -x) from the microwave's outer
+right edge. Measured: 6.75 cm."""
+
+_BUTTON_HEIGHT_ABOVE_WHITE_TABLE = 0.105 - 0.01#account for thickness of the fingers
+"""How far the button sits above the white-table top surface.
+Measured: 10.5 cm."""
+
+_OUTER_RIGHT_X = MICROWAVE_HINGE_X + MICROWAVE_OUTER_W_X    # +0.060
+
+
 # --- Tunables (edit to retarget the press) --------------------------------
 
-BUTTON_TASK_XYZ = np.array([-0.01244292, +0.36312021, +0.07297517])
-"""Target tip location in task frame, xyz (m). Edit to retarget without
-re-recording. Default derived from the waypoint (see --derive)."""
+BUTTON_TASK_XYZ = np.array([
+    _OUTER_RIGHT_X - _BUTTON_FROM_OUTER_RIGHT_X,    # x = -0.0075
+    door_plane_y(),                                  # y = +0.375
+    WHITE_TABLE_TOP_Z + _BUTTON_HEIGHT_ABOVE_WHITE_TABLE,  # z = +0.075
+])
+"""Target tip location in task frame, xyz (m). DERIVED from the
+microwave geometry constants (``control_scripts/microwave.py``) plus
+the two measured button offsets above. Edit the microwave constants
+or the button offsets — never this expression directly — so the source
+of truth stays in one place.
+
+Previous recorded value [-0.01244, +0.36312, +0.07298] was taken
+against the old microwave position; re-derive via ``--derive`` if you
+re-record waypoints under the updated geometry."""
 
 PRESS_ANGLE_ABOVE_HORIZONTAL_RAD = -0.54827524
 """Elevation of the press axis above horizontal (radians). Sign:
@@ -115,7 +146,7 @@ along flange +z. The TCP itself is at ``TCP_OFFSET_ROBOTIQ_2F85[2]``
 is whatever the gripper holds (chopstick, finger, dowel, ...) — task
 constant rather than a TCP recalibration."""
 
-STANDOFF_M = 0.03
+STANDOFF_M = 0.05
 """Standoff distance back along the press axis from the press TCP.
 The arm goes here before move_until_contact."""
 

@@ -56,6 +56,7 @@ def execute_plan(
     blend_r_m: float = 0.02,
     speed: float = _DEFAULT_SPEED,
     accel: float = _DEFAULT_ACCEL,
+    servo_time_scale: float = 1.0,
     blend_check_safety_factor: float = 0.5,
     abort_on_blend_overrun: bool = True,
 ) -> ExecutionResult:
@@ -86,7 +87,7 @@ def execute_plan(
             abort_on_overrun=abort_on_blend_overrun,
         )
     elif method == "servoJ":
-        return _execute_servoJ(plan, arm_handle, dt)
+        return _execute_servoJ(plan, arm_handle, dt, servo_time_scale)
     else:
         raise ValueError(
             f"unknown execution method {method!r}; "
@@ -203,6 +204,7 @@ def _execute_servoJ(
     plan: TransitPlan,
     arm: ArmHandle,
     dt: float,
+    time_scale: float,
 ) -> ExecutionResult:
     """Dense-sample the trajectory at fixed dt, stream via servoJ.
 
@@ -210,6 +212,8 @@ def _execute_servoJ(
     Python loop period matches the ``dt`` the controller is expecting.
     Drift here shows up as setpoint stutter, not as final-pose error.
     """
+    if time_scale <= 0.0:
+        raise ValueError(f"servo time_scale must be positive, got {time_scale}")
     arm_idx = _planning_arm_indices(plan)
     t0_real = time.time()
     t0_traj = plan.trajectory.start_time()
@@ -217,7 +221,7 @@ def _execute_servoJ(
 
     try:
         while True:
-            t_traj = t0_traj + (time.time() - t0_real)
+            t_traj = t0_traj + (time.time() - t0_real) / time_scale
             if t_traj >= t1_traj:
                 break
 
@@ -235,8 +239,12 @@ def _execute_servoJ(
     # Settle final pose explicitly (servoJ doesn't guarantee exact
     # final-state convergence on its own).
     final_q = _arm_q_at(plan.trajectory, t1_traj, arm_idx)
-    arm.control.moveJ(final_q, _DEFAULT_SPEED * 0.3, _DEFAULT_ACCEL * 0.3)
+    arm.control.moveJ(
+        final_q,
+        _DEFAULT_SPEED * 0.3 / time_scale,
+        _DEFAULT_ACCEL * 0.3 / time_scale,
+    )
 
     return ExecutionResult(
-        success=True, method="servoJ", duration_s=plan.duration_s,
+        success=True, method="servoJ", duration_s=plan.duration_s * time_scale,
     )

@@ -254,7 +254,8 @@ def main(file_paths: Optional[List[Path]] = None,
          seconds_per_pose: float = 3.0,
          snapshot_filters: Optional[List[str]] = None,
          list_only: bool = False,
-         cycle: bool = False) -> int:
+         cycle: bool = False,
+         gripper_mode: str = "closed") -> int:
     if file_paths is None:
         file_paths = sorted(_DEFAULT_WP_DIR.glob("*.json"))
     if not file_paths:
@@ -284,7 +285,7 @@ def main(file_paths: Optional[List[Path]] = None,
         return 0
 
     meshcat = StartMeshcat()
-    scene = build_scene(meshcat=meshcat)
+    scene = build_scene(meshcat=meshcat, robotiq_mode=gripper_mode)
     diagram, plant = scene.diagram, scene.plant
     sim = Simulator(diagram)
     sim.Initialize()
@@ -362,6 +363,10 @@ if __name__ == "__main__":
             "buttons in the Meshcat controls panel)."
         ),
     )
+    ap.add_argument(
+        "--gripper-mode", choices=["closed", "open"], default="closed",
+        help="Robotiq 2F-85 finger configuration to load (default: closed).",
+    )
     args = ap.parse_args()
     raise SystemExit(main(
         file_paths=args.files,
@@ -369,4 +374,5 @@ if __name__ == "__main__":
         snapshot_filters=args.snapshot,
         list_only=args.list,
         cycle=args.cycle,
+        gripper_mode=args.gripper_mode,
     ))

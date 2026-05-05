@@ -5,3 +5,10 @@ __pycache__/
 # Drake / local runtime artifacts
 # logs/
 *.log
+
+# Vendored ikfastpy build artifacts — platform-specific, rebuild from source
+# via `python3.11 setup.py build_ext --inplace` in third_party/ikfastpy/.
+third_party/ikfastpy/build/
+third_party/ikfastpy/*.so
+third_party/ikfastpy/ikfastpy.cpp
+third_party/ikfastpy/ikfast61_ur5.cpp.bak

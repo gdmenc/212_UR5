@@ -74,20 +74,22 @@ from ..microwave import (
     MICROWAVE_CEILING_Z,
     MICROWAVE_CENTER_XY_TASK,
     MICROWAVE_FLOOR_Z,
+    entry_xy_for_motion_direction,
     entry_xy_for_pose,
 )
 from ..moves import transit_xy
 from ..pick import pick, pick_from_box
 from ..place import place, place_into_box
-from ..session import default_session
-from ..util.poses import Pose
+from ..session import Session, default_session
+from ..util.poses import Pose, offset_along_tool_z, pose_at_altitude
+from ..util.rtde_convert import rtde_to_pose
 
 
 # --- Tunables --------------------------------------------------------------
-# PICK_FROM: Literal["outside", "microwave"] = "outside"
-# PLACE_TO: Literal["outside", "microwave"] = "microwave"
-PICK_FROM: Literal["outside", "microwave"] = "microwave"
-PLACE_TO: Literal["outside", "microwave"] = "outside"
+PICK_FROM: Literal["outside", "microwave"] = "outside"
+PLACE_TO: Literal["outside", "microwave"] = "microwave"
+# PICK_FROM: Literal["outside", "microwave"] = "microwave"
+# PLACE_TO: Literal["outside", "microwave"] = "outside"
 
 # Free-standing plate poses (used when the corresponding side is "outside").
 # 0.025 m is the height of the plate rim that is reasonable for pickup /
@@ -115,10 +117,29 @@ pick→entry swing."""
 # 2F-85 closes along tool +Y, so the rim-radial axis is tool +X. With
 # ``plate_rim_grasp_edge`` the TCP yaw = angle_rad + π.
 
-# GRASP_ANGLE_RAD = 0.0
-# PLACE_ANGLE_RAD = -np.radians(55)
-GRASP_ANGLE_RAD = -np.radians(55)
-PLACE_ANGLE_RAD = 0 # ~-50.6° — same as the non-microwave plate task
+GRASP_ANGLE_RAD = 0.0
+PLACE_ANGLE_RAD = -np.radians(55)
+# GRASP_ANGLE_RAD = -np.radians(55)
+# PLACE_ANGLE_RAD = 0 # ~-50.6° — same as the non-microwave plate task
+
+# Approach angles — used ONLY for the cavity-aware microwave legs
+# (pick_from_box / place_into_box). These are the **physical xy motion
+# direction** the arm moves in during the lateral entry through the
+# door — NOT a plate-rim azimuth. Tool orientation throughout the
+# entry stays at the corresponding GRASP/PLACE orientation; only the
+# placement of the entry point relative to the target changes.
+#
+# Convention: angle measured CCW from task +x.
+#   +90°  = motion in +y (straight through the door, perpendicular)
+#     0°  = motion in +x  (would never reach door — see fallback below)
+#   +60°  = motion mostly +y, biased +x  (entering from lower-left)
+#  +120°  = motion mostly +y, biased -x  (entering from lower-right)
+#
+# +90° (perpendicular through door) is the natural default. Set to
+# None to fall back to ``entry_xy_for_pose``, which derives the entry
+# heading from the tool axis instead of an explicit motion angle.
+APPROACH_ANGLE_RAD = np.radians(90)
+RELEASE_APPROACH_ANGLE_RAD = np.radians(90)
 
 # Constrained altitude inside the cavity. Plate on tray sits at task z
 # ~10 cm (8 + 2 cm rim). Top of plate rim ~ 11 cm. 14 cm gives ~3 cm
@@ -132,6 +153,13 @@ PLATE_ENTRY_CLEARANCE = 0.2
 """Distance outside the microwave door before lowering to ``MICROWAVE_ENTRY_Z``.
 Keep this larger than the 2F-85 TCP/finger envelope plus the plate diameter
 so the plate clears the front lip before descending."""
+
+MICROWAVE_DOOR_OPEN_ANGLE_RAD = 1.8
+"""Door angle used by planning scenes for plate-to-microwave motions.
+
+Matches the tuned open-microwave task value (~103°), so the door is no longer
+treated as a closed obstacle during the carry-to-entry plan.
+"""
 
 # Plate center at task z when sitting on tray = tray + plate rim height.
 MICROWAVE_PLATE_Z = MICROWAVE_FLOOR_Z + PLATE_RIM_HEIGHT - 0.02  # 0.10 m
@@ -152,6 +180,37 @@ CONFIG = PickPlaceConfig(
     gripper_open_speed_pct=40,
     gripper_close_speed_pct=30,
 )
+
+USE_MOTION_PLANNING = True
+"""Use Drake ``plan_transit`` + ``execute_plan`` for broad free-space
+transits. Precise pick/place approach, in-cavity entry, and release moves
+remain Cartesian ``moveL`` primitives."""
+
+MOTION_PLAN_RRT_FALLBACK = True
+"""Try RRT after KTO when the optimizer cannot find a planned transit."""
+
+KEEP_PLATE_LEVEL_DURING_CARRY = True
+"""Constrain the post-pick planned carry to keep the plate normal near +Z.
+
+This is intentionally only applied to the free-space carry with the plate in
+hand, not to the pick/place approach primitives. Unlike a full TCP orientation
+lock, this still lets the gripper yaw/rotate as long as the plate does not tip
+much relative to task-frame vertical.
+"""
+
+CARRY_PLATE_LEVEL_TOLERANCE_RAD = float(np.radians(3.0))
+"""Allowed plate-normal tilt away from task +Z during the in-hand carry."""
+
+CARRY_MIN_CLEARANCE_M = 0.005
+"""Minimum clearance for the in-hand carry.
+
+The default planner clearance is 1 cm, but the welded plate model passes within
+a few millimetres of the microwave/table in this task geometry. Keep this
+positive so actual penetration still fails, but allow a tighter corridor.
+"""
+
+MOTION_PLAN_N_WAYPOINTS = 30
+MOTION_PLAN_BLEND_R_M = 0.005
 
 
 # --- Pose / grasp planning -------------------------------------------------
@@ -181,6 +240,31 @@ def plan_place() -> Pose:
     return grasp_at_dest.grasp_pose
 
 
+def _pick_entry_xy(grasp_pose: Pose) -> np.ndarray:
+    """Entry XY for the microwave pick leg. Uses APPROACH_ANGLE_RAD
+    (motion direction) when set; falls back to the tool-axis-derived
+    ``entry_xy_for_pose`` otherwise."""
+    if APPROACH_ANGLE_RAD is not None:
+        return entry_xy_for_motion_direction(
+            grasp_pose.translation[:2],
+            APPROACH_ANGLE_RAD,
+            clearance=PLATE_ENTRY_CLEARANCE,
+        )
+    return entry_xy_for_pose(grasp_pose, clearance=PLATE_ENTRY_CLEARANCE)
+
+
+def _place_entry_xy(place_pose: Pose) -> np.ndarray:
+    """Entry XY for the microwave place leg. Uses RELEASE_APPROACH_ANGLE_RAD
+    (motion direction) when set; falls back to ``entry_xy_for_pose``."""
+    if RELEASE_APPROACH_ANGLE_RAD is not None:
+        return entry_xy_for_motion_direction(
+            place_pose.translation[:2],
+            RELEASE_APPROACH_ANGLE_RAD,
+            clearance=PLATE_ENTRY_CLEARANCE,
+        )
+    return entry_xy_for_pose(place_pose, clearance=PLATE_ENTRY_CLEARANCE)
+
+
 def plan_midpoint(angle_rad: float = GRASP_ANGLE_RAD) -> Pose:
     """TCP pose for carrying the held plate through the midpoint XY at
     transit_z. Orientation matches the upcoming PLACE leg so the wrist
@@ -191,6 +275,165 @@ def plan_midpoint(angle_rad: float = GRASP_ANGLE_RAD) -> Pose:
         angle_rad=angle_rad,
     )
     return grasp_at_midpoint.grasp_pose
+
+
+def _current_q(session: Session) -> dict[str, np.ndarray]:
+    """Current connected-arm joint positions for seeding Drake IK."""
+    return {
+        name: np.asarray(arm.receive.getActualQ(), dtype=float)
+        for name, arm in session.arms.items()
+    }
+
+
+def _current_tcp_pose_task(arm: ArmHandle) -> Pose:
+    """Read the real TCP pose and convert it into the shared task frame."""
+    return arm.to_task(rtde_to_pose(arm.receive.getActualTCPPose()))
+
+
+def _plate_normal_axis_in_tcp(carry_start_pose: Pose) -> np.ndarray:
+    """Plate +Z, expressed in the TCP frame at the start of carry.
+
+    The grasp factories assume the plate itself is level in task frame; food
+    safety means keeping that object-frame +Z close to task +Z while allowing
+    yaw around it.
+    """
+    return carry_start_pose.rotation.inv().apply([0.0, 0.0, 1.0])
+
+
+def _build_planning_context(*, attached_plate: bool):
+    """Build a planning scene for a single live planned transit.
+
+    The demo tabletop objects are omitted so stale/default object poses do not
+    block a live run. During the post-pick carry, weld a plate to the active
+    TCP so collision checks include the object in hand.
+    """
+    from ..planning.rrt import build_planning_scene
+
+    attached_objects = (("plate", ARM, None),) if attached_plate else ()
+    diagram, plant, _, _ = build_planning_scene(
+        include_objects=False,
+        robotiq_mode="closed",
+        microwave_door_open_angle_rad=MICROWAVE_DOOR_OPEN_ANGLE_RAD,
+        attached_objects=attached_objects,
+    )
+    root_context = diagram.CreateDefaultContext()
+    plant_context = plant.GetMyMutableContextFromRoot(root_context)
+    return diagram, plant, plant_context
+
+
+def _planned_or_linear_transit(
+    session: Session,
+    arm: ArmHandle,
+    label: str,
+    waypoints: list[Pose],
+    config: PickPlaceConfig,
+    *,
+    attached_plate: bool,
+) -> bool:
+    """Move through hover/free-space waypoints.
+
+    ``USE_MOTION_PLANNING=False`` preserves the old moveL behavior while still
+    honoring multiple waypoints.
+    """
+    print(f"\n→ planned transit: {label}")
+    for i, wp in enumerate(waypoints):
+        print(f"  wp {i}: xyz={np.round(wp.translation, 3)}")
+
+    if not USE_MOTION_PLANNING:
+        print("  motion planning disabled; using sequential transit_xy moveL")
+        for wp in waypoints[1:]:
+            transit_xy(
+                arm, wp, config.transit_z,
+                config.transit_speed, config.transit_accel,
+            )
+        return True
+
+    from ..planning.execute import execute_plan
+    from ..planning.transit import InfeasiblePlanError, plan_transit
+
+    plate_normal_tcp = (
+        _plate_normal_axis_in_tcp(waypoints[0])
+        if attached_plate and KEEP_PLATE_LEVEL_DURING_CARRY
+        else None
+    )
+    if plate_normal_tcp is not None:
+        print("  carry plate level: plate normal within "
+              f"±{np.degrees(CARRY_PLATE_LEVEL_TOLERANCE_RAD):.1f}° of task +Z")
+
+    current_tcp = _current_tcp_pose_task(arm)
+    tcp_xyz_err = np.asarray(current_tcp.translation) - np.asarray(waypoints[0].translation)
+    tcp_rot_delta = waypoints[0].rotation.inv() * current_tcp.rotation
+    print("  live TCP vs wp0: "
+          f"dxyz={np.round(tcp_xyz_err * 1000.0, 1)} mm, "
+          f"drot={np.degrees(np.linalg.norm(tcp_rot_delta.as_rotvec())):.2f}°")
+    if plate_normal_tcp is not None:
+        live_plate_normal = current_tcp.rotation.apply(plate_normal_tcp)
+        live_plate_normal = live_plate_normal / np.linalg.norm(live_plate_normal)
+        live_tilt = np.degrees(np.arccos(np.clip(
+            float(np.dot(live_plate_normal, np.array([0.0, 0.0, 1.0]))),
+            -1.0,
+            1.0,
+        )))
+        print(f"  live plate tilt estimate: {live_tilt:.2f}° from task +Z")
+
+    diagram, plant, plant_context = _build_planning_context(
+        attached_plate=attached_plate,
+    )
+    try:
+        plan = plan_transit(
+            plant=plant,
+            arm=ARM,
+            waypoints=waypoints,
+            plant_context=plant_context,
+            current_q=_current_q(session),
+            use_rrt_fallback=MOTION_PLAN_RRT_FALLBACK,
+            rrt_diagram=diagram,
+            align_tcp_axis=plate_normal_tcp,
+            align_tcp_axis_world=np.array([0.0, 0.0, 1.0]),
+            align_tcp_axis_tolerance_rad=CARRY_PLATE_LEVEL_TOLERANCE_RAD,
+            min_clearance_m=CARRY_MIN_CLEARANCE_M if attached_plate else 0.01,
+        )
+    except InfeasiblePlanError as exc:
+        print(f"  ✗ motion plan infeasible: {exc}")
+        return False
+
+    print(f"  planner={plan.metadata.get('planner')}  "
+          f"duration={plan.duration_s:.2f}s  "
+          f"clearance={plan.min_clearance_m * 1000:.1f}mm")
+    fallback = plan.metadata.get("spline_fallback_reason")
+    if fallback:
+        print(f"  (spline fell back to KTO: {fallback})")
+    kto_fallback = plan.metadata.get("kto_fallback_reason")
+    if kto_fallback:
+        print(f"  (KTO fell back to RRT: {kto_fallback})")
+
+    result = execute_plan(
+        plan,
+        session,
+        method="moveJ_path",
+        n_waypoints=MOTION_PLAN_N_WAYPOINTS,
+        blend_r_m=MOTION_PLAN_BLEND_R_M,
+    )
+    if not result.success:
+        print(f"  ✗ planned transit execution failed: {result.reason}")
+        return False
+    print("  ✓ planned transit reached.")
+    return True
+
+
+def _hover_before_place(place_pose: Pose, config: PickPlaceConfig) -> Pose:
+    """The transit-altitude pose that ``place`` / ``place_into_box`` will
+    target before descending."""
+    if PLACE_TO == "microwave":
+        entry_xy = _place_entry_xy(place_pose)
+        entry_pose = Pose(
+            translation=np.array([entry_xy[0], entry_xy[1], MICROWAVE_ENTRY_Z]),
+            rotation=place_pose.rotation,
+        )
+        return pose_at_altitude(entry_pose, config.transit_z)
+
+    preplace = offset_along_tool_z(place_pose, config.preplace_offset)
+    return pose_at_altitude(preplace, config.transit_z)
 
 
 def _check_wrist_clearance() -> None:
@@ -224,8 +467,16 @@ def _print_plan(grasp, place_pose: Pose) -> None:
     print(f"  Place to      : {PLACE_TO}")
     print(f"  Grasp pose    : {grasp.grasp_pose.translation} (task)")
     print(f"  Place pose    : {place_pose.translation} (task)")
-    print(f"  Grasp angle   : {np.degrees(GRASP_ANGLE_RAD):+.0f}°")
-    print(f"  Place angle   : {np.degrees(PLACE_ANGLE_RAD):+.0f}°")
+    print(f"  Grasp angle   : {np.degrees(GRASP_ANGLE_RAD):+.0f}°  (plate-rim azimuth)")
+    print(f"  Place angle   : {np.degrees(PLACE_ANGLE_RAD):+.0f}°  (plate-rim azimuth)")
+    if PICK_FROM == "microwave":
+        a = APPROACH_ANGLE_RAD
+        print(f"  Approach (pick) : "
+              f"{('%+.0f° (motion dir)' % np.degrees(a)) if a is not None else 'tool-axis (entry_xy_for_pose)'}")
+    if PLACE_TO == "microwave":
+        a = RELEASE_APPROACH_ANGLE_RAD
+        print(f"  Approach (place): "
+              f"{('%+.0f° (motion dir)' % np.degrees(a)) if a is not None else 'tool-axis (entry_xy_for_pose)'}")
     print(f"  Midpoint      : "
           f"{PLATE_MIDPOINT_POSE_TASK.translation if USE_MIDPOINT else 'disabled'}"
           f"{' (task)' if USE_MIDPOINT else ''}")
@@ -235,17 +486,9 @@ def _print_plan(grasp, place_pose: Pose) -> None:
         print(f"  Microwave entry Z : {MICROWAVE_ENTRY_Z} m")
         print(f"  Entry clearance   : {PLATE_ENTRY_CLEARANCE} m")
         if PICK_FROM == "microwave":
-            xy = entry_xy_for_pose(
-                grasp.grasp_pose,
-                clearance=PLATE_ENTRY_CLEARANCE,
-            )
-            print(f"  Entry XY (pick)   : {xy}")
+            print(f"  Entry XY (pick)   : {_pick_entry_xy(grasp.grasp_pose)}")
         if PLACE_TO == "microwave":
-            xy = entry_xy_for_pose(
-                place_pose,
-                clearance=PLATE_ENTRY_CLEARANCE,
-            )
-            print(f"  Entry XY (place)  : {xy}")
+            print(f"  Entry XY (place)  : {_place_entry_xy(place_pose)}")
     print("=" * 60)
     _check_wrist_clearance()
 
@@ -253,6 +496,7 @@ def _print_plan(grasp, place_pose: Pose) -> None:
 # --- Execution -------------------------------------------------------------
 
 def run_on_arm(
+    session: Session,
     arm: ArmHandle,
     grasp,
     place_pose: Pose,
@@ -260,10 +504,7 @@ def run_on_arm(
 ) -> bool:
     print(f"\n→ pick: {grasp.description}  (from {PICK_FROM})")
     if PICK_FROM == "microwave":
-        entry_xy = entry_xy_for_pose(
-            grasp.grasp_pose,
-            clearance=PLATE_ENTRY_CLEARANCE,
-        )
+        entry_xy = _pick_entry_xy(grasp.grasp_pose)
         pick_result = pick_from_box(
             arm, grasp, entry_xy, MICROWAVE_ENTRY_Z, config
         )
@@ -274,26 +515,33 @@ def run_on_arm(
         return False
     print("  ✓ pick succeeded.")
 
+    carry_waypoints = [_current_tcp_pose_task(arm)]
     if USE_MIDPOINT:
         midpoint_pose = plan_midpoint(angle_rad=MIDPOINT_ANGLE_RAD)
-        print(f"\n→ midpoint @ {PLATE_MIDPOINT_POSE_TASK.translation}")
-        transit_xy(
-            arm,
-            midpoint_pose,
-            config.transit_z,
-            config.transit_speed,
-            config.transit_accel,
-        )
-        print("  ✓ midpoint reached.")
+        carry_waypoints.append(pose_at_altitude(midpoint_pose, config.transit_z))
+    carry_waypoints.append(_hover_before_place(place_pose, config))
+    if not _planned_or_linear_transit(
+        session,
+        arm,
+        "post-pick carry to place hover",
+        carry_waypoints,
+        config,
+        attached_plate=True,
+    ):
+        return False
 
+    if USE_MIDPOINT:
+        print("  ✓ carried through midpoint.")
+
+    # ``place`` / ``place_into_box`` will re-issue its own transit-to-hover
+    # command. Because the planned transit ends at that same hover pose, that
+    # call becomes a short alignment/no-op before the straight Cartesian
+    # descent/contact sequence.
     print(f"\n→ place @ {place_pose.translation}  (to {PLACE_TO})")
     if PLACE_TO == "microwave":
-        entry_xy = entry_xy_for_pose(
-            place_pose,
-            clearance=PLATE_ENTRY_CLEARANCE,
-        )
+        entry_xy = _place_entry_xy(place_pose)
         place_result = place_into_box(
-            arm, place_pose, entry_xy, MICROWAVE_ENTRY_Z, config
+            arm, place_pose, entry_xy, MICROWAVE_ENTRY_Z, config,
         )
     else:
         place_result = place(arm, place_pose, config)
@@ -306,15 +554,18 @@ def run_on_arm(
 
     # return to midpoint at the very end
     midpoint_pose = plan_midpoint(angle_rad=MIDPOINT_ANGLE_RAD)
-    print(f"\n→ midpoint @ {PLATE_MIDPOINT_POSE_TASK.translation}")
-    transit_xy(
+    if not _planned_or_linear_transit(
+        session,
         arm,
-        midpoint_pose,
-        config.transit_z,
-        config.transit_speed,
-        config.transit_accel,
-    )
-    print("  ✓ midpoint reached.")
+        "post-place return to midpoint",
+        [
+            _current_tcp_pose_task(arm),
+            pose_at_altitude(midpoint_pose, config.transit_z),
+        ],
+        config,
+        attached_plate=False,
+    ):
+        return False
     return True
 
 
@@ -331,7 +582,7 @@ def main(dry: bool = False) -> int:
     right = ARM == "ur_right"
     with default_session(left=left, right=right) as session:
         arm = session.arms[ARM]
-        return 0 if run_on_arm(arm, grasp, place_pose, CONFIG) else 1
+        return 0 if run_on_arm(session, arm, grasp, place_pose, CONFIG) else 1
 
 
 if __name__ == "__main__":

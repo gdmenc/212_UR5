@@ -136,7 +136,7 @@ def _animate_path(diagram, plant, sim_ctx, path_full, *, seconds: float):
 def _plan_case(case_name: str, max_iters: int) -> Tuple[List[np.ndarray], Dict]:
     """Build the (planner-side) scene, run RRT-Connect for one case,
     return (smoothed path, stats)."""
-    diagram_p, plant_p, _, _ = build_planning_scene()
+    diagram_p, plant_p, _, _ = build_planning_scene(robotiq_mode=gripper_mode)
     home, goal = CASES[case_name](plant_p)
     checker = make_collision_checker(diagram_p, plant_p, PLANNING_ARM)
 
@@ -184,7 +184,8 @@ def _print_stats(stats: Dict) -> None:
           f"{stats['smoothed_path_length_rad']:.2f} rad")
 
 
-def main(case: str, animate_seconds: float, max_iters: int) -> int:
+def main(case: str, animate_seconds: float, max_iters: int,
+         gripper_mode: str = "closed") -> int:
     if case not in CASES and case != "all":
         raise SystemExit(f"unknown case {case!r}; pick from {list(CASES)} or 'all'")
 
@@ -207,7 +208,7 @@ def main(case: str, animate_seconds: float, max_iters: int) -> int:
     meshcat = StartMeshcat()
     print(f"\n[verify_rrt] Meshcat → {meshcat.web_url()}")
 
-    scene = build_scene(meshcat=meshcat)
+    scene = build_scene(meshcat=meshcat, robotiq_mode=gripper_mode)
     diagram, plant = scene.diagram, scene.plant
     sim = Simulator(diagram)
     sim.Initialize()
@@ -330,6 +331,11 @@ if __name__ == "__main__":
         "--max-iters", type=int, default=2000,
         help="RRT-Connect iteration budget.",
     )
+    ap.add_argument(
+        "--gripper-mode", choices=["closed", "open"], default="closed",
+        help="Robotiq 2F-85 finger configuration to load (default: closed).",
+    )
     args = ap.parse_args()
     raise SystemExit(main(case=args.case, animate_seconds=args.animate_seconds,
-                          max_iters=args.max_iters))
+                          max_iters=args.max_iters,
+                          gripper_mode=args.gripper_mode))

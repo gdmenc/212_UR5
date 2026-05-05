@@ -35,9 +35,10 @@ Architectural choices
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
+from pydrake.math import RigidTransform, RotationMatrix
 from pydrake.multibody.plant import MultibodyPlant
 from pydrake.multibody.tree import ModelInstanceIndex
 from pydrake.planning import (
@@ -47,7 +48,18 @@ from pydrake.planning import (
 )
 
 from . import default_home_q
+from ..calibration import (
+    TCP_OFFSET_HOOK,
+    TCP_OFFSET_ROBOTIQ_2F85,
+    X_LEFT_BASE_TASK,
+    X_RIGHT_BASE_TASK,
+)
+from ..util.poses import Pose
 from .build_scene import _compose_scene_fragments
+from .scene.grippers import _tcp_offset_to_rigid_transform
+
+
+ConfigValidityFn = Callable[[np.ndarray], bool]
 
 
 # ---------------------------------------------------------------------------
@@ -60,6 +72,9 @@ def build_planning_scene(
     include_microwave: bool = True,
     include_objects: bool = True,
     robotiq_mode: str = "closed",
+    microwave_door_open_angle_rad: float = 0.0,
+    skip_static_objects: tuple = (),
+    attached_objects: tuple = (),
 ) -> Tuple[RobotDiagram, MultibodyPlant, dict, dict]:
     """Build a ``RobotDiagram`` + plant + arm/gripper handles dict.
 
@@ -68,6 +83,14 @@ def build_planning_scene(
     ``SceneGraphCollisionChecker``. Composition is shared via
     ``_compose_scene_fragments`` so this can't drift from the
     visualizer-side build.
+
+    ``microwave_door_open_angle_rad`` welds the microwave door at the
+    given angle (0 = closed; ~π/2 to ~7π/12 for typical open). Use to
+    plan into the open cavity vs. avoid a closed door.
+
+    ``skip_static_objects`` + ``attached_objects`` configure in-hand
+    carrying — see ``build_scene.build_scene`` and
+    ``scene.objects.attach_object_to_gripper``.
     """
     rdb = RobotDiagramBuilder(time_step=0.0)
     plant = rdb.plant()
@@ -78,6 +101,9 @@ def build_planning_scene(
         include_grippers=True,
         include_objects=include_objects,
         robotiq_mode=robotiq_mode,
+        microwave_door_open_angle_rad=microwave_door_open_angle_rad,
+        skip_static_objects=skip_static_objects,
+        attached_objects=attached_objects,
     )
 
     plant.Finalize()
@@ -100,6 +126,26 @@ def _gripper_instance_for(plant: MultibodyPlant, arm_name: str
             if plant.GetModelInstanceName(mi).startswith(prefix):
                 return mi
     return None
+
+
+def _attached_object_instances_for(
+    plant: MultibodyPlant,
+    arm_name: str,
+) -> List[ModelInstanceIndex]:
+    """Find object models welded to the given arm's gripper.
+
+    Attached objects are part of the moving collision body for RRT; if
+    omitted from ``robot_model_instances``, SceneGraphCollisionChecker
+    treats them as frozen environment and can accept paths that later
+    collide when replayed with the object moving.
+    """
+    out: List[ModelInstanceIndex] = []
+    suffix = f"_in_hand_{arm_name}"
+    for i in range(plant.num_model_instances()):
+        mi = ModelInstanceIndex(i)
+        if plant.GetModelInstanceName(mi).endswith(suffix):
+            out.append(mi)
+    return out
 
 
 def make_collision_checker(
@@ -126,6 +172,7 @@ def make_collision_checker(
     grip_inst = _gripper_instance_for(plant, planning_arm_name)
     if grip_inst is not None:
         robot_models.append(grip_inst)
+    robot_models.extend(_attached_object_instances_for(plant, planning_arm_name))
 
     return SceneGraphCollisionChecker(
         model=diagram,
@@ -133,6 +180,46 @@ def make_collision_checker(
         edge_step_size=edge_step_size,
         env_collision_padding=env_padding,
     )
+
+
+def make_tcp_axis_alignment_validator(
+    plant: MultibodyPlant,
+    arm_name: str,
+    *,
+    axis_tcp: np.ndarray,
+    axis_world: Optional[np.ndarray] = None,
+    tolerance_rad: float,
+) -> ConfigValidityFn:
+    """Return a q-full predicate for yaw-free axis alignment.
+
+    This is the RRT-side counterpart to ``plan_transit``'s
+    ``align_tcp_axis`` constraint. It checks that a vector fixed in the
+    TCP frame, such as the held plate's normal expressed in the TCP frame
+    at grasp time, stays within ``tolerance_rad`` of a world-frame vector.
+
+    RRT calls this on configurations and edge samples; yaw around the
+    constrained axis remains free.
+    """
+    from .transit import _arm_model_instance, _tcp_frame
+
+    ctx = plant.CreateDefaultContext()
+    tcp_frame = _tcp_frame(plant, _arm_model_instance(plant, arm_name))
+    axis_tcp = np.asarray(axis_tcp, dtype=float).reshape(3)
+    axis_tcp = axis_tcp / np.linalg.norm(axis_tcp)
+    if axis_world is None:
+        axis_world = np.array([0.0, 0.0, 1.0])
+    axis_world = np.asarray(axis_world, dtype=float).reshape(3)
+    axis_world = axis_world / np.linalg.norm(axis_world)
+    min_dot = float(np.cos(tolerance_rad))
+
+    def _valid(q_full: np.ndarray) -> bool:
+        plant.SetPositions(ctx, np.asarray(q_full, dtype=float))
+        R_world_tcp = tcp_frame.CalcPoseInWorld(ctx).rotation().matrix()
+        axis_in_world = R_world_tcp @ axis_tcp
+        axis_in_world = axis_in_world / np.linalg.norm(axis_in_world)
+        return float(np.dot(axis_in_world, axis_world)) >= min_dot
+
+    return _valid
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +280,8 @@ def rrt_connect(
     sample_lower: Optional[np.ndarray] = None,
     sample_upper: Optional[np.ndarray] = None,
     seed: int = 0,
+    validity_fn: Optional[ConfigValidityFn] = None,
+    validity_edge_step_size: float = 0.05,
 ) -> RRTPlan:
     """Bidirectional RRT-Connect over the planning arm's DOF.
 
@@ -246,10 +335,26 @@ def rrt_connect(
         return out
 
     def _free_edge(q_from_arm: np.ndarray, q_to_arm: np.ndarray) -> bool:
-        return checker.CheckEdgeCollisionFree(_full(q_from_arm), _full(q_to_arm))
+        q_from_full = _full(q_from_arm)
+        q_to_full = _full(q_to_arm)
+        if not checker.CheckEdgeCollisionFree(q_from_full, q_to_full):
+            return False
+        if validity_fn is None:
+            return True
+        dist = float(np.linalg.norm(q_to_arm - q_from_arm))
+        n = max(2, int(np.ceil(dist / validity_edge_step_size)) + 1)
+        for s in np.linspace(0.0, 1.0, n):
+            q_full = (1.0 - s) * q_from_full + s * q_to_full
+            if not validity_fn(q_full):
+                return False
+        return True
 
     def _free_config(q_arm: np.ndarray) -> bool:
-        return checker.CheckConfigCollisionFree(_full(q_arm))
+        q_full = _full(q_arm)
+        return (
+            checker.CheckConfigCollisionFree(q_full)
+            and (validity_fn is None or validity_fn(q_full))
+        )
 
     if not _free_config(q_start_arm):
         raise RRTFailure("start configuration is in collision")
@@ -376,6 +481,413 @@ def rrt_connect(
 
 
 # ---------------------------------------------------------------------------
+#  IKFast goal-branch enumeration
+# ---------------------------------------------------------------------------
+
+
+def _pose_to_rigid_transform(pose: Pose) -> RigidTransform:
+    """Convert ``util.poses.Pose`` to ``pydrake.math.RigidTransform``."""
+    return RigidTransform(
+        RotationMatrix(np.asarray(pose.rotation.as_matrix())),
+        np.asarray(pose.translation, dtype=float),
+    )
+
+
+def _arm_calibration(arm_name: str) -> Tuple[RigidTransform, RigidTransform]:
+    """Return ``(X_base_task, X_wrist3_tcp)`` for the named arm.
+
+    ``X_base_task``    — translates a task-frame point to the arm's
+                         controller base frame.
+    ``X_wrist3_tcp``   — wrist_3 → TCP weld used by ``setTcp`` on
+                         the real controller and as the FixedOffsetFrame
+                         in the Drake plant. ``solve_ik`` wants
+                         wrist_3, so we'll invert this.
+    """
+    if arm_name == "ur_left":
+        return (
+            _pose_to_rigid_transform(X_LEFT_BASE_TASK),
+            _tcp_offset_to_rigid_transform(TCP_OFFSET_HOOK),
+        )
+    if arm_name == "ur_right":
+        return (
+            _pose_to_rigid_transform(X_RIGHT_BASE_TASK),
+            _tcp_offset_to_rigid_transform(TCP_OFFSET_ROBOTIQ_2F85),
+        )
+    raise KeyError(f"unknown arm {arm_name!r} (expected ur_left or ur_right)")
+
+
+def _orthonormalize(R: np.ndarray) -> np.ndarray:
+    """Project ``R`` to the nearest rotation matrix via polar decomposition.
+
+    Compose a chain of rotations through Drake's ``RigidTransform @``
+    operator and the result is *almost* orthogonal but drifts at the
+    1e-4 level. ikfast's analytic UR5e cpp returns 0 solutions for any
+    rotation whose ``det`` deviates from 1 noticeably, so we project
+    here as a defensive cleanup right before handing it off."""
+    U, _, Vt = np.linalg.svd(R)
+    R_proj = U @ Vt
+    if np.linalg.det(R_proj) < 0:
+        # Flip the smallest singular value to keep det = +1.
+        U[:, -1] *= -1
+        R_proj = U @ Vt
+    return R_proj
+
+
+def ikfast_goal_branches(
+    arm_name: str,
+    tcp_pose_task: Pose,
+    *,
+    seed_arm_q: Optional[np.ndarray] = None,
+    max_branch_dist: Optional[float] = None,
+) -> List[np.ndarray]:
+    """Enumerate IKFast solutions for the named arm at a task-frame TCP.
+
+    Parameters
+    ----------
+    arm_name : ``"ur_left"`` or ``"ur_right"``.
+    tcp_pose_task : task-frame pose of the gripper's TCP point. The
+        per-arm TCP_OFFSET is applied internally so the IK target is
+        wrist_3 (which is what ikfast actually solves for).
+    seed_arm_q : optional 6-vector. When provided, branches are
+        returned sorted by joint-distance to this seed AND each
+        branch is shifted by 2π multiples to land near the seed
+        (so a "near branch" stays near, not at the equivalent angle
+        on the wrong side of ±π).
+    max_branch_dist : drop branches whose joint-distance from
+        ``seed_arm_q`` exceeds this (radians). Ignored when
+        ``seed_arm_q`` is None.
+
+    Returns up to 8 candidate goal arm-q's. Empty list if the pose
+    is unreachable (e.g., outside workspace).
+    """
+    from .ikfast import solve_ik
+
+    X_base_task, X_wrist3_tcp = _arm_calibration(arm_name)
+    X_task_tcp = _pose_to_rigid_transform(tcp_pose_task)
+    # ikfast actually solves wrist_3 ↔ joints; convert TCP target to
+    # wrist_3 by removing the TCP offset (right-multiply by inverse).
+    X_base_tcp = X_base_task @ X_task_tcp
+    X_base_wrist3 = X_base_tcp @ X_wrist3_tcp.inverse()
+
+    # Project the chain-composed rotation back onto SO(3) — float drift
+    # otherwise sinks ikfast's solution count to 0.
+    X_base_wrist3_clean = RigidTransform(
+        RotationMatrix(_orthonormalize(np.asarray(X_base_wrist3.rotation().matrix()))),
+        np.asarray(X_base_wrist3.translation()),
+    )
+
+    return solve_ik(
+        X_base_wrist3_clean,
+        seed_q=seed_arm_q,
+        max_branch_dist=max_branch_dist,
+    )
+
+
+# ---------------------------------------------------------------------------
+#  Multi-goal RRT: try a SET of candidate goal arm-q's
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class GoalSetReport:
+    """Diagnostics from rrt_connect_to_goal_set: which goals were
+    discarded and why, which one finally won, etc."""
+
+    n_input: int
+    """How many candidate goals the caller passed in."""
+
+    n_in_collision: int
+    """Goals discarded because the goal config itself is in collision."""
+
+    n_direct_connect: int
+    """Goals reachable via straight C-space line from start."""
+
+    chosen_goal_index: int
+    """Position in the (collision-filtered) candidate list of the goal
+    that ended up producing the returned plan."""
+
+    chosen_planner: str
+    """``direct_connect`` or ``rrt_connect`` — which method produced
+    the returned plan."""
+
+
+def rrt_connect_to_goal_set(
+    checker: SceneGraphCollisionChecker,
+    q_start_full: np.ndarray,
+    goal_arm_qs: Sequence[np.ndarray],
+    planning_arm_name: str,
+    *,
+    max_iters: int = 2000,
+    step_size: float = 0.3,
+    goal_bias: float = 0.1,
+    sample_lower: Optional[np.ndarray] = None,
+    sample_upper: Optional[np.ndarray] = None,
+    seed: int = 0,
+    pick: str = "first",
+    validity_fn: Optional[ConfigValidityFn] = None,
+    validity_edge_step_size: float = 0.05,
+) -> Tuple[RRTPlan, GoalSetReport]:
+    """Plan to whichever of several candidate goal configs is reachable.
+
+    Standard pattern when the goal is a TCP pose, not a single q:
+    enumerate IK branches (``ikfast.solve_ik`` returns up to 8), throw
+    out the ones whose goal config is itself in collision, then ask the
+    planner to find a path to one of the survivors.
+
+    Goals are tried in the order given. ``pick="first"`` returns as soon
+    as ANY plan succeeds (faster). ``pick="shortest"`` plans to every
+    surviving goal and returns the shortest path (slower but better).
+
+    Per-goal strategy:
+      1. Skip if goal full-q is in self/env collision.
+      2. Try the trivial straight-line edge from start (``CheckEdgeCollisionFree``).
+         If free, that's a 2-node "direct connect" plan — cheapest possible.
+      3. Otherwise, run ``rrt_connect`` to that goal.
+
+    Raises ``RRTFailure`` if every candidate is unreachable.
+    """
+    if len(goal_arm_qs) == 0:
+        raise RRTFailure("goal set is empty (no candidate goals supplied)")
+    if pick not in ("first", "shortest"):
+        raise ValueError(f"pick must be 'first' or 'shortest', got {pick!r}")
+
+    plant = checker.plant()
+    from .transit import _arm_model_instance
+    arm_inst = _arm_model_instance(plant, planning_arm_name)
+    arm_idx = _arm_position_indices(plant, arm_inst)
+
+    q_start_full = np.asarray(q_start_full, dtype=float).copy()
+    q_start_arm = q_start_full[arm_idx]
+
+    # Pin partner arm + scene to whatever was in q_start_full so the
+    # collision-checker context matches what rrt_connect would use.
+    checker.UpdatePositions(q_start_full)
+
+    if not checker.CheckConfigCollisionFree(q_start_full):
+        raise RRTFailure("start configuration is in collision")
+    if validity_fn is not None and not validity_fn(q_start_full):
+        raise RRTFailure("start configuration violates validity constraint")
+
+    # Step 1: filter goals by config-collision-free + validity.
+    # Track per-branch failure reasons so the failure message is actually
+    # diagnostic rather than just "all in collision".
+    survivors: List[Tuple[int, np.ndarray]] = []  # (orig_index, arm_q)
+    n_pure_collision = 0
+    n_validity_only = 0
+    fail_reasons: List[str] = []
+    for orig_i, arm_q in enumerate(goal_arm_qs):
+        arm_q = np.asarray(arm_q, dtype=float)
+        full = q_start_full.copy()
+        full[arm_idx] = arm_q
+        coll_free = checker.CheckConfigCollisionFree(full)
+        validity_ok = validity_fn is None or validity_fn(full)
+        if coll_free and validity_ok:
+            survivors.append((orig_i, arm_q))
+            continue
+        # Categorise the failure for the error message.
+        if not coll_free:
+            n_pure_collision += 1
+            fail_reasons.append(f"#{orig_i}: env/self collision")
+        else:
+            n_validity_only += 1
+            fail_reasons.append(f"#{orig_i}: validity_fn rejected")
+
+    n_collision = len(goal_arm_qs) - len(survivors)
+    if not survivors:
+        breakdown = (
+            f"{n_pure_collision} env/self-collision, "
+            f"{n_validity_only} validity-rejected"
+        )
+        # Print per-branch detail at error time so the caller can see
+        # whether the singularity-branch / floor / axis validator is
+        # the offender (validity_fn lumps them; this raw breakdown
+        # makes it obvious when *every* branch is validity-only).
+        details = "; ".join(fail_reasons[:8])
+        raise RRTFailure(
+            f"all {len(goal_arm_qs)} candidate goal configs were rejected "
+            f"({breakdown}); detail: {details}"
+        )
+
+    # Step 2: try direct-connect to each survivor first — virtually free.
+    direct_plans: List[Tuple[int, RRTPlan]] = []
+    for surv_i, (_orig_i, arm_q) in enumerate(survivors):
+        full = q_start_full.copy()
+        full[arm_idx] = arm_q
+        edge_valid = checker.CheckEdgeCollisionFree(q_start_full, full)
+        if edge_valid and validity_fn is not None:
+            dist = float(np.linalg.norm(full[arm_idx] - q_start_arm))
+            n = max(2, int(np.ceil(dist / validity_edge_step_size)) + 1)
+            for s in np.linspace(0.0, 1.0, n):
+                q = (1.0 - s) * q_start_full + s * full
+                if not validity_fn(q):
+                    edge_valid = False
+                    break
+        if edge_valid:
+            plan = RRTPlan(
+                path_full=[q_start_full.copy(), full],
+                arm_indices=arm_idx,
+                iterations=0,
+                tree_sizes=(1, 1),
+                metadata={
+                    "planner": "direct_connect",
+                    "goal_index": survivors[surv_i][0],
+                    "seed": seed,
+                },
+            )
+            direct_plans.append((surv_i, plan))
+            if pick == "first":
+                report = GoalSetReport(
+                    n_input=len(goal_arm_qs),
+                    n_in_collision=n_collision,
+                    n_direct_connect=1,
+                    chosen_goal_index=survivors[surv_i][0],
+                    chosen_planner="direct_connect",
+                )
+                return plan, report
+
+    if direct_plans and pick == "shortest":
+        # All direct-connects are 2-node lines; "shortest" picks the
+        # one with smallest joint-space step from start.
+        best = min(direct_plans, key=lambda sp: float(np.linalg.norm(
+            sp[1].path_full[1][arm_idx] - q_start_arm,
+        )))
+        report = GoalSetReport(
+            n_input=len(goal_arm_qs),
+            n_in_collision=n_collision,
+            n_direct_connect=len(direct_plans),
+            chosen_goal_index=survivors[best[0]][0],
+            chosen_planner="direct_connect",
+        )
+        return best[1], report
+
+    # Step 3: real RRT for each survivor not already covered by a
+    # direct_connect. Try in input order; first success wins (or, if
+    # pick == "shortest", plan for everyone and pick smallest path
+    # length).
+    rrt_plans: List[Tuple[int, RRTPlan]] = []
+    for surv_i, (_orig_i, arm_q) in enumerate(survivors):
+        full = q_start_full.copy()
+        full[arm_idx] = arm_q
+        try:
+            plan = rrt_connect(
+                checker,
+                q_start_full=q_start_full,
+                q_goal_full=full,
+                planning_arm_name=planning_arm_name,
+                max_iters=max_iters,
+                step_size=step_size,
+                goal_bias=goal_bias,
+                sample_lower=sample_lower,
+                sample_upper=sample_upper,
+                seed=seed,
+                validity_fn=validity_fn,
+                validity_edge_step_size=validity_edge_step_size,
+            )
+        except RRTFailure:
+            continue
+        plan.metadata.setdefault("goal_index", survivors[surv_i][0])
+        rrt_plans.append((surv_i, plan))
+        if pick == "first":
+            report = GoalSetReport(
+                n_input=len(goal_arm_qs),
+                n_in_collision=n_collision,
+                n_direct_connect=0,
+                chosen_goal_index=survivors[surv_i][0],
+                chosen_planner="rrt_connect",
+            )
+            return plan, report
+
+    if rrt_plans:
+        # pick == "shortest" path
+        best = min(rrt_plans, key=lambda sp: path_length(
+            sp[1].path_full, sp[1].arm_indices,
+        ))
+        report = GoalSetReport(
+            n_input=len(goal_arm_qs),
+            n_in_collision=n_collision,
+            n_direct_connect=0,
+            chosen_goal_index=survivors[best[0]][0],
+            chosen_planner="rrt_connect",
+        )
+        return best[1], report
+
+    raise RRTFailure(
+        f"none of the {len(survivors)} collision-free candidate goals "
+        f"were reachable in {max_iters} iterations each"
+    )
+
+
+# ---------------------------------------------------------------------------
+#  Top-level convenience: TCP-pose goal → joint path
+# ---------------------------------------------------------------------------
+
+
+def rrt_connect_to_tcp_pose(
+    checker: SceneGraphCollisionChecker,
+    q_start_full: np.ndarray,
+    tcp_pose_task: Pose,
+    planning_arm_name: str,
+    *,
+    max_branch_dist: Optional[float] = None,
+    max_iters: int = 2000,
+    step_size: float = 0.3,
+    goal_bias: float = 0.1,
+    sample_lower: Optional[np.ndarray] = None,
+    sample_upper: Optional[np.ndarray] = None,
+    seed: int = 0,
+    pick: str = "first",
+    validity_fn: Optional[ConfigValidityFn] = None,
+    validity_edge_step_size: float = 0.05,
+) -> Tuple[RRTPlan, GoalSetReport]:
+    """Plan from ``q_start_full`` to a task-frame TCP pose.
+
+    Composes :func:`ikfast_goal_branches` (enumerate up to 8 IK roots)
+    and :func:`rrt_connect_to_goal_set` (filter colliding goals,
+    direct-connect each, fall back to RRT). The seed q for ikfast is
+    pulled from the planning arm's slice of ``q_start_full`` so
+    branches come back ordered by joint-distance from the start.
+
+    See :func:`rrt_connect_to_goal_set` for the ``pick`` semantics.
+    Raises ``RRTFailure`` if the TCP pose is unreachable, every
+    branch is in collision, or no branch can be RRT-connected within
+    ``max_iters``.
+    """
+    plant = checker.plant()
+    from .transit import _arm_model_instance
+    arm_inst = _arm_model_instance(plant, planning_arm_name)
+    arm_idx = _arm_position_indices(plant, arm_inst)
+    seed_arm_q = np.asarray(q_start_full, dtype=float)[arm_idx]
+
+    branches = ikfast_goal_branches(
+        planning_arm_name, tcp_pose_task,
+        seed_arm_q=seed_arm_q, max_branch_dist=max_branch_dist,
+    )
+    if not branches:
+        raise RRTFailure(
+            f"ikfast returned 0 solutions for the requested TCP pose "
+            f"(arm {planning_arm_name}, translation "
+            f"{np.round(tcp_pose_task.translation, 3)}) — "
+            f"likely out of reach"
+        )
+
+    return rrt_connect_to_goal_set(
+        checker,
+        q_start_full=q_start_full,
+        goal_arm_qs=branches,
+        planning_arm_name=planning_arm_name,
+        max_iters=max_iters,
+        step_size=step_size,
+        goal_bias=goal_bias,
+        sample_lower=sample_lower,
+        sample_upper=sample_upper,
+        seed=seed,
+        pick=pick,
+        validity_fn=validity_fn,
+        validity_edge_step_size=validity_edge_step_size,
+    )
+
+
+# ---------------------------------------------------------------------------
 #  Shortcut smoothing
 # ---------------------------------------------------------------------------
 
@@ -386,6 +898,8 @@ def shortcut_path(
     *,
     attempts: int = 200,
     seed: int = 0,
+    validity_fn: Optional[ConfigValidityFn] = None,
+    validity_edge_step_size: float = 0.05,
 ) -> List[np.ndarray]:
     """Greedy random shortcut smoother.
 
@@ -406,7 +920,16 @@ def shortcut_path(
             break
         i = int(rng.integers(0, len(path) - 2))
         j = int(rng.integers(i + 2, len(path)))
-        if checker.CheckEdgeCollisionFree(path[i], path[j]):
+        edge_valid = checker.CheckEdgeCollisionFree(path[i], path[j])
+        if edge_valid and validity_fn is not None:
+            dist = float(np.linalg.norm(path[j] - path[i]))
+            n = max(2, int(np.ceil(dist / validity_edge_step_size)) + 1)
+            for s in np.linspace(0.0, 1.0, n):
+                q = (1.0 - s) * path[i] + s * path[j]
+                if not validity_fn(q):
+                    edge_valid = False
+                    break
+        if edge_valid:
             path = path[:i + 1] + path[j:]
 
     return path
