@@ -21,22 +21,12 @@ import time
 from typing import Optional
 
 import numpy as np
-from pydrake.geometry import (
-    MeshcatVisualizer,
-    MeshcatVisualizerParams,
-    Role,
-    StartMeshcat,
-)
-from pydrake.multibody.plant import AddMultibodyPlantSceneGraph
-from pydrake.systems.framework import DiagramBuilder
+from pydrake.geometry import StartMeshcat
 
 from ..calibration import HOME_Q_RAD_LEFT
 from ..util.poses import Pose
 from ..util.rotations import Rotation
-from .scene.arms import add_both_arms
-from .scene.microwave import add_microwave
-from .scene.tables import add_workspace_table
-from .scene.vention import add_vention_stand
+from .build_scene import build_scene
 from .transit import InfeasiblePlanError, plan_transit
 
 
@@ -46,29 +36,6 @@ from .transit import InfeasiblePlanError, plan_transit
 # poses are reachable since HOME is the seed.
 START_OFFSET_M = np.array([-0.05, +0.00, 0.0])
 END_OFFSET_M   = np.array([+0.05, +0.10, 0.0])
-
-
-def _build_scene_with_meshcat(meshcat):
-    builder = DiagramBuilder()
-    plant, scene_graph = AddMultibodyPlantSceneGraph(builder, time_step=0.0)
-
-    add_workspace_table(plant)
-    add_vention_stand(plant)
-    add_both_arms(plant)
-    add_microwave(plant)
-    plant.Finalize()
-
-    # Match build_scene(): start at sim HOME instead of all-zero joints.
-    from . import default_home_q
-    plant.SetDefaultPositions(default_home_q(plant))
-
-    illustration_params = MeshcatVisualizerParams()
-    illustration_params.role = Role.kIllustration
-    MeshcatVisualizer.AddToBuilder(
-        builder, scene_graph, meshcat, illustration_params,
-    )
-    diagram = builder.Build()
-    return diagram, plant, scene_graph
 
 
 def _animate(diagram, plant, traj, meshcat, *, seconds: float = 4.0):
@@ -96,7 +63,8 @@ def _run(constraint_set: str, animate_seconds: float):
     meshcat = StartMeshcat()
     print(f"[smoke] Meshcat → {meshcat.web_url()}")
 
-    diagram, plant, _ = _build_scene_with_meshcat(meshcat)
+    scene = build_scene(meshcat=meshcat)
+    diagram, plant = scene.diagram, scene.plant
     diag_ctx = diagram.CreateDefaultContext()
     plant_ctx = plant.GetMyMutableContextFromRoot(diag_ctx)
 

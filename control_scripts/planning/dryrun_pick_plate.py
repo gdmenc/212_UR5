@@ -30,24 +30,15 @@ from typing import List, Optional
 
 import numpy as np
 from pydrake.geometry import (
-    MeshcatVisualizer,
-    MeshcatVisualizerParams,
     Rgba,
-    Role,
     Sphere,
     StartMeshcat,
 )
 from pydrake.math import RigidTransform
-from pydrake.multibody.plant import AddMultibodyPlantSceneGraph
 from pydrake.systems.analysis import Simulator
-from pydrake.systems.framework import DiagramBuilder
 
 from . import default_home_q
-from .scene.arms import add_both_arms
-from .scene.grippers import add_grippers
-from .scene.microwave import add_microwave
-from .scene.tables import add_workspace_table
-from .scene.vention import add_vention_stand
+from .build_scene import build_scene
 from .transit import (
     InfeasiblePlanError,
     TransitPlan,
@@ -82,24 +73,6 @@ MIDPOINT_ANGLE_OVERRIDE = PLACE_ANGLE_OVERRIDE
 _DEFAULT_SPEED = 1.0    # rad/s — joint speed cap for moveJ_path
 _DEFAULT_ACCEL = 1.4    # rad/s²
 _BLEND_R = 0.02         # m — TCP-distance blend
-
-
-def _build_scene_with_meshcat(meshcat):
-    builder = DiagramBuilder()
-    plant, scene_graph = AddMultibodyPlantSceneGraph(builder, time_step=0.0)
-    add_workspace_table(plant)
-    add_vention_stand(plant)
-    arms = add_both_arms(plant)
-    add_grippers(plant, arms, robotiq_mode="closed")
-    add_microwave(plant)
-    plant.Finalize()
-    plant.SetDefaultPositions(default_home_q(plant))
-
-    params = MeshcatVisualizerParams()
-    params.role = Role.kIllustration
-    MeshcatVisualizer.AddToBuilder(builder, scene_graph, meshcat, params)
-    diagram = builder.Build()
-    return diagram, plant
 
 
 def _set_marker(meshcat, path, xyz, color, radius=0.012):
@@ -349,7 +322,8 @@ def main(animate_seconds: float = 2.5, cycle: bool = False) -> int:
     meshcat = StartMeshcat()
     print(f"[dryrun] Meshcat → {meshcat.web_url()}")
 
-    diagram, plant = _build_scene_with_meshcat(meshcat)
+    scene = build_scene(meshcat=meshcat)
+    diagram, plant = scene.diagram, scene.plant
     sim = Simulator(diagram)
     sim.Initialize()
     sim_ctx = sim.get_mutable_context()

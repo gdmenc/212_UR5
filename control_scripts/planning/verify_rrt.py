@@ -33,28 +33,19 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 from pydrake.geometry import (
-    MeshcatVisualizer,
-    MeshcatVisualizerParams,
     Rgba,
-    Role,
     Sphere,
     StartMeshcat,
 )
 from pydrake.math import RigidTransform
-from pydrake.multibody.plant import AddMultibodyPlantSceneGraph
 from pydrake.systems.analysis import Simulator
-from pydrake.systems.framework import DiagramBuilder
 
 from . import default_home_q
+from .build_scene import build_scene
 from .rrt import (
     RRTFailure, build_planning_scene, make_collision_checker,
     path_length, rrt_connect, shortcut_path, _arm_position_indices,
 )
-from .scene.arms import add_both_arms
-from .scene.grippers import add_grippers
-from .scene.microwave import add_microwave
-from .scene.tables import add_workspace_table
-from .scene.vention import add_vention_stand
 from .transit import _arm_model_instance
 
 
@@ -102,30 +93,6 @@ CASES = {"easy": _case_easy, "obstructed": _case_obstructed}
 # ---------------------------------------------------------------------------
 #  Visualizer
 # ---------------------------------------------------------------------------
-
-
-def _build_scene_with_meshcat(meshcat):
-    """Mirror build_planning_scene but with a Meshcat visualizer attached.
-
-    Done as a separate path because RobotDiagramBuilder doesn't expose
-    a hook for adding a visualizer mid-build the way DiagramBuilder
-    does. The duplication is small."""
-    builder = DiagramBuilder()
-    plant, scene_graph = AddMultibodyPlantSceneGraph(builder, time_step=0.0)
-
-    add_workspace_table(plant)
-    add_vention_stand(plant)
-    arms = add_both_arms(plant)
-    add_grippers(plant, arms, robotiq_mode="closed")
-    add_microwave(plant)
-    plant.Finalize()
-    plant.SetDefaultPositions(default_home_q(plant))
-
-    params = MeshcatVisualizerParams()
-    params.role = Role.kIllustration
-    MeshcatVisualizer.AddToBuilder(builder, scene_graph, meshcat, params)
-    diagram = builder.Build()
-    return diagram, plant
 
 
 def _interpolate_path(path_full: List[np.ndarray], n_per_segment: int = 25
@@ -240,7 +207,8 @@ def main(case: str, animate_seconds: float, max_iters: int) -> int:
     meshcat = StartMeshcat()
     print(f"\n[verify_rrt] Meshcat → {meshcat.web_url()}")
 
-    diagram, plant = _build_scene_with_meshcat(meshcat)
+    scene = build_scene(meshcat=meshcat)
+    diagram, plant = scene.diagram, scene.plant
     sim = Simulator(diagram)
     sim.Initialize()
     sim_ctx = sim.get_mutable_context()

@@ -47,11 +47,7 @@ from pydrake.planning import (
 )
 
 from . import default_home_q
-from .scene.arms import add_both_arms
-from .scene.grippers import add_grippers
-from .scene.microwave import add_microwave
-from .scene.tables import add_workspace_table
-from .scene.vention import add_vention_stand
+from .build_scene import _compose_scene_fragments
 
 
 # ---------------------------------------------------------------------------
@@ -62,30 +58,33 @@ from .scene.vention import add_vention_stand
 def build_planning_scene(
     *,
     include_microwave: bool = True,
+    include_objects: bool = True,
     robotiq_mode: str = "closed",
 ) -> Tuple[RobotDiagram, MultibodyPlant, dict, dict]:
     """Build a ``RobotDiagram`` + plant + arm/gripper handles dict.
 
     Mirrors ``build_scene.build_scene()`` but uses ``RobotDiagramBuilder``
     so the resulting diagram is the right wrapper type for
-    ``SceneGraphCollisionChecker``. Also calls ``SetDefaultPositions``
-    so a fresh context lands at the sim HOME pose.
+    ``SceneGraphCollisionChecker``. Composition is shared via
+    ``_compose_scene_fragments`` so this can't drift from the
+    visualizer-side build.
     """
     rdb = RobotDiagramBuilder(time_step=0.0)
     plant = rdb.plant()
 
-    add_workspace_table(plant)
-    add_vention_stand(plant)
-    arms = add_both_arms(plant)
-    grippers = add_grippers(plant, arms, robotiq_mode=robotiq_mode)
-    if include_microwave:
-        add_microwave(plant)
+    fragments = _compose_scene_fragments(
+        plant,
+        include_microwave=include_microwave,
+        include_grippers=True,
+        include_objects=include_objects,
+        robotiq_mode=robotiq_mode,
+    )
 
     plant.Finalize()
     plant.SetDefaultPositions(default_home_q(plant))
 
     diagram = rdb.Build()
-    return diagram, plant, arms, grippers
+    return diagram, plant, fragments.arms, fragments.grippers
 
 
 def _gripper_instance_for(plant: MultibodyPlant, arm_name: str

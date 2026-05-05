@@ -41,25 +41,16 @@ from typing import List, Optional
 import numpy as np
 from pydrake.geometry import (
     Cylinder,
-    MeshcatVisualizer,
-    MeshcatVisualizerParams,
     Rgba,
-    Role,
     Sphere,
     StartMeshcat,
 )
 from pydrake.math import RigidTransform, RotationMatrix
 from scipy.spatial.transform import Rotation as ScipyRotation
-from pydrake.multibody.plant import AddMultibodyPlantSceneGraph
 from pydrake.systems.analysis import Simulator
-from pydrake.systems.framework import DiagramBuilder
 
 from . import default_home_q
-from .scene.arms import add_both_arms
-from .scene.grippers import add_grippers
-from .scene.microwave import add_microwave
-from .scene.tables import add_workspace_table
-from .scene.vention import add_vention_stand
+from .build_scene import build_scene
 from .transit import _arm_model_instance
 
 
@@ -68,26 +59,6 @@ _DEFAULT_WP_DIR = (
 )
 _TOLERANCE_M = 0.01
 _TOLERANCE_DEG = 5.0   # rotation tolerance for "OK" tag
-
-
-def _build_scene(meshcat):
-    builder = DiagramBuilder()
-    plant, scene_graph = AddMultibodyPlantSceneGraph(builder, time_step=0.0)
-
-    add_workspace_table(plant)
-    add_vention_stand(plant)
-    arms = add_both_arms(plant)
-    add_grippers(plant, arms, robotiq_mode="closed")
-    add_microwave(plant)
-    plant.Finalize()
-    plant.SetDefaultPositions(default_home_q(plant))
-
-    params = MeshcatVisualizerParams()
-    params.role = Role.kIllustration
-    MeshcatVisualizer.AddToBuilder(builder, scene_graph, meshcat, params)
-
-    diagram = builder.Build()
-    return diagram, plant
 
 
 def _set_marker(meshcat, name: str, xyz, color: Rgba, radius: float = 0.012):
@@ -313,7 +284,8 @@ def main(file_paths: Optional[List[Path]] = None,
         return 0
 
     meshcat = StartMeshcat()
-    diagram, plant = _build_scene(meshcat)
+    scene = build_scene(meshcat=meshcat)
+    diagram, plant = scene.diagram, scene.plant
     sim = Simulator(diagram)
     sim.Initialize()
     sim_ctx = sim.get_mutable_context()
