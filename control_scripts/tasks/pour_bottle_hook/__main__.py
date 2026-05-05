@@ -54,6 +54,7 @@ _REPO_ROOT = Path(__file__).parents[3]
 _PERCEPTION_DIR = Path(__file__).parents[4] / "212_Perception" / "build"
 _PERCEPTION_BIN = _HERE / "build" / "perception_bottle_hook"
 _CALIB_JSON = _REPO_ROOT / "calibration" / "build" / "T_ee_camera.json"
+_OFFSETS_JSON = _REPO_ROOT / "calibration" / "build" / "perception_offsets.json"
 _YOLO_MODEL = _PERCEPTION_DIR / "yolo11n.onnx"
 _COCO_CLASSES = _PERCEPTION_DIR / "coco-classes.txt"
 _PREVIEW_IMAGE = Path("/tmp/bottle_hook_detection_preview.jpg")
@@ -75,6 +76,38 @@ OBS_Q_RAD = [
 
 BOTTLE_XY_WARN_RADIUS_M = 0.20
 BOTTLE_EXPECTED_TASK = np.array(BOTTLE_PICK_POSE_TASK.translation[:2], dtype=float)
+PERCEPTION_ATTEMPTS = 1
+POSE_SAMPLES_DEFAULT = 1
+TABLE_Z_TASK_M = 0.0
+CXX_WARMUP_FRAMES = 1
+CXX_DETECT_FRAMES = 1
+
+# Correction applied to the detected bottle base position before planning.
+# Z = -0.01 matches the hand-tuned static pose (deeper hook engagement).
+# Tune XY if detection has a residual systematic offset after calibration.
+PERCEPTION_OFFSET_M = np.array([0.0, 0.0, -0.01])
+
+
+# ---------------------------------------------------------------------------
+# Camera configuration
+# ---------------------------------------------------------------------------
+
+# Serial numbers — find with: python3 perception/multicamera_view.py
+ARM_CAM_SERIAL = ""   # eye-in-hand RealSense (empty = first available)
+TOP_CAM_SERIAL = ""   # overhead top-down RealSense (empty = first available)
+
+# Static T_task_camera for the overhead top-down camera.
+# Translation hand-measured; rotation assumes camera faces straight down
+# with +X aligned to task +X.  Verify with --dry --cam top before running.
+_TC_X =  0.0125
+_TC_Y = -0.270 - 0.126 + 0.510 + 0.0425   # = 0.1565 m
+_TC_Z =  1.235
+TOP_CAM_T_TASK_CAM = np.array([
+    [ 1.,  0.,  0., _TC_X],
+    [ 0., -1.,  0., _TC_Y],
+    [ 0.,  0., -1., _TC_Z],
+    [ 0.,  0.,  0.,  1.  ],
+], dtype=float)
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +142,40 @@ def _load_T_ee_camera(path: Path) -> np.ndarray:
     return M
 
 
+def _offset_key(cam: str, serial: str) -> str:
+    serial_key = serial if serial else "default"
+    return f"{cam}:{serial_key}"
+
+
+def _load_perception_offsets(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text())
+    except json.JSONDecodeError:
+        return {}
+
+
+def _save_perception_offsets(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2))
+
+
+def _get_xy_offset(path: Path, key: str) -> np.ndarray:
+    blob = _load_perception_offsets(path)
+    val = blob.get(key, {}).get("xy_offset_m", [0.0, 0.0])
+    arr = np.array(val, dtype=float).reshape(2)
+    return arr
+
+
+def _set_xy_offset(path: Path, key: str, xy_offset: np.ndarray) -> None:
+    blob = _load_perception_offsets(path)
+    if key not in blob:
+        blob[key] = {}
+    blob[key]["xy_offset_m"] = [float(xy_offset[0]), float(xy_offset[1])]
+    _save_perception_offsets(path, blob)
+
+
 def _compute_T_task_camera(arm: ArmHandle, T_ee_cam: np.ndarray) -> np.ndarray:
     tcp_rtde = arm.receive.getActualTCPPose()
     X_base_ee = rtde_to_pose(tcp_rtde)
@@ -117,6 +184,54 @@ def _compute_T_task_camera(arm: ArmHandle, T_ee_cam: np.ndarray) -> np.ndarray:
     T[:3, :3] = X_task_ee.rotation.as_matrix()
     T[:3, 3] = X_task_ee.translation
     return T @ T_ee_cam
+
+
+def _compute_T_task_camera_stable(
+    arm: ArmHandle,
+    T_ee_cam: np.ndarray,
+    samples: int = POSE_SAMPLES_DEFAULT,
+    sample_dt_s: float = 0.05,
+) -> np.ndarray:
+    if samples <= 1:
+        return _compute_T_task_camera(arm, T_ee_cam)
+    Ts = []
+    for _ in range(samples):
+        Ts.append(_compute_T_task_camera(arm, T_ee_cam))
+        time.sleep(sample_dt_s)
+    out = Ts[-1].copy()
+    out[:3, 3] = np.mean([T[:3, 3] for T in Ts], axis=0)
+    return out
+
+
+def _run_perception_best(
+    arm: ArmHandle,
+    T_ee_cam: np.ndarray,
+    auto: bool,
+    serial: str,
+    attempts: int = PERCEPTION_ATTEMPTS,
+    pose_samples: int = POSE_SAMPLES_DEFAULT,
+    warmup_frames: int = CXX_WARMUP_FRAMES,
+    detect_frames: int = CXX_DETECT_FRAMES,
+) -> tuple[dict, np.ndarray]:
+    best = None
+    for i in range(attempts):
+        T_task_cam = _compute_T_task_camera_stable(arm, T_ee_cam, samples=pose_samples)
+        print(f"  [attempt {i+1}/{attempts}] camera origin = {np.round(T_task_cam[:3,3], 4)} m")
+        result = _run_perception(
+            T_task_cam,
+            auto=auto,
+            serial=serial,
+            warmup_frames=warmup_frames,
+            detect_frames=detect_frames,
+        )
+        if not result.get("detected", False):
+            continue
+        conf = float(result.get("confidence", 0.0))
+        if best is None or conf > float(best[0].get("confidence", 0.0)):
+            best = (result, T_task_cam)
+    if best is None:
+        raise RuntimeError(f"Bottle not detected after {attempts} attempt(s).")
+    return best
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +252,9 @@ def _run_perception(
     T_task_cam: np.ndarray,
     conf: float = 0.40,
     auto: bool = False,
+    serial: str = "",
+    warmup_frames: int = CXX_WARMUP_FRAMES,
+    detect_frames: int = CXX_DETECT_FRAMES,
 ) -> dict:
     """Run C++ binary. In interactive mode saves annotated JPEG and opens it."""
     _check_paths()
@@ -151,6 +269,10 @@ def _run_perception(
         "--T-task-camera", T_str,
         "--save-image", str(_PREVIEW_IMAGE),
     ]
+    if serial:
+        cmd.extend(["--serial", serial])
+    cmd.extend(["--warmup", str(max(0, warmup_frames))])
+    cmd.extend(["--frames", str(max(1, detect_frames))])
     if auto:
         cmd.append("--headless")
 
@@ -255,29 +377,60 @@ def _dry_run() -> int:
 # Live run
 # ---------------------------------------------------------------------------
 
-def run(auto: bool) -> int:
-    T_ee_cam = _load_T_ee_camera(_CALIB_JSON)
-    print(f"[calib] t_ee_camera = {np.round(T_ee_cam[:3, 3], 4)}")
-
+def run(
+    auto: bool,
+    cam: str = "arm",
+    attempts: int = PERCEPTION_ATTEMPTS,
+    pose_samples: int = POSE_SAMPLES_DEFAULT,
+    warmup_frames: int = CXX_WARMUP_FRAMES,
+    detect_frames: int = CXX_DETECT_FRAMES,
+    zero_camera: bool = False,
+    reference_center_task: np.ndarray | None = None,
+) -> int:
     with default_session(left=True, right=False) as session:
         arm = session.arms[ARM]
 
+        # ── Phase 1-2: camera setup ────────────────────────────────────────
         print("\n" + "-" * 62)
-        print("[1/6]  Moving to observation pose (candidate3) ...")
-        arm.control.moveJ(OBS_Q_RAD, speed=0.3, acceleration=0.2)
-        time.sleep(0.3)
-        print("  Reached observation pose.")
-        print("  Hook tip -> +X, camera faces table/bottle scene.")
-        _confirm("Arm at obs pose. Run perception and open detection image?", auto)
-
-        print("\n" + "-" * 62)
-        print("[2/6]  Reading TCP -> T_task_camera ...")
-        T_task_cam = _compute_T_task_camera(arm, T_ee_cam)
+        if cam == "arm":
+            T_ee_cam = _load_T_ee_camera(_CALIB_JSON)
+            print(f"[calib] t_ee_camera = {np.round(T_ee_cam[:3, 3], 4)}")
+            print("[1/6]  Moving to observation pose (candidate3) ...")
+            arm.control.moveJ(OBS_Q_RAD, speed=0.3, acceleration=0.2)
+            time.sleep(0.3)
+            print("  Reached observation pose.  Hook tip -> +X, camera faces table.")
+            _confirm("Arm at obs pose. Run perception and open detection image?", auto)
+            print(f"[2/6]  Reading TCP -> T_task_camera (pose samples: {pose_samples}) ...")
+            T_task_cam = _compute_T_task_camera_stable(arm, T_ee_cam, samples=pose_samples)
+            cam_serial = ARM_CAM_SERIAL
+        else:
+            print("[1-2/6]  Top-down camera: static transform (no arm movement).")
+            T_task_cam = TOP_CAM_T_TASK_CAM
+            cam_serial = TOP_CAM_SERIAL
+        key = _offset_key(cam, cam_serial)
+        xy_offset = _get_xy_offset(_OFFSETS_JSON, key)
+        print(f"[calib] loaded XY perception offset for {key}: {np.round(xy_offset, 4)} m")
         print(f"  Camera origin (task frame): {np.round(T_task_cam[:3, 3], 4)} m")
 
         print("\n" + "-" * 62)
         print("[3/6]  Running C++ bottle detection ...")
-        result = _run_perception(T_task_cam, auto=auto)
+        if cam == "arm":
+            try:
+                result, T_task_cam = _run_perception_best(
+                    arm, T_ee_cam, auto=auto, serial=cam_serial, attempts=attempts,
+                    pose_samples=pose_samples, warmup_frames=warmup_frames, detect_frames=detect_frames
+                )
+            except RuntimeError as exc:
+                print(f"\n[FAIL] {exc}")
+                return 1
+        else:
+            result = _run_perception(
+                T_task_cam,
+                auto=auto,
+                serial=cam_serial,
+                warmup_frames=warmup_frames,
+                detect_frames=detect_frames,
+            )
         if not result.get("detected", False):
             print("\n[FAIL] Bottle not detected. Suggestions:")
             print("  - Is the bottle visible from this pose?")
@@ -295,11 +448,33 @@ def run(auto: bool) -> int:
 
         if not auto:
             print(f"\n  Preview image: {_PREVIEW_IMAGE}  (should have opened in Preview.app)")
+
+        bottle_xy_detected = np.array(bottle_base_task_m[:2], dtype=float)
+        if zero_camera:
+            if reference_center_task is None:
+                raise RuntimeError("zero_camera=True requires reference_center_task.")
+            target_xy = np.array(reference_center_task[:2], dtype=float)
+            xy_offset = target_xy - bottle_xy_detected
+            _set_xy_offset(_OFFSETS_JSON, key, xy_offset)
+            print(
+                f"[calib] updated XY perception offset for {key}: {np.round(xy_offset, 4)} m "
+                f"(detected {np.round(bottle_xy_detected, 4)} -> target {np.round(target_xy, 4)})"
+            )
+
         _confirm("Detection look correct? Build grasp and pour plan?", auto)
 
         print("\n" + "-" * 62)
         print("[4/6]  Building grasp + pour plan ...")
-        bottle_base_pose = Pose(translation=np.array(bottle_base_task_m, dtype=float))
+        bottle_base = np.array(bottle_base_task_m, dtype=float)
+        bottle_base[:2] += xy_offset
+        bottle_base[2] = TABLE_Z_TASK_M
+        bottle_base_pose = Pose(
+            translation=bottle_base + PERCEPTION_OFFSET_M
+        )
+        print(f"  offset-corrected bottle base xy = {np.round(bottle_base[:2], 4)} m")
+        print(f"  table-anchored bottle base z = {TABLE_Z_TASK_M:.3f} m")
+        print(f"  Corrected base   : {np.round(bottle_base_pose.translation, 4)} m"
+              f"  (offset {PERCEPTION_OFFSET_M})")
         grasp, upright_at_pour, pour_pose, place_pose = _build_plan(bottle_base_pose)
         _print_plan(bottle_base_pose, grasp, upright_at_pour, pour_pose, place_pose)
         _confirm("Plan looks correct? Execute PICK?", auto)
@@ -353,6 +528,21 @@ def main() -> None:
                         help="Print plan with static bottle pose; no robot or camera.")
     parser.add_argument("--build", action="store_true",
                         help="Build the perception_bottle_hook binary then exit.")
+    parser.add_argument("--cam", choices=["arm", "top"], default="arm",
+                        help="Camera: 'arm' = eye-in-hand (default), 'top' = overhead fixed rig.")
+    parser.add_argument("--attempts", type=int, default=PERCEPTION_ATTEMPTS,
+                        help="Perception attempts (default 1 for mac stability).")
+    parser.add_argument("--pose-samples", type=int, default=POSE_SAMPLES_DEFAULT,
+                        help="TCP samples for T_task_camera averaging (default 1).")
+    parser.add_argument("--warmup-frames", type=int, default=CXX_WARMUP_FRAMES,
+                        help="C++ RealSense warmup frames (default 1 for mac stability).")
+    parser.add_argument("--detect-frames", type=int, default=CXX_DETECT_FRAMES,
+                        help="C++ frames to aggregate per detection run (default 1 for mac stability).")
+    parser.add_argument("--zero-camera", action="store_true",
+                        help="Calibrate and save XY perception offset from a known reference center.")
+    parser.add_argument("--ref-center", type=float, nargs=3, default=[0.0, 0.0, 0.0],
+                        metavar=("X", "Y", "Z"),
+                        help="Known task-frame reference center used with --zero-camera.")
     args = parser.parse_args()
 
     if args.build:
@@ -365,7 +555,18 @@ def main() -> None:
     if args.dry:
         raise SystemExit(_dry_run())
 
-    raise SystemExit(run(auto=args.auto))
+    raise SystemExit(
+        run(
+            auto=args.auto,
+            cam=args.cam,
+            attempts=max(1, args.attempts),
+            pose_samples=max(1, args.pose_samples),
+            warmup_frames=max(0, args.warmup_frames),
+            detect_frames=max(1, args.detect_frames),
+            zero_camera=args.zero_camera,
+            reference_center_task=np.array(args.ref_center, dtype=float),
+        )
+    )
 
 
 if __name__ == "__main__":

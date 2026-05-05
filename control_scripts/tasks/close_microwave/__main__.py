@@ -1,9 +1,10 @@
 """Push the microwave door closed with the left arm (no grasp).
 
-Uses the same geometry as open_microwave — same hinge position, same
-arc parameters — but runs the arc in reverse.  The arm transits to the
-fully-open handle position, then pushes through 8 moveL waypoints back
-to door-closed.
+Uses the hand-recorded task-frame waypoints from the provided
+``saved_at=2026-05-05T01:14:19`` close snapshot.
+
+The close motion is intentionally simple: move to ``preclosedoor``, then
+travel directly to ``closedoor``.
 
 Running
 -------
@@ -12,15 +13,10 @@ Running
 
 First-run checklist
 -------------------
-1. ``--dry`` first — confirm the arc reversal looks correct (Y values should
-   increase from negative back toward +0.344, and final handle should match
-   the recorded grasp waypoint position).
-2. Confirm the door is actually fully open before running — if the door is
-   only partially open the arm will approach from the wrong angle.
-3. Keep approach_speed low (≤ 0.04 m/s) so the door doesn't slam and
-   rebound into the arm.
-4. If the door isn't fully closed at the end, increase arc_open_angle_rad
-   slightly (e.g. 1.25 rad) so the final push goes a bit further.
+1. ``--dry`` first — confirm the two joint waypoints match the latest
+   ``preclosedoor`` and ``closedoor`` snapshots.
+2. Confirm the door is open enough for the preclose pose before running.
+3. Keep joint speed modest so the final push does not slam the door.
 """
 
 from __future__ import annotations
@@ -33,45 +29,59 @@ from ...config import PickPlaceConfig
 from ...session import default_session
 from .close_microwave import (
     CloseMicrowaveDoorSpec,
-    close_arc_waypoints,
     close_microwave_door,
-    open_handle_pose,
 )
 from ...util.poses import Pose
 from ...util.rotations import Rotation
 
 
 # ---------------------------------------------------------------------------
-#  Geometry — same constants as open_microwave
+#  Waypoints — sourced from the provided 2026-05-05T01:14:19 close snapshot
 # ---------------------------------------------------------------------------
 
-# TCP pose at the handle when the door is CLOSED.
-# Source: logs/waypoints/ur_left_20260430_214535.json
-#         snapshot "microwave initial open (grasp) 2"
-HANDLE_CLOSED_POSE_TASK = Pose(
-    translation=np.array([-0.07104107454852841, 0.34429568939693384, 0.15485172974632533]),
+# Source: snapshot "preclosedoor"
+PRECLOSE_DOOR_POSE_TASK = Pose(
+    translation=np.array([-0.6093772150461308, 0.27488770991396877, 0.41131672797896235]),
     rotation=Rotation.from_rotvec(
-        [-1.5486042738909598, 0.04339334238190479, -0.09065433567416514]
+        [-1.0250496228801607, 1.3970250241161535, 0.8022438222398867]
     ),
 )
 
-DOOR_WIDTH_M = 0.38
-
-# Hinge is directly left of the handle (pure -X offset) at the full door width.
-# Must match open_microwave exactly.
-_HINGE_DIR = np.array([-1.0, 0.0, 0.0]) / np.sqrt(2.0)
-HINGE_POSITION_TASK = (
-    HANDLE_CLOSED_POSE_TASK.translation + DOOR_WIDTH_M * _HINGE_DIR
+# Source: snapshot "closedoor"
+CLOSED_DOOR_POSE_TASK = Pose(
+    translation=np.array([-0.27459578866963485, 0.25997937217088424, 0.41819012355144713]),
+    rotation=Rotation.from_rotvec(
+        [-0.5442464470297064, 1.4736026545243532, 0.3871995361438228]
+    ),
 )
+
+PRECLOSE_DOOR_JOINTS_RAD = [
+    1.5467852354049683,
+    -1.1462249618819733,
+    0.7166374365435999,
+    -1.3493216794780274,
+    -2.396539036427633,
+    -2.1319807211505335,
+]
+CLOSED_DOOR_JOINTS_RAD = [
+    1.897124171257019,
+    -1.0298115772059937,
+    1.0604260603534144,
+    -1.3474183839610596,
+    -2.403875176106588,
+    -2.132052723561422,
+]
 
 ARM = "ur_left"
 
 DOOR_SPEC = CloseMicrowaveDoorSpec(
-    handle_closed_pose_task=HANDLE_CLOSED_POSE_TASK,
-    hinge_position_task=HINGE_POSITION_TASK,
+    handle_closed_pose_task=CLOSED_DOOR_POSE_TASK,
+    hinge_position_task=np.zeros(3),
     pull_direction_task=np.array([-1.0, -1.0, 0.0]),
-    arc_open_angle_rad=1.6,   # must match the value used to open
-    n_arc_steps=14,
+    preclose_pose_task=PRECLOSE_DOOR_POSE_TASK,
+    preclose_joints_rad=PRECLOSE_DOOR_JOINTS_RAD,
+    closed_pose_task=CLOSED_DOOR_POSE_TASK,
+    closed_joints_rad=CLOSED_DOOR_JOINTS_RAD,
     joint_speed=0.8,          # rad/s — matches open_microwave
     joint_accel=0.5,          # rad/s²
 )
@@ -92,30 +102,15 @@ CONFIG = PickPlaceConfig(
 # ---------------------------------------------------------------------------
 
 def run(dry: bool) -> None:
-    handle_open = open_handle_pose(DOOR_SPEC)
-    waypoints = close_arc_waypoints(DOOR_SPEC)
-
-    radius = float(np.linalg.norm(
-        (HANDLE_CLOSED_POSE_TASK.translation - HINGE_POSITION_TASK)[:2]
-    ))
-    arc_length = radius * DOOR_SPEC.arc_open_angle_rad
-
     print("=" * 60)
     print("  Arm               :", ARM)
-    print("  Approach pos(task):", np.round(handle_open.translation, 4),
-          "  ← fully-open handle")
-    print("  Hinge (task)      :", np.round(HINGE_POSITION_TASK, 4))
-    print("  Arc radius        :", f"{radius:.3f} m")
-    print("  Arc angle         :", f"{np.degrees(DOOR_SPEC.arc_open_angle_rad):.1f}°")
-    print("  Arc length        :", f"{arc_length:.3f} m")
-    print("  Arc steps         :", DOOR_SPEC.n_arc_steps)
-    print("  Final handle pos  :", np.round(waypoints[-1].translation, 4),
-          "  ← should match closed handle")
-    print("  Transit Z         :", CONFIG.transit_z, "m (task frame)")
+    print("  Preclose (task)   :", np.round(PRECLOSE_DOOR_POSE_TASK.translation, 4))
+    print("  Closed (task)     :", np.round(CLOSED_DOOR_POSE_TASK.translation, 4))
+    print("  Joint speed       :", DOOR_SPEC.joint_speed, "rad/s")
     print("-" * 60)
-    print("  Close arc waypoints (task XY):")
-    for i, wp in enumerate(waypoints):
-        print(f"    [{i+1}] {np.round(wp.translation[:2], 4)}")
+    print("  Close waypoints:")
+    print("    [1] preclosedoor", np.round(PRECLOSE_DOOR_JOINTS_RAD, 4))
+    print("    [2] closedoor   ", np.round(CLOSED_DOOR_JOINTS_RAD, 4))
     print("=" * 60)
 
     if dry:
@@ -125,7 +120,7 @@ def run(dry: bool) -> None:
     with default_session(left=True, right=False) as session:
         arm = session.arms[ARM]
 
-        print(f"\n→ close microwave door (reverse arc, {DOOR_SPEC.n_arc_steps} waypoints)")
+        print("\n→ close microwave door (preclosedoor → closedoor)")
         result = close_microwave_door(arm, DOOR_SPEC, CONFIG)
 
         if result.success:

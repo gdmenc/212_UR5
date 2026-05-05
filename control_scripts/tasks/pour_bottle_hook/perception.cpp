@@ -51,8 +51,8 @@ static constexpr float NMS_THRESHOLD = 0.45f;
 static constexpr float CONFIDENCE_THRESHOLD = 0.25f;
 
 static constexpr int COCO_BOTTLE = 39;
-static constexpr int N_WARMUP = 15;
-static constexpr int N_FRAMES = 10;
+static constexpr int DEFAULT_N_WARMUP = 15;
+static constexpr int DEFAULT_N_FRAMES = 10;
 
 static constexpr double BOTTLE_TOTAL_HEIGHT_M = 0.175;
 
@@ -154,33 +154,6 @@ public:
         return d_med >= min_m && d_med <= max_m;
     }
 
-    static bool rayTableIntersect(
-        const cv::Rect& box,
-        const rs2_intrinsics& intr,
-        const Eigen::Matrix4d& T_task_cam,
-        Eigen::Vector3d& out_base_task)
-    {
-        int cx = box.x + box.width / 2;
-        int cy = box.y + box.height - 1;
-
-        float pix[2] = {(float)cx, (float)cy}, pt[3];
-        rs2_deproject_pixel_to_point(pt, &intr, pix, 1.0f);
-        Eigen::Vector3d ray_cam(pt[0], pt[1], pt[2]);
-        ray_cam.normalize();
-
-        Eigen::Matrix3d R = T_task_cam.block<3,3>(0,0);
-        Eigen::Vector3d t = T_task_cam.block<3,1>(0,3);
-        Eigen::Vector3d ray_task = R * ray_cam;
-
-        if (std::abs(ray_task.z()) < 1e-6) return false;
-        double lam = -t.z() / ray_task.z();
-        if (lam < 0.0) return false;
-
-        out_base_task = t + lam * ray_task;
-        out_base_task.z() = 0.0;
-        return true;
-    }
-
 private:
     bool detectVersion() {
         cv::Mat dummy = cv::Mat::zeros(640, 640, CV_8UC3);
@@ -247,6 +220,48 @@ private:
         tr.release();
     }
 };
+
+// ---------------------------------------------------------------------------
+// Depth-to-3D
+// ---------------------------------------------------------------------------
+
+// Sample median depth in a patch centred at (cx, cy) within the bbox and
+// deproject directly to a task-frame 3D point.  Sampling at the lower third
+// of the bottle bbox places the sample point near the base, reducing parallax
+// from the camera's non-vertical viewing angle.
+static bool depthTo3DTask(
+    const cv::Rect& box,
+    int cx, int cy,
+    const rs2::depth_frame& depth,
+    const rs2_intrinsics& intr,
+    const Eigen::Matrix4d& T_task_cam,
+    Eigen::Vector3d& out_base_task)
+{
+    int hw = std::max(4, box.width / 4);   // wide horizontal → more depth samples
+    int hh = std::max(2, box.height / 8);  // narrow vertical → stay at sampling point
+    int W = depth.get_width(), H = depth.get_height();
+
+    std::vector<float> ds;
+    for (int v = std::max(0, cy - hh); v <= std::min(H - 1, cy + hh); v++)
+        for (int u = std::max(0, cx - hw); u <= std::min(W - 1, cx + hw); u++) {
+            float d = depth.get_distance(u, v);
+            if (d >= 0.10f && d <= 2.0f) ds.push_back(d);
+        }
+    if (ds.empty()) return false;
+    std::sort(ds.begin(), ds.end());
+    float d_med = ds[ds.size() / 2];
+
+    float pix[2] = {(float)cx, (float)cy};
+    float pt[3];
+    rs2_deproject_pixel_to_point(pt, &intr, pix, d_med);
+
+    Eigen::Vector4d pt_cam(pt[0], pt[1], pt[2], 1.0);
+    Eigen::Vector4d pt_task = T_task_cam * pt_cam;
+
+    out_base_task = pt_task.head<3>();
+    out_base_task.z() = 0.0;  // snap to table surface
+    return true;
+}
 
 // ---------------------------------------------------------------------------
 // JSON
@@ -330,8 +345,11 @@ int main(int argc, char** argv) {
     std::string model_path = "../../../../212_Perception/build/yolo11n.onnx";
     std::string classes_path = "../../../../212_Perception/build/coco-classes.txt";
     std::string save_image = "/tmp/bottle_hook_detection_preview.jpg";
+    std::string camera_serial = "";
     float conf_threshold = 0.40f;
     bool headless = false;
+    int warmup_frames = DEFAULT_N_WARMUP;
+    int detect_frames = DEFAULT_N_FRAMES;
 
     Eigen::Matrix4d T_task_cam = Eigen::Matrix4d::Identity();
 
@@ -341,6 +359,9 @@ int main(int argc, char** argv) {
         else if (a=="--classes" && i+1<argc) { classes_path = argv[++i]; }
         else if (a=="--conf" && i+1<argc) { conf_threshold = std::stof(argv[++i]); }
         else if (a=="--save-image" && i+1<argc) { save_image = argv[++i]; }
+        else if (a=="--serial" && i+1<argc) { camera_serial = argv[++i]; }
+        else if (a=="--warmup" && i+1<argc) { warmup_frames = std::max(0, std::stoi(argv[++i])); }
+        else if (a=="--frames" && i+1<argc) { detect_frames = std::max(1, std::stoi(argv[++i])); }
         else if (a=="--headless") { headless = true; }
         else if (a=="--T-task-camera" && i+1<argc) {
             std::istringstream ss(argv[++i]);
@@ -360,6 +381,7 @@ int main(int argc, char** argv) {
 
     rs2::pipeline pipe;
     rs2::config cfg;
+    if (!camera_serial.empty()) cfg.enable_device(camera_serial);
     cfg.enable_stream(RS2_STREAM_COLOR, 640, 480, RS2_FORMAT_BGR8, 30);
     cfg.enable_stream(RS2_STREAM_DEPTH, 640, 480, RS2_FORMAT_Z16, 30);
 
@@ -374,20 +396,22 @@ int main(int argc, char** argv) {
     try { profile = pipe.start(cfg); }
     catch (const rs2::error& e) { std::cerr << "[ERROR] RealSense: " << e.what() << "\n"; return 1; }
 
-    rs2_intrinsics intr = profile.get_stream(RS2_STREAM_DEPTH)
-                                 .as<rs2::video_stream_profile>().get_intrinsics();
     rs2::align align_to_color(RS2_STREAM_COLOR);
+    // After align_to_color, depth pixels map 1:1 to color pixels — use COLOR intrinsics.
+    rs2_intrinsics intr = profile.get_stream(RS2_STREAM_COLOR)
+                                 .as<rs2::video_stream_profile>().get_intrinsics();
 
-    std::cerr << "[INFO] Warming up (" << N_WARMUP << " frames)...\n";
-    for (int i=0; i<N_WARMUP; i++) pipe.wait_for_frames();
+    std::cerr << "[INFO] Warming up (" << warmup_frames << " frames)...\n";
+    for (int i=0; i<warmup_frames; i++) pipe.wait_for_frames();
 
-    std::cerr << "[INFO] Detecting over " << N_FRAMES << " frames...\n";
+    std::cerr << "[INFO] Detecting over " << detect_frames << " frames...\n";
     bool found = false;
     float best_conf = 0.0f;
     cv::Rect best_box;
     cv::Mat best_frame;
+    rs2::depth_frame best_depth{nullptr};
 
-    for (int fi=0; fi<N_FRAMES; fi++) {
+    for (int fi=0; fi<detect_frames; fi++) {
         rs2::frameset fs = pipe.wait_for_frames();
         rs2::frameset afs = align_to_color.process(fs);
         auto cf = afs.get_color_frame();
@@ -404,6 +428,7 @@ int main(int argc, char** argv) {
                     best_conf = this_conf;
                     best_box = this_box;
                     best_frame = bgr.clone();
+                    best_depth = df;
                     found = true;
                 }
             }
@@ -419,10 +444,28 @@ int main(int argc, char** argv) {
                   << "  bbox=[" << best_box.x << "," << best_box.y
                   << " " << best_box.width << "x" << best_box.height << "]\n";
 
-        if (!YOLODetector::rayTableIntersect(best_box, intr, T_task_cam, bottle_base_task)) {
-            std::cerr << "[WARN] Ray-table intersection failed (camera looking up?).\n";
+        // Sample at the very bottom of the bbox: where the bottle base meets
+        // the table. For a camera at any viewing angle, the bottom-edge pixel
+        // at table depth (whether real or hole-filled through a transparent
+        // bottle) maps directly to the base XY — no parallax error.
+        // Fall back to center if bottom sampling fails (no valid depth).
+        int cx = best_box.x + best_box.width / 2;
+        int cy_bot = best_box.y + best_box.height - std::max(1, best_box.height / 10);
+        int cy_ctr = best_box.y + best_box.height / 2;
+        bool ok3d = depthTo3DTask(best_box, cx, cy_bot, best_depth, intr, T_task_cam, bottle_base_task);
+        if (!ok3d) {
+            std::cerr << "[WARN] Bottom-edge depth sample failed, trying bbox center.\n";
+            ok3d = depthTo3DTask(best_box, cx, cy_ctr, best_depth, intr, T_task_cam, bottle_base_task);
+        }
+        if (!ok3d) {
+            std::cerr << "[WARN] Depth-to-3D failed (no valid depth readings). "
+                      << "Check camera range and scene coverage.\n";
             found = false;
         } else {
+            // Log sampled depth for tuning.
+            float d_check = best_depth.get_distance(cx, cy_bot);
+            std::cerr << "[DEBUG] Sampled depth at px(" << cx << "," << cy_bot
+                      << ") = " << d_check << " m\n";
             bottle_neck_task = bottle_base_task;
             bottle_neck_task.z() = BOTTLE_TOTAL_HEIGHT_M;
             std::cerr << "[INFO] Bottle base task (" << bottle_base_task.transpose() << ") m\n";

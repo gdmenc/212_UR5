@@ -84,10 +84,10 @@ from ..util.poses import Pose
 
 
 # --- Tunables --------------------------------------------------------------
-PICK_FROM: Literal["outside", "microwave"] = "outside"
-PLACE_TO: Literal["outside", "microwave"] = "microwave"
-# PICK_FROM: Literal["outside", "microwave"] = "microwave"
-# PLACE_TO: Literal["outside", "microwave"] = "outside"
+# PICK_FROM: Literal["outside", "microwave"] = "outside"
+# PLACE_TO: Literal["outside", "microwave"] = "microwave"
+PICK_FROM: Literal["outside", "microwave"] = "microwave"
+PLACE_TO: Literal["outside", "microwave"] = "outside"
 
 # Free-standing plate poses (used when the corresponding side is "outside").
 # 0.025 m is the height of the plate rim that is reasonable for pickup /
@@ -104,6 +104,7 @@ PLATE_PLACE_POSE_TASK = Pose(translation=[0.295521, -0.1, 0.01])
 # place geometry is similar.
 PLATE_MIDPOINT_POSE_TASK = Pose(translation=[0.0, 0.0, 0.0])
 USE_MIDPOINT = True
+MIDPOINT_ANGLE_RAD = np.radians(0)
 """Whether to carry the held plate through ``PLATE_MIDPOINT_POSE_TASK``
 between pick and place. Mirrors ``examples/pick_place_plate.py`` —
 disabling this is what caused the rig over-extend on a long direct
@@ -114,10 +115,10 @@ pick→entry swing."""
 # 2F-85 closes along tool +Y, so the rim-radial axis is tool +X. With
 # ``plate_rim_grasp_edge`` the TCP yaw = angle_rad + π.
 
-GRASP_ANGLE_RAD = 0.0
-PLACE_ANGLE_RAD = -np.radians(60)
-# GRASP_ANGLE_RAD = -np.radians(51)
-# PLACE_ANGLE_RAD = 0 # ~-50.6° — same as the non-microwave plate task
+# GRASP_ANGLE_RAD = 0.0
+# PLACE_ANGLE_RAD = -np.radians(55)
+GRASP_ANGLE_RAD = -np.radians(55)
+PLACE_ANGLE_RAD = 0 # ~-50.6° — same as the non-microwave plate task
 
 # Constrained altitude inside the cavity. Plate on tray sits at task z
 # ~10 cm (8 + 2 cm rim). Top of plate rim ~ 11 cm. 14 cm gives ~3 cm
@@ -125,10 +126,15 @@ PLACE_ANGLE_RAD = -np.radians(60)
 # 14 + 18.4 = 32.4 cm — ABOVE the 23 cm ceiling. See top-of-file
 # warning; this constant is correct for an enlarged real cavity but
 # does not magically fit a 23 cm one.
-MICROWAVE_ENTRY_Z = 0.13
+MICROWAVE_ENTRY_Z = 0.12
+
+PLATE_ENTRY_CLEARANCE = 0.2
+"""Distance outside the microwave door before lowering to ``MICROWAVE_ENTRY_Z``.
+Keep this larger than the 2F-85 TCP/finger envelope plus the plate diameter
+so the plate clears the front lip before descending."""
 
 # Plate center at task z when sitting on tray = tray + plate rim height.
-MICROWAVE_PLATE_Z = MICROWAVE_FLOOR_Z + PLATE_RIM_HEIGHT - 0.03  # 0.10 m
+MICROWAVE_PLATE_Z = MICROWAVE_FLOOR_Z + PLATE_RIM_HEIGHT - 0.02  # 0.10 m
 
 ARM = "ur_right"
 
@@ -175,14 +181,14 @@ def plan_place() -> Pose:
     return grasp_at_dest.grasp_pose
 
 
-def plan_midpoint() -> Pose:
+def plan_midpoint(angle_rad: float = GRASP_ANGLE_RAD) -> Pose:
     """TCP pose for carrying the held plate through the midpoint XY at
     transit_z. Orientation matches the upcoming PLACE leg so the wrist
     rotation happens during the pick→midpoint leg, not the longer
     midpoint→place transit."""
     grasp_at_midpoint = plate_rim_grasp_edge(
         PLATE_MIDPOINT_POSE_TASK,
-        angle_rad=GRASP_ANGLE_RAD,
+        angle_rad=angle_rad,
     )
     return grasp_at_midpoint.grasp_pose
 
@@ -227,11 +233,18 @@ def _print_plan(grasp, place_pose: Pose) -> None:
     print(f"  Release aper. : {CONFIG.release_aperture_mm} mm")
     if PICK_FROM == "microwave" or PLACE_TO == "microwave":
         print(f"  Microwave entry Z : {MICROWAVE_ENTRY_Z} m")
+        print(f"  Entry clearance   : {PLATE_ENTRY_CLEARANCE} m")
         if PICK_FROM == "microwave":
-            xy = entry_xy_for_pose(grasp.grasp_pose)
+            xy = entry_xy_for_pose(
+                grasp.grasp_pose,
+                clearance=PLATE_ENTRY_CLEARANCE,
+            )
             print(f"  Entry XY (pick)   : {xy}")
         if PLACE_TO == "microwave":
-            xy = entry_xy_for_pose(place_pose)
+            xy = entry_xy_for_pose(
+                place_pose,
+                clearance=PLATE_ENTRY_CLEARANCE,
+            )
             print(f"  Entry XY (place)  : {xy}")
     print("=" * 60)
     _check_wrist_clearance()
@@ -247,7 +260,10 @@ def run_on_arm(
 ) -> bool:
     print(f"\n→ pick: {grasp.description}  (from {PICK_FROM})")
     if PICK_FROM == "microwave":
-        entry_xy = entry_xy_for_pose(grasp.grasp_pose)
+        entry_xy = entry_xy_for_pose(
+            grasp.grasp_pose,
+            clearance=PLATE_ENTRY_CLEARANCE,
+        )
         pick_result = pick_from_box(
             arm, grasp, entry_xy, MICROWAVE_ENTRY_Z, config
         )
@@ -259,7 +275,7 @@ def run_on_arm(
     print("  ✓ pick succeeded.")
 
     if USE_MIDPOINT:
-        midpoint_pose = plan_midpoint()
+        midpoint_pose = plan_midpoint(angle_rad=MIDPOINT_ANGLE_RAD)
         print(f"\n→ midpoint @ {PLATE_MIDPOINT_POSE_TASK.translation}")
         transit_xy(
             arm,
@@ -272,7 +288,10 @@ def run_on_arm(
 
     print(f"\n→ place @ {place_pose.translation}  (to {PLACE_TO})")
     if PLACE_TO == "microwave":
-        entry_xy = entry_xy_for_pose(place_pose)
+        entry_xy = entry_xy_for_pose(
+            place_pose,
+            clearance=PLATE_ENTRY_CLEARANCE,
+        )
         place_result = place_into_box(
             arm, place_pose, entry_xy, MICROWAVE_ENTRY_Z, config
         )
@@ -284,6 +303,18 @@ def run_on_arm(
     print("  ✓ place succeeded.")
 
     print("\nDone — arm retracted to transit altitude.")
+
+    # return to midpoint at the very end
+    midpoint_pose = plan_midpoint(angle_rad=MIDPOINT_ANGLE_RAD)
+    print(f"\n→ midpoint @ {PLATE_MIDPOINT_POSE_TASK.translation}")
+    transit_xy(
+        arm,
+        midpoint_pose,
+        config.transit_z,
+        config.transit_speed,
+        config.transit_accel,
+    )
+    print("  ✓ midpoint reached.")
     return True
 
 

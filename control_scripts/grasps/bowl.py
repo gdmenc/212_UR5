@@ -4,10 +4,15 @@ Same object-frame convention as the plate: origin at the bowl's resting
 point on the table, +z up out of the opening, rotational symmetry about
 +z.
 
-Bowl shape (measured at the 212 lab, 2026-05-03):
-    - Outer rim diameter:  15.0 cm  (radius 7.5 cm)
-    - Total height:        7.5 cm
+Bowl shape (measured at the 212 lab):
+    - Outer rim diameter:  7.4 cm  (radius 3.7 cm)
+    - Base diameter:       4.25 cm (radius 2.125 cm)
+    - Total height:        7.2 cm
     - Rim wall thickness:  ≈ 0.27 cm (rough — easily ±0.05 cm)
+    - Profile: significantly concave / tapered. The sidewall sweeps inward
+      from the rim down to a much smaller base, so the rim is the widest
+      point. Approximate inward inset of the outer wall ≈ 0.22 cm per cm
+      of depth (linear approximation; the actual curve is smooth).
 
 Two grasp families on this object:
     1. Top-down rim pinch with the 2F-85 — implemented below.
@@ -33,14 +38,18 @@ from ._hook_rim import HOOK_RIM_PREGRASP_OFFSET, hook_rim_rotation
 from .base import Grasp
 
 
-BOWL_RIM_OUTER_RADIUS_M = 0.075
-"""Radial distance from bowl center to the OUTER edge of the rim.
-Measured 2026-05-03: outer rim diameter 150 mm → radius 75 mm."""
+BOWL_RIM_OUTER_RADIUS_M = 0.037
+"""Radial distance from bowl center to the OUTER edge of the rim. Measured
+at the lab — outer rim diameter 7.4 cm."""
 
-BOWL_RIM_Z_OFFSET_M = 0.075
+BOWL_BASE_RADIUS_M = 0.02125
+"""Radial distance from bowl center to the bowl's base (the part that rests
+on the table). Measured 4.25 cm diameter. The bowl tapers from
+BOWL_RIM_OUTER_RADIUS_M at the top down to this at the bottom."""
+
+BOWL_RIM_Z_OFFSET_M = 0.072
 """Height of the bowl rim above the bowl's resting surface (= total bowl
-height). Measured 2026-05-03: 75 mm. When the bowl sits on the table
-(Z=0), the rim sits at task Z = 0.075 m."""
+height). When the bowl sits on the table, this is also the rim's task-z."""
 
 BOWL_RIM_WALL_THICKNESS_M = 0.0027
 """Rim wall thickness, ROUGH estimate (≈ 2.7 mm, easily ±0.5 mm). Sets the

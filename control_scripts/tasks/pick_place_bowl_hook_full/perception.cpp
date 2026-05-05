@@ -57,8 +57,8 @@ static constexpr float  NMS_THRESHOLD        = 0.45f;
 static constexpr float  CONFIDENCE_THRESHOLD = 0.25f;
 
 static constexpr int    COCO_BOWL            = 45;
-static constexpr int    N_WARMUP             = 15;
-static constexpr int    N_FRAMES             = 10;  // accumulate over more frames for reliability
+static constexpr int    DEFAULT_N_WARMUP     = 15;
+static constexpr int    DEFAULT_N_FRAMES     = 10;  // accumulate over more frames for reliability
 
 static constexpr double BOWL_RIM_OUTER_RADIUS_M = 0.075;  // measured 2026-05-03: 150mm dia
 static constexpr double BOWL_RIM_Z_OFFSET_M     = 0.075;  // measured 2026-05-03: 75mm height
@@ -166,44 +166,6 @@ public:
         return d_med >= min_m && d_med <= max_m;
     }
 
-    // Ray-plane intersection: trace the camera ray through the bbox centre
-    // until it hits the table plane (Z = 0 in task frame).
-    //
-    // This avoids all depth-based Z errors: the camera looks into the bowl
-    // interior so depth gives the bowl bottom, not the rim. Since the bowl
-    // always rests on the table we set base Z = 0 directly and derive rim/
-    // grasp Z from the known bowl height.  XY accuracy comes from the camera
-    // ray direction (calibration-quality) rather than noisy depth.
-    static bool rayTableIntersect(
-        const cv::Rect& box,
-        const rs2_intrinsics& intr,
-        const Eigen::Matrix4d& T_task_cam,
-        Eigen::Vector3d& out_base_task)
-    {
-        int cx = box.x + box.width / 2;
-        int cy = box.y + box.height / 2;
-
-        // Camera-frame unit ray direction through (cx, cy)
-        float pix[2] = {(float)cx, (float)cy}, pt[3];
-        rs2_deproject_pixel_to_point(pt, &intr, pix, 1.0f);
-        Eigen::Vector3d ray_cam(pt[0], pt[1], pt[2]);
-        ray_cam.normalize();
-
-        // Transform ray to task frame
-        Eigen::Matrix3d R = T_task_cam.block<3,3>(0,0);
-        Eigen::Vector3d t = T_task_cam.block<3,1>(0,3);
-        Eigen::Vector3d ray_task = R * ray_cam;
-
-        // Intersect with Z = 0 (table plane)
-        if (std::abs(ray_task.z()) < 1e-6) return false;  // ray parallel to table
-        double lam = -t.z() / ray_task.z();
-        if (lam < 0.0) return false;  // intersection behind camera
-
-        out_base_task = t + lam * ray_task;
-        out_base_task.z() = 0.0;  // snap exactly to table surface
-        return true;
-    }
-
 private:
     bool detectVersion() {
         cv::Mat dummy = cv::Mat::zeros(640, 640, CV_8UC3);
@@ -261,6 +223,50 @@ private:
         tr.release();
     }
 };
+
+// ---------------------------------------------------------------------------
+// Depth-to-3D
+// ---------------------------------------------------------------------------
+
+// Sample median depth in a patch centred at (cx, cy) within the bbox and
+// deproject directly to a task-frame 3D point.  This uses the depth sensor's
+// radial measurement rather than tracing an angular ray to an assumed z=0
+// plane, so small calibration angular errors don't get amplified by the
+// camera-to-table distance.
+static bool depthTo3DTask(
+    const cv::Rect& box,
+    int cx, int cy,
+    const rs2::depth_frame& depth,
+    const rs2_intrinsics& intr,
+    const Eigen::Matrix4d& T_task_cam,
+    Eigen::Vector3d& out_base_task)
+{
+    int hw = std::max(2, box.width / 6);
+    int hh = std::max(2, box.height / 6);
+    int W = depth.get_width(), H = depth.get_height();
+
+    std::vector<float> ds;
+    for (int v = std::max(0, cy - hh); v <= std::min(H - 1, cy + hh); v++)
+        for (int u = std::max(0, cx - hw); u <= std::min(W - 1, cx + hw); u++) {
+            float d = depth.get_distance(u, v);
+            if (d >= 0.10f && d <= 2.0f) ds.push_back(d);
+        }
+    if (ds.empty()) return false;
+    std::sort(ds.begin(), ds.end());
+    float d_med = ds[ds.size() / 2];
+
+    float pix[2] = {(float)cx, (float)cy};
+    float pt[3];
+    rs2_deproject_pixel_to_point(pt, &intr, pix, d_med);
+
+    Eigen::Vector4d pt_cam(pt[0], pt[1], pt[2], 1.0);
+    Eigen::Vector4d pt_task = T_task_cam * pt_cam;
+
+    out_base_task = pt_task.head<3>();
+    // out_base_task.y() = out_base_task.y() + 0.05;
+    out_base_task.z() = 0.0;  // snap to table surface
+    return true;
+}
 
 // ---------------------------------------------------------------------------
 // Grasp geometry
@@ -387,8 +393,11 @@ int main(int argc, char** argv) {
     std::string model_path   = "../../../../212_Perception/build/yolo11n.onnx";
     std::string classes_path = "../../../../212_Perception/build/coco-classes.txt";
     std::string save_image   = "/tmp/bowl_detection_preview.jpg";
+    std::string camera_serial = "";
     float conf_threshold     = 0.40f;
     bool  headless           = false;
+    int warmup_frames        = DEFAULT_N_WARMUP;
+    int detect_frames        = DEFAULT_N_FRAMES;
 
     Eigen::Matrix4d T_task_cam = Eigen::Matrix4d::Identity();
 
@@ -398,6 +407,9 @@ int main(int argc, char** argv) {
         else if (a=="--classes" && i+1<argc) { classes_path = argv[++i]; }
         else if (a=="--conf"    && i+1<argc) { conf_threshold = std::stof(argv[++i]); }
         else if (a=="--save-image" && i+1<argc) { save_image = argv[++i]; }
+        else if (a=="--serial"  && i+1<argc) { camera_serial = argv[++i]; }
+        else if (a=="--warmup"  && i+1<argc) { warmup_frames = std::max(0, std::stoi(argv[++i])); }
+        else if (a=="--frames"  && i+1<argc) { detect_frames = std::max(1, std::stoi(argv[++i])); }
         else if (a=="--headless")             { headless = true; }
         else if (a=="--T-task-camera" && i+1<argc) {
             std::istringstream ss(argv[++i]);
@@ -416,6 +428,7 @@ int main(int argc, char** argv) {
 
     rs2::pipeline pipe;
     rs2::config   cfg;
+    if (!camera_serial.empty()) cfg.enable_device(camera_serial);
     cfg.enable_stream(RS2_STREAM_COLOR, 640, 480, RS2_FORMAT_BGR8, 30);
     cfg.enable_stream(RS2_STREAM_DEPTH, 640, 480, RS2_FORMAT_Z16,  30);
 
@@ -430,21 +443,23 @@ int main(int argc, char** argv) {
     try { profile = pipe.start(cfg); }
     catch (const rs2::error& e) { std::cerr<<"[ERROR] RealSense: "<<e.what()<<"\n"; return 1; }
 
-    rs2_intrinsics intr = profile.get_stream(RS2_STREAM_DEPTH)
-                                 .as<rs2::video_stream_profile>().get_intrinsics();
     rs2::align align_to_color(RS2_STREAM_COLOR);
+    // After align_to_color, depth pixels map 1:1 to color pixels — use COLOR intrinsics.
+    rs2_intrinsics intr = profile.get_stream(RS2_STREAM_COLOR)
+                                 .as<rs2::video_stream_profile>().get_intrinsics();
 
-    std::cerr<<"[INFO] Warming up ("<<N_WARMUP<<" frames)...\n";
-    for (int i=0;i<N_WARMUP;i++) pipe.wait_for_frames();
+    std::cerr<<"[INFO] Warming up ("<<warmup_frames<<" frames)...\n";
+    for (int i=0;i<warmup_frames;i++) pipe.wait_for_frames();
 
-    // Detection loop — keep best across N_FRAMES
-    std::cerr<<"[INFO] Detecting over "<<N_FRAMES<<" frames...\n";
-    bool            found     = false;
-    float           best_conf = 0.0f;
+    // Detection loop — keep best across detect_frames
+    std::cerr<<"[INFO] Detecting over "<<detect_frames<<" frames...\n";
+    bool            found      = false;
+    float           best_conf  = 0.0f;
     cv::Rect        best_box;
     cv::Mat         best_frame;
+    rs2::depth_frame best_depth{nullptr};
 
-    for (int fi=0;fi<N_FRAMES;fi++) {
+    for (int fi=0;fi<detect_frames;fi++) {
         rs2::frameset fs  = pipe.wait_for_frames();
         rs2::frameset afs = align_to_color.process(fs);
         auto cf = afs.get_color_frame();
@@ -462,6 +477,7 @@ int main(int argc, char** argv) {
                     best_conf  = this_conf;
                     best_box   = this_box;
                     best_frame = bgr.clone();
+                    best_depth = df;
                     found      = true;
                 }
             }
@@ -470,11 +486,11 @@ int main(int argc, char** argv) {
     }
     pipe.stop();
 
-    // Compute bowl position via ray-plane intersection (table Z = 0).
-    // We do NOT use depth for position — the camera looks into the bowl
-    // interior so depth hits the bowl bottom, not the rim.  Instead we
-    // project the camera ray through the bounding-box centre until it hits
-    // the table plane; that gives the bowl base XY exactly, and Z = 0.
+    // Compute bowl position via depth deprojection: sample the median depth
+    // at the bbox centre, deproject directly to 3D in camera frame, then
+    // transform to task frame.  This uses the actual depth reading rather
+    // than tracing a ray to an assumed z=0 plane, so calibration angular
+    // errors are not amplified by the camera-to-table distance.
     Eigen::Vector3d bowl_base_task, bowl_rim_task;
     Eigen::Vector3d pos_cam(0,0,0);  // kept for JSON completeness only
     if (found) {
@@ -482,9 +498,11 @@ int main(int argc, char** argv) {
                  <<"  bbox=["<<best_box.x<<","<<best_box.y
                  <<" "<<best_box.width<<"x"<<best_box.height<<"]\n";
 
-        if (!YOLODetector::rayTableIntersect(best_box, intr, T_task_cam, bowl_base_task)) {
-            std::cerr<<"[WARN] Ray-table intersection failed (camera looking up?). "
-                     <<"Falling back to depth.\n";
+        int cx = best_box.x + best_box.width / 2;
+        int cy = best_box.y + best_box.height / 2;
+        if (!depthTo3DTask(best_box, cx, cy, best_depth, intr, T_task_cam, bowl_base_task)) {
+            std::cerr<<"[WARN] Depth-to-3D failed (no valid depth readings). "
+                     <<"Check camera range and scene coverage.\n";
             found = false;
         } else {
             bowl_rim_task    = bowl_base_task;

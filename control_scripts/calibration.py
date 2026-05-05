@@ -72,7 +72,7 @@ def _build_X_base_task(
 # Left arm (ur_left, 192.168.1.101, hook gripper)
 # ---------------------------------------------------------------------------
 _LEFT_DX_T = 0.090 / 2 + 0.010 + 0.110  # half vertical beam + plate + base-to-beam
-_LEFT_DY_T = 0.225 / 2 + 0.540 / 2      # half mounting plate + half table depth
+_LEFT_DY_T = 0.220 / 2 + 0.550 / 2      # half mounting plate + half table depth
 _LEFT_DZ_T = -0.815                     # task origin is 0.815 m BELOW base along task z
 # -0.753 (original hand-measured) - 0.062 (correction from bowl perception 2026-05-03:
 #  bowl base on table was reading -0.062 m instead of 0; shifted task origin down)
@@ -92,7 +92,7 @@ X_LEFT_BASE_TASK: Pose = _build_X_base_task(
 # Right arm (ur_right, 192.168.1.102, Robotiq 2F-85)
 # ---------------------------------------------------------------------------
 _RIGHT_DX_T = -(0.090 / 2 + 0.010 + 0.110)  # sign flip — right arm is on the +x side
-_RIGHT_DY_T = 0.225 / 2 + 0.540 / 2
+_RIGHT_DY_T = 0.220 / 2 + 0.550 / 2 
 _RIGHT_DZ_T = -0.753
 
 _RIGHT_R = np.array([

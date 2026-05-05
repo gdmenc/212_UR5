@@ -30,6 +30,7 @@ import numpy as np
 from ..arm import ArmHandle
 from ..config import PickPlaceConfig
 from ..grasps.cup import cup_rim_grasp
+from ..moves import transit_xy
 from ..pick import pick
 from ..place import place
 from ..session import default_session
@@ -37,13 +38,18 @@ from ..util.poses import Pose
 
 
 # --- Tunables (edit to match your physical layout) ------------------------
-CUP_PICK_POSE_TASK = Pose(translation=[0, 0, 0.0])
+CUP_PICK_POSE_TASK = Pose(translation=[-0.08, -0.125, 0.0])
+# CUP_PICK_POSE_TASK = Pose(translation=[0.3, 0.075, 0.0])
 """Cup base at PICK location, expressed in task frame. Edit to match the
 table layout. Z is the resting surface; the rim is at z + CUP_HEIGHT_M."""
 
-CUP_PLACE_POSE_TASK = Pose(translation=[0.2, 0.2, 0.0])
+CUP_PLACE_POSE_TASK = Pose(translation=[0, 0, 0.0])
+# CUP_PLACE_POSE_TASK = Pose(translation=[0.33, 0.075, 0.0])
 """Cup base at PLACE location, task frame. Defaults to the same as the
 pick pose (set it back down) — set to a different translation to relocate."""
+
+FINAL_XY = np.array([0.35, 0.0])
+"""Task-frame XY to move the arm to after placing, at ``CONFIG.transit_z``."""
 
 GRASP_ANGLE_RAD = 0.0
 """Which rim angle to grasp at, in cup frame."""
@@ -89,6 +95,14 @@ def plan_place() -> Pose:
     return grasp_at_dest.grasp_pose
 
 
+def plan_final_pose(reference_pose: Pose) -> Pose:
+    """Pose used only for final XY transit after the cup is released."""
+    return Pose(
+        translation=[FINAL_XY[0], FINAL_XY[1], 0.0],
+        rotation=reference_pose.rotation,
+    )
+
+
 def _print_plan(grasp, place_pose: Pose) -> None:
     print("=" * 60)
     print("  Pick location  :", CUP_PICK_POSE_TASK.translation, "(task frame)")
@@ -97,6 +111,7 @@ def _print_plan(grasp, place_pose: Pose) -> None:
     print("  Place angle    :", f"{np.degrees(PLACE_ANGLE_RAD):+.0f}°")
     print("  Grasp pose     :", grasp.grasp_pose.translation, "(task frame)")
     print("  Place pose     :", place_pose.translation, "(task frame)")
+    print("  Final XY       :", FINAL_XY, f"(task frame @ z={CONFIG.transit_z})")
     print("  Transit Z      :", CONFIG.transit_z, "m")
     print("  Release aperture:", CONFIG.release_aperture_mm, "mm")
     print("  Gripper speeds :",
@@ -129,6 +144,17 @@ def run_on_arm(
         print(f"  ✗ place FAILED: {place_result.reason}")
         return False
     print("  ✓ place succeeded.")
+
+    final_pose = plan_final_pose(place_pose)
+    print(f"\n→ final XY @ {FINAL_XY} (transit_z={config.transit_z})")
+    transit_xy(
+        arm,
+        final_pose,
+        config.transit_z,
+        config.transit_speed,
+        config.transit_accel,
+    )
+    print("  ✓ final XY reached.")
 
     print("\nDone — arm retracted to transit altitude.")
     return True

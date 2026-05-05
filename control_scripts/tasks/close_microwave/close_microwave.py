@@ -76,6 +76,18 @@ class CloseMicrowaveDoorSpec:
     joint_accel: float = 0.3
     """Joint acceleration (rad/s²) for the ``moveJ`` arc steps."""
 
+    preclose_pose_task: Optional[Pose] = None
+    """Recorded task-frame pose just before the closing push."""
+
+    preclose_joints_rad: Optional[List[float]] = None
+    """Recorded joint angles at the preclosedoor waypoint."""
+
+    closed_pose_task: Optional[Pose] = None
+    """Recorded task-frame pose at the closedoor waypoint."""
+
+    closed_joints_rad: Optional[List[float]] = None
+    """Recorded joint angles at the closedoor waypoint."""
+
 
 @dataclass
 class CloseMicrowaveResult:
@@ -149,6 +161,19 @@ def close_microwave_door(
     """
     if config.transit_z is None:
         raise ValueError("config.transit_z is unset.")
+
+    if door.preclose_joints_rad is not None and door.closed_joints_rad is not None:
+        arm.control.moveJ(
+            list(door.preclose_joints_rad),
+            door.joint_speed,
+            door.joint_accel,
+        )
+        arm.control.moveJ(
+            list(door.closed_joints_rad),
+            door.joint_speed,
+            door.joint_accel,
+        )
+        return CloseMicrowaveResult(success=True)
 
     handle_open = open_handle_pose(door)
     waypoints = close_arc_waypoints(door)

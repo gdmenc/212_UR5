@@ -55,7 +55,7 @@ from ..util.poses import Pose
 
 # --- Tunables (edit to match your physical layout) ------------------------
 # Note: ascend 1 cm above nominal rim z to not hit the ground
-BOWL_PICK_POSE_TASK = Pose(translation=[0.1, 0, 0.01])
+BOWL_PICK_POSE_TASK = Pose(translation=[0.1, 0, 0.02])
 """Bowl center at PICK location, expressed in task frame. Identity
 rotation is correct for any free-standing bowl on the table."""
 
@@ -84,7 +84,7 @@ Set to 0 to fall back to pure vertical descent. See
 ARM = "ur_left"
 
 CONFIG = PickPlaceConfig(
-    transit_z=0.25,
+    transit_z=0.3,
     place_use_contact_descent=False,  # open-loop descent to the place pose
     transit_speed=0.1,
     transit_accel=0.2,
