@@ -6,5 +6,7 @@ CXX_DEFINES = -DELPP_NO_DEFAULT_LOG_FILE
 
 CXX_INCLUDES = -isystem /opt/homebrew/Cellar/opencv/4.13.0_7/include/opencv4 -isystem /opt/homebrew/include -isystem /opt/homebrew/include/eigen3
 
-CXX_FLAGS = -O3 -DNDEBUG -std=gnu++17
+CXX_FLAGSarm64 = -O3 -DNDEBUG -std=gnu++17 -arch arm64
+
+CXX_FLAGS = -O3 -DNDEBUG -std=gnu++17 -arch arm64
 

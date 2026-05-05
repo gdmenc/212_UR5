@@ -61,11 +61,11 @@ from ...util.poses import Pose, pose_at_altitude
 
 # --- Tunables (edit to match your physical layout) ------------------------
 # Note: descend 1 cm below the nominal rim target for a more secure hook grasp.
-BOTTLE_PICK_POSE_TASK = Pose(translation=[-0.1, 0, -0.01])
+BOTTLE_PICK_POSE_TASK = Pose(translation=[-0.32, -0.125, -0.01])
 """Bottle base in task frame at PICK location. Identity rotation is
 correct for any free-standing bottle on the table."""
 
-BOTTLE_PLACE_POSE_TASK = Pose(translation=[-0.1, 0, -0.01])
+BOTTLE_PLACE_POSE_TASK = Pose(translation=[-0.32, -0.125, -0.01])
 """Bottle base in task frame at PLACE location. Same as pickup by default."""
 
 POUR_TARGET_XY_TASK = np.array([0.0, 0.0])
@@ -89,7 +89,7 @@ POUR_TARGET_TASK = np.array([
 ])
 """xyz of the bottle's OPENING during the pour, in task frame."""
 
-POUR_TILT_RAD = float(np.radians(140))
+POUR_TILT_RAD = float(np.radians(130))
 """Tilt about the gripper's tool +Y axis. > 0 tips the bottle's +z away
 from the gripper. ~120° is a typical pour past horizontal."""
 
