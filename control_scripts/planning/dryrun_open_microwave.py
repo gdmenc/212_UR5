@@ -3,6 +3,15 @@
 Loads recorded waypoints from ``logs/waypoints/ur_left_open_microwave_1.json``
 and replays each leg in sim using ``plan_transit``. The headline goal is
 the door-arc leg: the recorded handle endpoints are joined by N
+
+Lighter alternative
+-------------------
+``python3.11 -m control_scripts.examples.open_microwave --motion-planning --mode sim``
+plans only Phase 1 (HOME→pre_engage) and Phase 3 (door arc) — the
+segments the live task actually routes through ``plan_transit`` — and
+uses the same ``WORLD`` declared in ``tasks/open_microwave.py``. This
+file plans more legs (engage, slide-out, retreat) from recorded
+waypoints — keep it for full-sequence rehearsal.
 geometrically-correct intermediate arc waypoints (handle traces a circle
 about the microwave hinge), and KTO smooths the joint trajectory through
 all of them. Free-space transits before/after use the same planner.

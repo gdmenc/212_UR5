@@ -4,6 +4,14 @@ Plans the four task-frame transits the real task would issue, animates
 each in Meshcat, and prints the ``moveJ(path=...)`` payload that
 ``execute_plan`` *would* send to RTDE — without connecting to the arm.
 
+Lighter alternative
+-------------------
+``python3.11 -m control_scripts.tasks.pick_place_plate_microwave --mode sim``
+plans only the post-pick carry + post-place return (the segments the
+real task actually routes through ``plan_transit``) and uses the same
+``WORLD`` declared in the task. This file plans more legs and prints
+RTDE payloads — keep it for full-trajectory rehearsal.
+
 Legs (right arm only — left stays parked at sim HOME):
     1. HOME            -> hover above grasp              (free-space)
     2. hover           -> grasp pose                     (descent; sim ignores plate)

@@ -83,6 +83,11 @@ Set to 0 to fall back to pure vertical descent. See
 
 ARM = "ur_left"
 
+SUPPORTS_SIM = False
+"""This task uses hand-coded ``moveL`` / ``moveJ`` primitives via ``pick``
+and ``place``; no segments go through the planner, so there is nothing
+for ``--mode sim`` to visualize. Sim mode raises with a clear message."""
+
 CONFIG = PickPlaceConfig(
     transit_z=0.3,
     place_use_contact_descent=False,  # open-loop descent to the place pose
@@ -164,7 +169,7 @@ def run_on_arm(
     return True
 
 
-def main(dry: bool = False) -> int:
+def main(dry: bool = False, mode: str = "real") -> int:
     grasp = plan_pick()
     place_pose = plan_place()
     _print_plan(grasp, place_pose)
@@ -172,6 +177,15 @@ def main(dry: bool = False) -> int:
     if dry:
         print("[dry run] skipping RTDE connection. No motion commanded.")
         return 0
+
+    if mode == "sim":
+        if not SUPPORTS_SIM:
+            print("[sim] this task is real-only — it uses hand-coded "
+                  "moveL / moveJ primitives that aren't simulated. "
+                  "Use --mode real (default) to run on the rig.")
+            return 1
+    elif mode != "real":
+        raise ValueError(f"unknown mode {mode!r}; choose 'real' or 'sim'")
 
     left = ARM == "ur_left"
     right = ARM == "ur_right"
@@ -187,5 +201,12 @@ if __name__ == "__main__":
         action="store_true",
         help="Plan and print the grasp/place poses without connecting to RTDE.",
     )
+    ap.add_argument(
+        "--mode",
+        choices=["real", "sim"],
+        default="real",
+        help="Execution mode. 'real' (default) runs on the rig. "
+             "'sim' is rejected for this task — see SUPPORTS_SIM.",
+    )
     args = ap.parse_args()
-    raise SystemExit(main(dry=args.dry))
+    raise SystemExit(main(dry=args.dry, mode=args.mode))

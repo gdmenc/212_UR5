@@ -63,6 +63,7 @@ import argparse
 import json
 import os
 import time
+from dataclasses import replace
 from typing import Tuple
 
 import numpy as np
@@ -77,10 +78,12 @@ from ..microwave import (
     WHITE_TABLE_TOP_Z,
     door_plane_y,
 )
-from ..moves import approach_to, lift_to_transit, move_until_contact, retract_to
-from ..session import default_session
+from ..moves import approach_to, lift_to_transit, move_until_contact, retract_to, transit_xy
+from ..session import Session, default_session
 from ..util.poses import Pose, pose_at_altitude
 from ..util.rotations import Rotation
+from ..util.rtde_convert import rtde_to_pose
+from ..world import World
 
 
 # --- Button location, derived from microwave geometry ---------------------
@@ -163,6 +166,46 @@ APPROACH_SPEED_M_S = 0.02
 """Linear speed (m/s) of the seek-to-contact move."""
 
 ARM = "ur_right"
+
+SUPPORTS_SIM = True
+"""``--mode sim`` plans and visualizes the pre-press approach segment
+(arm home → standoff hover). The contact-sensitive parts (descend until
+contact, ``forceMode`` press, retract) are hand-coded ``moveL`` /
+``forceMode`` and are not simulated; sim ends after the approach leg."""
+
+WORLD = World(
+    include_microwave=True,
+    include_objects=False,
+    robotiq_mode="closed",
+    microwave_door_open_rad=0.0,
+)
+"""Single source of env truth for this task's planning + sim scenes."""
+
+USE_MOTION_PLANNING = True
+"""Use Drake ``plan_transit`` + ``execute_plan`` for the pre-press approach
+(lift + transit_xy → standoff). Override at the CLI with
+``--no-motion-planning`` to disable entirely."""
+
+MOTION_PLAN_PRE_PRESS_APPROACH = True
+"""When True, the lift+transit_xy steps (3 and 4 in the run sequence) are
+preceded by a motion-planned transit from the rig's current TCP to the
+standoff hover. The existing approach_to landing on the same hover then
+becomes a near-no-op."""
+
+MOTION_PLAN_POST_PRESS_RETURN = True
+"""When True, after the press completes (steps 7–8: forceMode + retract),
+plan a motion-planned transit from the post-retract standoff hover back
+to the FK of the plant-default arm config — i.e., the sim/rig HOME
+hover. The existing ``moveJ(q_start)`` is kept as a final joint-precision
+settle so the arm finishes at exactly its task-entry joint config."""
+
+MOTION_PLAN_RRT_FALLBACK = True
+MOTION_PLAN_AUTO_FALLBACK = True
+"""On planner failure, fall back to the original lift + approach_to
+sequence with a loud warning rather than failing the task."""
+
+MOTION_PLAN_N_WAYPOINTS = 30
+MOTION_PLAN_BLEND_R_M = 0.005
 
 CONFIG = PickPlaceConfig(
     transit_z=0.30,
@@ -396,7 +439,214 @@ def _print_plan(
     print("=" * 70)
 
 
+def _current_q(session: Session) -> dict[str, np.ndarray]:
+    return {
+        name: np.asarray(arm.receive.getActualQ(), dtype=float)
+        for name, arm in session.arms.items()
+    }
+
+
+def _current_tcp_pose_task(arm: ArmHandle) -> Pose:
+    return arm.to_task(rtde_to_pose(arm.receive.getActualTCPPose()))
+
+
+def _home_hover_pose() -> Pose:
+    """FK of plant defaults for ARM — the sim/rig HOME pose used as the
+    target for the post-press return leg. Built fresh from the planning
+    scene so this matches whatever ``WORLD`` produces."""
+    from ..planning.transit import (
+        _arm_model_instance, _tcp_frame,
+    )
+    from ..util.rotations import Rotation as RotUtil
+
+    diagram, plant, _, _ = WORLD.build_planning_scene()
+    root = diagram.CreateDefaultContext()
+    plant_ctx = plant.GetMyMutableContextFromRoot(root)
+    tcp_frame = _tcp_frame(plant, _arm_model_instance(plant, ARM))
+    X = tcp_frame.CalcPoseInWorld(plant_ctx)
+    return Pose(
+        translation=np.asarray(X.translation()),
+        rotation=RotUtil.from_matrix(X.rotation().matrix()),
+    )
+
+
+def _planned_or_linear_press_transit(
+    session: Session,
+    arm: ArmHandle,
+    label: str,
+    target: Pose,
+    config: PickPlaceConfig,
+) -> bool:
+    """Plan a free-space transit from the current TCP to ``target``.
+
+    Used for both the pre-press approach (target = standoff hover) and
+    the post-press return (target = HOME hover). Falls back to the
+    original ``approach_to`` moveL when motion planning is disabled,
+    when the planner raises, or when execution fails (with
+    ``MOTION_PLAN_AUTO_FALLBACK=True``)."""
+    waypoints = [_current_tcp_pose_task(arm), target]
+    print(f"\n→ planned transit: {label}")
+    for i, wp in enumerate(waypoints):
+        print(f"  wp {i}: xyz={np.round(wp.translation, 3)}")
+
+    def _movel_fallback(reason: str) -> bool:
+        print(f"  ➜ moveL fallback ({reason}); routing through approach_to")
+        approach_to(
+            arm, target,
+            config.transit_speed, config.transit_accel,
+        )
+        return True
+
+    if not USE_MOTION_PLANNING:
+        return _movel_fallback("USE_MOTION_PLANNING=False")
+
+    from ..planning.execute import execute_plan
+    from ..planning.transit import (
+        InfeasiblePlanError, make_rtde_ik, plan_transit,
+    )
+
+    diagram, plant, _, _ = WORLD.build_planning_scene()
+    root_ctx = diagram.CreateDefaultContext()
+    plant_ctx = plant.GetMyMutableContextFromRoot(root_ctx)
+    try:
+        plan = plan_transit(
+            plant=plant, arm=ARM,
+            waypoints=waypoints,
+            plant_context=plant_ctx,
+            current_q=_current_q(session),
+            use_rrt_fallback=MOTION_PLAN_RRT_FALLBACK,
+            rrt_diagram=diagram,
+            min_clearance_m=0.01,
+            rtde_ik=make_rtde_ik(arm),
+        )
+    except InfeasiblePlanError as exc:
+        print(f"  ✗ motion plan infeasible: {exc}")
+        if MOTION_PLAN_AUTO_FALLBACK:
+            return _movel_fallback("planner raised InfeasiblePlanError")
+        return False
+
+    print(f"  planner={plan.metadata.get('planner')}  "
+          f"duration={plan.duration_s:.2f}s  "
+          f"clearance={plan.min_clearance_m * 1000:.1f}mm")
+
+    result = execute_plan(
+        plan, session,
+        method="moveJ_path",
+        n_waypoints=MOTION_PLAN_N_WAYPOINTS,
+        blend_r_m=MOTION_PLAN_BLEND_R_M,
+    )
+    if not result.success:
+        print(f"  ✗ planned transit execution failed: {result.reason}")
+        if MOTION_PLAN_AUTO_FALLBACK:
+            return _movel_fallback(
+                f"execute_plan failed: {result.reason}",
+            )
+        return False
+    print("  ✓ planned transit reached.")
+    return True
+
+
+def _plan_sim_legs(standoff: Pose, config: PickPlaceConfig):
+    """Plan the motion-planned segments (HOME → standoff hover, then
+    standoff hover → HOME hover after the press). The hand-coded
+    contact phase (descend → forceMode → retract) is not simulated;
+    sim jumps the arm from the end of leg 1 to the start of leg 2 to
+    represent that skipped contact sequence."""
+    from ..planning.transit import (
+        InfeasiblePlanError,
+        _arm_model_instance,
+        _arm_position_indices,
+        _tcp_frame,
+        plan_transit,
+        plan_transit_chained,
+    )
+    from ..util.rotations import Rotation as RotUtil
+
+    legs: list[tuple[str, object]] = []
+    diagram, plant, _, _ = WORLD.build_planning_scene()
+    root = diagram.CreateDefaultContext()
+    plant_ctx = plant.GetMyMutableContextFromRoot(root)
+    arm_idx = _arm_position_indices(plant, _arm_model_instance(plant, ARM))
+    tcp_frame = _tcp_frame(plant, _arm_model_instance(plant, ARM))
+    X = tcp_frame.CalcPoseInWorld(plant_ctx)
+    home_pose = Pose(
+        translation=np.asarray(X.translation()),
+        rotation=RotUtil.from_matrix(X.rotation().matrix()),
+    )
+    standoff_at_altitude = pose_at_altitude(standoff, config.transit_z)
+
+    print("\n[sim] planning pre-press approach...")
+    try:
+        plan = plan_transit(
+            plant=plant, arm=ARM,
+            waypoints=[home_pose, standoff_at_altitude],
+            plant_context=plant_ctx,
+            use_rrt_fallback=MOTION_PLAN_RRT_FALLBACK,
+            rrt_diagram=diagram,
+            min_clearance_m=0.01,
+        )
+        legs.append(("pre-press approach to standoff hover", plan))
+        chained_arm_q = np.asarray(
+            plan.trajectory.value(plan.trajectory.end_time())
+        ).flatten()[arm_idx]
+    except InfeasiblePlanError as exc:
+        print(f"  ✗ pre-press approach infeasible: {exc}")
+        return legs
+
+    if MOTION_PLAN_POST_PRESS_RETURN:
+        try:
+            plan2 = plan_transit_chained(
+                arm=ARM,
+                log_label="post-press return to HOME hover",
+                prev_terminal_pose=standoff_at_altitude,
+                chained_arm_q=chained_arm_q,
+                plant=plant,
+                waypoints=[standoff_at_altitude, home_pose],
+                plant_context=plant_ctx,
+                current_q={ARM: chained_arm_q},
+                use_rrt_fallback=MOTION_PLAN_RRT_FALLBACK,
+                rrt_diagram=diagram,
+                min_clearance_m=0.01,
+            )
+            legs.append(("post-press return to HOME hover", plan2))
+        except InfeasiblePlanError as exc:
+            print(f"  ✗ post-press return infeasible: {exc}")
+    return legs
+
+
+def _run_sim(standoff: Pose, config: PickPlaceConfig) -> int:
+    """Plan and replay the pre-press approach in meshcat."""
+    from pydrake.geometry import StartMeshcat
+    from pydrake.systems.analysis import Simulator
+
+    from ..planning import preview
+
+    legs = _plan_sim_legs(standoff, config)
+    if not legs:
+        print("[sim] no legs planned; aborting")
+        return 1
+
+    print()
+    print("[sim] plan summary:")
+    for label, plan in legs:
+        clr = plan.min_clearance_m
+        s = (f"{clr * 1000:.1f}mm" if np.isfinite(clr) else "n/a")
+        print(f"  - {label}: planner={plan.metadata.get('planner')}  "
+              f"duration={plan.duration_s:.2f}s  clearance={s}")
+
+    meshcat = StartMeshcat()
+    print(f"\n[sim] meshcat → {meshcat.web_url()}")
+    scene = WORLD.build_sim_scene(meshcat=meshcat)
+    simulator = Simulator(scene.diagram)
+    simulator.Initialize()
+    sim_ctx = simulator.get_mutable_context()
+    return preview.run_interactive_legs(
+        meshcat, scene.diagram, scene.plant, sim_ctx, legs,
+    )
+
+
 def run_on_arm(
+    session: Session,
     arm: ArmHandle,
     standoff: Pose,
     press_dir_task: np.ndarray,
@@ -424,11 +674,20 @@ def run_on_arm(
     print("\n→ lift to transit altitude")
     lift_to_transit(arm, config.transit_z, config.transit_speed, config.transit_accel)
 
-    # 4. moveL to the standoff pose. Transit at altitude first so the
-    # orientation interpolation happens up high, then descend.
+    # 4. Transit to standoff at altitude (motion-planned when enabled,
+    # falls back to the original Cartesian approach_to otherwise or on
+    # planner failure).
     standoff_at_altitude = pose_at_altitude(standoff, config.transit_z)
-    print(f"→ transit to standoff XY at altitude {config.transit_z} m")
-    approach_to(arm, standoff_at_altitude, config.transit_speed, config.transit_accel)
+    if MOTION_PLAN_PRE_PRESS_APPROACH:
+        if not _planned_or_linear_press_transit(
+            session, arm,
+            "pre-press approach to standoff hover",
+            standoff_at_altitude, config,
+        ):
+            return False
+    else:
+        print(f"→ transit to standoff XY at altitude {config.transit_z} m")
+        approach_to(arm, standoff_at_altitude, config.transit_speed, config.transit_accel)
     print(f"→ descend to standoff: xyz={standoff.translation}")
     approach_to(arm, standoff, config.approach_speed, config.approach_accel)
 
@@ -466,10 +725,21 @@ def run_on_arm(
     print(f"→ retract to standoff: xyz={standoff.translation}")
     retract_to(arm, standoff, config.retract_speed, config.retract_accel)
 
-    # 8. Lift to transit altitude, moveJ back to start joints.
+    # 8. Lift to transit altitude.
     print(f"→ lift to transit altitude {config.transit_z} m")
     lift_to_transit(arm, config.transit_z, config.transit_speed, config.transit_accel)
 
+    # 9. Post-press return to HOME hover (motion-planned when enabled).
+    if MOTION_PLAN_POST_PRESS_RETURN:
+        home_target = _home_hover_pose()
+        if not _planned_or_linear_press_transit(
+            session, arm,
+            "post-press return to HOME hover",
+            home_target, config,
+        ):
+            return False
+
+    # 10. Final joint-precision settle: moveJ back to start joints.
     print("→ moveJ back to start joints")
     arm.control.moveJ(q_start)
 
@@ -477,11 +747,22 @@ def run_on_arm(
     return True
 
 
-def main(dry: bool = False, derive: bool = False) -> int:
+def main(
+    dry: bool = False,
+    derive: bool = False,
+    mode: str = "real",
+    motion_planning: bool = True,
+) -> int:
     """CLI entry point. With --derive, prints the four constants derived
     from WAYPOINT_PATH/NAME and exits. Otherwise computes the plan and
     (unless --dry) drives the arm using the constants at the top of
     this file."""
+    if not motion_planning:
+        global USE_MOTION_PLANNING
+        USE_MOTION_PLANNING = False
+        print("[CLI] motion planning DISABLED — pre-press approach will use "
+              "the original approach_to moveL.")
+
     if derive:
         return _derive_from_waypoint(WAYPOINT_PATH, WAYPOINT_NAME)
 
@@ -500,11 +781,19 @@ def main(dry: bool = False, derive: bool = False) -> int:
         print("[dry run] skipping RTDE connection. No motion commanded.")
         return 0
 
+    if mode == "sim":
+        if not SUPPORTS_SIM:
+            print("[sim] this task does not support sim mode")
+            return 1
+        return _run_sim(standoff, CONFIG)
+    if mode != "real":
+        raise ValueError(f"unknown mode {mode!r}; choose 'real' or 'sim'")
+
     left = ARM == "ur_left"
     right = ARM == "ur_right"
     with default_session(left=left, right=right) as session:
         arm = session.arms[ARM]
-        return 0 if run_on_arm(arm, standoff, press_dir, CONFIG) else 1
+        return 0 if run_on_arm(session, arm, standoff, press_dir, CONFIG) else 1
 
 
 if __name__ == "__main__":
@@ -520,5 +809,27 @@ if __name__ == "__main__":
         help="Load WAYPOINT_PATH/NAME, derive the four press constants, "
              "and print them for paste-in. No motion.",
     )
+    ap.add_argument(
+        "--mode",
+        choices=["real", "sim"],
+        default="real",
+        help=(
+            "Execution mode. 'real' (default) runs on the rig via RTDE. "
+            "'sim' plans the pre-press approach and replays it in meshcat."
+        ),
+    )
+    ap.add_argument(
+        "--no-motion-planning",
+        action="store_true",
+        help=(
+            "Disable Drake motion planning for the pre-press approach. "
+            "Falls back to the original ``approach_to`` moveL Cartesian "
+            "transit. ``MOTION_PLAN_AUTO_FALLBACK`` already does this on "
+            "per-segment plan failures; this flag forces it up front."
+        ),
+    )
     args = ap.parse_args()
-    raise SystemExit(main(dry=args.dry, derive=args.derive))
+    raise SystemExit(main(
+        dry=args.dry, derive=args.derive, mode=args.mode,
+        motion_planning=not args.no_motion_planning,
+    ))

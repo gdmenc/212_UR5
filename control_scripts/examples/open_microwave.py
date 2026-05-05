@@ -34,13 +34,15 @@ from ..tasks.open_microwave import (
     HANDLE_ENGAGE_POSE_TASK,
     HINGE_POSITION_TASK,
     PRE_ENGAGE_POSE_TASK,
+    SUPPORTS_SIM,
     _arc_waypoints,
     dry_run_motion_planning,
     open_microwave_door,
+    run_sim,
 )
 
 
-def run(dry: bool, motion_planning: bool) -> None:
+def run(dry: bool, motion_planning: bool, mode: str = "real") -> int:
     door = DOOR_SPEC
     if motion_planning:
         # Shallow copy + flip the flag so we don't mutate the module
@@ -87,7 +89,20 @@ def run(dry: bool, motion_planning: bool) -> None:
             dry_run_motion_planning(door)
         else:
             print("[dry run] skipping RTDE connection. No motion commanded.")
-        return
+        return 0
+
+    if mode == "sim":
+        if not SUPPORTS_SIM:
+            print("[sim] this task does not support sim mode")
+            return 1
+        if not door.use_motion_planning:
+            print("[sim] sim mode requires --motion-planning (only the "
+                  "motion-planned phases can be visualized; arc/force modes "
+                  "go through hand-coded RTDE calls).")
+            return 1
+        return run_sim(door)
+    if mode != "real":
+        raise ValueError(f"unknown mode {mode!r}; choose 'real' or 'sim'")
 
     with default_session(left=True, right=False) as session:
         arm = session.arms[ARM]
@@ -97,12 +112,13 @@ def run(dry: bool, motion_planning: bool) -> None:
 
         if result.success:
             print(f"  ✓ door opened — arc length {result.door_opened_distance:.3f} m")
-        else:
-            print(f"  ✗ FAILED: {result.reason}")
-            print(f"    TCP moved {result.door_opened_distance:.3f} m before stopping")
+            return 0
+        print(f"  ✗ FAILED: {result.reason}")
+        print(f"    TCP moved {result.door_opened_distance:.3f} m before stopping")
+        return 1
 
 
-def main() -> None:
+def main() -> int:
     ap = argparse.ArgumentParser(
         description="Open microwave door with the left arm hook gripper."
     )
@@ -116,9 +132,21 @@ def main() -> None:
              "Uses the rig's actual current joints (not SIM_HOME) as the "
              "planner start state.",
     )
+    ap.add_argument(
+        "--mode",
+        choices=["real", "sim"],
+        default="real",
+        help=(
+            "Execution mode. 'real' (default) runs on the rig via RTDE. "
+            "'sim' plans the motion-planned phases (requires "
+            "--motion-planning) and replays them in meshcat with a "
+            "leg-by-leg stepper; the hand-coded engage / release phases "
+            "are not simulated."
+        ),
+    )
     args = ap.parse_args()
-    run(dry=args.dry, motion_planning=args.motion_planning)
+    return run(dry=args.dry, motion_planning=args.motion_planning, mode=args.mode)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -61,6 +61,68 @@ from .scene.grippers import _tcp_offset_to_rigid_transform
 
 ConfigValidityFn = Callable[[np.ndarray], bool]
 
+ConfigValidityDescribeFn = Callable[[np.ndarray], Optional[str]]
+"""Optional sibling to ``ConfigValidityFn``. When called on a config the
+validity_fn rejected, returns a short human-readable reason — e.g.
+``"plate-level axis: angle 15.0° > tol 3.0°"``. Returns ``None`` if the
+config is actually valid (caller asked spuriously). Used purely for
+enriching planner failure messages."""
+
+
+# ---------------------------------------------------------------------------
+#  Diagnostic helper: name the body pairs in collision at a config
+# ---------------------------------------------------------------------------
+
+
+def _collision_detail(
+    plant: MultibodyPlant,
+    plant_ctx,
+    q_full: np.ndarray,
+    *,
+    max_pairs: int = 2,
+) -> str:
+    """Return a short human-readable description of the worst body
+    pairs in collision at ``q_full``.
+
+    Used to enrich planner failure messages so callers see
+    *what* is colliding instead of just "env/self collision".
+
+    Mutates ``plant_ctx``'s positions as a side effect — pass a
+    throwaway context. Never raises; if the geometry query is
+    unavailable (plant not wired to a SceneGraph), returns a
+    short note instead.
+    """
+    try:
+        plant.SetPositions(plant_ctx, np.asarray(q_full, dtype=float))
+        qry = plant.get_geometry_query_input_port().Eval(plant_ctx)
+    except RuntimeError:
+        return "(no scene_graph; pair detail unavailable)"
+
+    insp = qry.inspector()
+    pairs = qry.ComputeSignedDistancePairwiseClosestPoints(max_distance=0.005)
+    bad: List[Tuple[str, str, float]] = []
+    for p in pairs:
+        if p.distance > 0.0:
+            continue
+        body_A = plant.GetBodyFromFrameId(insp.GetFrameId(p.id_A))
+        body_B = plant.GetBodyFromFrameId(insp.GetFrameId(p.id_B))
+        if body_A.model_instance() == body_B.model_instance():
+            continue
+        bad.append((body_A.name(), body_B.name(), float(p.distance)))
+
+    if not bad:
+        # CheckConfigCollisionFree said collision but signed-distance
+        # pairs are all positive — usually means SceneGraphCollisionChecker
+        # is enforcing its env_padding margin (default 5 mm) that this
+        # query doesn't see.
+        return "within env_padding margin (no pair below 0)"
+
+    bad.sort(key=lambda t: t[2])
+    parts = [f"{a}↔{b} {d * 1000:+.1f}mm" for a, b, d in bad[:max_pairs]]
+    if len(bad) > max_pairs:
+        parts.append(f"…+{len(bad) - max_pairs} more")
+    return ", ".join(parts)
+
 
 # ---------------------------------------------------------------------------
 #  Scene wrapper for SceneGraphCollisionChecker
@@ -75,6 +137,7 @@ def build_planning_scene(
     microwave_door_open_angle_rad: float = 0.0,
     skip_static_objects: tuple = (),
     attached_objects: tuple = (),
+    object_xyz_overrides: Optional[dict] = None,
 ) -> Tuple[RobotDiagram, MultibodyPlant, dict, dict]:
     """Build a ``RobotDiagram`` + plant + arm/gripper handles dict.
 
@@ -104,6 +167,7 @@ def build_planning_scene(
         microwave_door_open_angle_rad=microwave_door_open_angle_rad,
         skip_static_objects=skip_static_objects,
         attached_objects=attached_objects,
+        object_xyz_overrides=object_xyz_overrides,
     )
 
     plant.Finalize()
@@ -281,6 +345,7 @@ def rrt_connect(
     sample_upper: Optional[np.ndarray] = None,
     seed: int = 0,
     validity_fn: Optional[ConfigValidityFn] = None,
+    validity_describe_fn: Optional[ConfigValidityDescribeFn] = None,
     validity_edge_step_size: float = 0.05,
 ) -> RRTPlan:
     """Bidirectional RRT-Connect over the planning arm's DOF.
@@ -356,10 +421,36 @@ def rrt_connect(
             and (validity_fn is None or validity_fn(q_full))
         )
 
+    # Diagnostic context wired through the diagram's scene_graph so the
+    # geometry query works. ``plant.CreateDefaultContext()`` alone is a
+    # bare-plant context with no SceneGraph attached.
+    _diag_root = checker.model().CreateDefaultContext()
+    diag_ctx = plant.GetMyMutableContextFromRoot(_diag_root)
+
+    def _config_failure_detail(q_arm: np.ndarray) -> str:
+        q_full = _full(q_arm)
+        coll_free = checker.CheckConfigCollisionFree(q_full)
+        validity_ok = validity_fn is None or validity_fn(q_full)
+        if not coll_free:
+            return f"env/self collision: {_collision_detail(plant, diag_ctx, q_full)}"
+        if not validity_ok and validity_describe_fn is not None:
+            reason = validity_describe_fn(q_full)
+            if reason:
+                return f"validator rejected: {reason}"
+        if not validity_ok:
+            return "validity_fn rejected"
+        return "(unknown — both checks passed)"
+
     if not _free_config(q_start_arm):
-        raise RRTFailure("start configuration is in collision")
+        raise RRTFailure(
+            f"start configuration is in collision — "
+            f"{_config_failure_detail(q_start_arm)}"
+        )
     if not _free_config(q_goal_arm):
-        raise RRTFailure("goal configuration is in collision")
+        raise RRTFailure(
+            f"goal configuration is in collision — "
+            f"{_config_failure_detail(q_goal_arm)}"
+        )
     # Direct shot first — no need for an actual tree if the straight
     # line is already free.
     if _free_edge(q_start_arm, q_goal_arm):
@@ -625,6 +716,7 @@ def rrt_connect_to_goal_set(
     seed: int = 0,
     pick: str = "first",
     validity_fn: Optional[ConfigValidityFn] = None,
+    validity_describe_fn: Optional[ConfigValidityDescribeFn] = None,
     validity_edge_step_size: float = 0.05,
 ) -> Tuple[RRTPlan, GoalSetReport]:
     """Plan to whichever of several candidate goal configs is reachable.
@@ -671,6 +763,11 @@ def rrt_connect_to_goal_set(
     # Step 1: filter goals by config-collision-free + validity.
     # Track per-branch failure reasons so the failure message is actually
     # diagnostic rather than just "all in collision".
+    # Diagnostic context wired through the diagram's scene_graph so the
+    # geometry query works. ``plant.CreateDefaultContext()`` alone is a
+    # bare-plant context with no SceneGraph attached.
+    _diag_root = checker.model().CreateDefaultContext()
+    diag_ctx = plant.GetMyMutableContextFromRoot(_diag_root)
     survivors: List[Tuple[int, np.ndarray]] = []  # (orig_index, arm_q)
     n_pure_collision = 0
     n_validity_only = 0
@@ -684,28 +781,33 @@ def rrt_connect_to_goal_set(
         if coll_free and validity_ok:
             survivors.append((orig_i, arm_q))
             continue
-        # Categorise the failure for the error message.
+        # Categorise + describe the failure so the caller can see
+        # *what* is colliding / *which* validator rejected, not just
+        # "env/self collision" vs "validity_fn rejected".
         if not coll_free:
             n_pure_collision += 1
-            fail_reasons.append(f"#{orig_i}: env/self collision")
+            detail = _collision_detail(plant, diag_ctx, full)
+            fail_reasons.append(f"#{orig_i}: collision [{detail}]")
         else:
             n_validity_only += 1
-            fail_reasons.append(f"#{orig_i}: validity_fn rejected")
+            if validity_describe_fn is not None:
+                reason = validity_describe_fn(full)
+                fail_reasons.append(
+                    f"#{orig_i}: validator [{reason or 'unknown'}]"
+                )
+            else:
+                fail_reasons.append(f"#{orig_i}: validator rejected")
 
     n_collision = len(goal_arm_qs) - len(survivors)
     if not survivors:
         breakdown = (
             f"{n_pure_collision} env/self-collision, "
-            f"{n_validity_only} validity-rejected"
+            f"{n_validity_only} validator-rejected"
         )
-        # Print per-branch detail at error time so the caller can see
-        # whether the singularity-branch / floor / axis validator is
-        # the offender (validity_fn lumps them; this raw breakdown
-        # makes it obvious when *every* branch is validity-only).
-        details = "; ".join(fail_reasons[:8])
+        details = "; ".join(fail_reasons)
         raise RRTFailure(
             f"all {len(goal_arm_qs)} candidate goal configs were rejected "
-            f"({breakdown}); detail: {details}"
+            f"({breakdown}). Per-branch detail:\n  {details}"
         )
 
     # Step 2: try direct-connect to each survivor first — virtually free.
@@ -781,6 +883,7 @@ def rrt_connect_to_goal_set(
                 sample_upper=sample_upper,
                 seed=seed,
                 validity_fn=validity_fn,
+                validity_describe_fn=validity_describe_fn,
                 validity_edge_step_size=validity_edge_step_size,
             )
         except RRTFailure:
@@ -837,6 +940,7 @@ def rrt_connect_to_tcp_pose(
     seed: int = 0,
     pick: str = "first",
     validity_fn: Optional[ConfigValidityFn] = None,
+    validity_describe_fn: Optional[ConfigValidityDescribeFn] = None,
     validity_edge_step_size: float = 0.05,
 ) -> Tuple[RRTPlan, GoalSetReport]:
     """Plan from ``q_start_full`` to a task-frame TCP pose.
@@ -883,6 +987,7 @@ def rrt_connect_to_tcp_pose(
         seed=seed,
         pick=pick,
         validity_fn=validity_fn,
+        validity_describe_fn=validity_describe_fn,
         validity_edge_step_size=validity_edge_step_size,
     )
 

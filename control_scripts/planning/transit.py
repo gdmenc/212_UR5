@@ -39,7 +39,7 @@ Coordinate convention
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 from pydrake.math import RigidTransform, RotationMatrix
@@ -99,6 +99,50 @@ class TransitPlan:
 class InfeasiblePlanError(RuntimeError):
     """The requested transit cannot be planned (IK fail, no collision-free
     spline, KTO infeasible, ...). The message names which step failed."""
+
+
+# ---------------------------------------------------------------------------
+#  IK fallback callable type
+# ---------------------------------------------------------------------------
+
+# Optional rtde-IK callable: takes (task-frame TCP pose, seed q) and returns
+# joint config or None. Used as tier 2 in _ik_pose_to_joints between ikfast
+# (analytical, sim+real) and Drake numerical IK (NLP, fallback). Built via
+# ``make_rtde_ik(arm)`` in real-path code where an ArmHandle is available.
+RtdeIkFn = Callable[[Pose, np.ndarray], Optional[np.ndarray]]
+
+
+def make_rtde_ik(arm) -> RtdeIkFn:
+    """Build a closure that calls ``arm.control.getInverseKinematics``.
+
+    Used as a third IK tier (between ikfast and Drake numerical IK) for
+    real-path planning. ikfast and the rig's controller IK should agree
+    on UR5e since both are closed-form, but rtde IK is the authoritative
+    one — it's exactly what ``moveL`` would compute. Useful as a sanity
+    backup when ikfast happens to return zero solutions due to
+    URDF/calibration drift.
+
+    Returns a callable that accepts ``(pose_task, seed_q_arm)`` and
+    returns either a 6-DOF joint config (success) or ``None`` (rtde IK
+    failed, fall through to next tier).
+    """
+    from ..util.rtde_convert import pose_to_rtde
+
+    def rtde_ik(pose_task: Pose, seed_q_arm: np.ndarray) -> Optional[np.ndarray]:
+        try:
+            base_pose = arm.to_base(pose_task)
+            rtde_pose = pose_to_rtde(base_pose)
+            result = arm.control.getInverseKinematics(
+                rtde_pose, list(seed_q_arm), 0.001, 0.001,
+            )
+            if not result or len(result) != 6:
+                return None
+            return np.asarray(result, dtype=float)
+        except Exception as exc:
+            print(f"[rtde_ik] failed: {exc}")
+            return None
+
+    return rtde_ik
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +214,95 @@ def _tcp_frame(plant: MultibodyPlant, arm_instance: ModelInstanceIndex):
 #  Pose -> joint IK with chained seeding
 # ---------------------------------------------------------------------------
 
+def _ik_pose_to_joints_ikfast(
+    plant: MultibodyPlant,
+    arm_instance: ModelInstanceIndex,
+    other_arm_instance: Optional[ModelInstanceIndex],
+    other_arm_q: Optional[np.ndarray],
+    pose_task: Pose,
+    seed_q_full: np.ndarray,
+    arm_name: str,
+) -> Optional[np.ndarray]:
+    """Analytical IK for a UR arm via ikfast.
+
+    Returns the full-plant q with the planning arm's slot filled by the
+    ikfast solution closest to ``seed_q_full[arm_idx]``, or ``None`` if
+    ikfast couldn't find a reachable solution within Drake's joint
+    limits.
+
+    Why this exists: Drake's ``InverseKinematics`` is a numerical NLP —
+    it gradient-descends from the seed and can stall at a local minimum
+    (e.g., 19° off in orientation) for poses where the seed is far from
+    any feasible IK branch. ikfast solves the UR5e closed-form
+    six-degree polynomial directly and returns up to 8 wrist branches,
+    so it never gets stuck. Closer to what UR's controller does for
+    moveL on the rig.
+    """
+    from .rrt import ikfast_goal_branches
+
+    arm_idx = _arm_position_indices(plant, arm_instance)
+    seed_arm_q = np.asarray(seed_q_full, dtype=float)[arm_idx]
+
+    branches = ikfast_goal_branches(
+        arm_name, pose_task,
+        seed_arm_q=seed_arm_q,
+        max_branch_dist=None,
+    )
+    if not branches:
+        return None
+
+    # ikfast doesn't know about Drake plant joint limits — filter.
+    lo = plant.GetPositionLowerLimits()[arm_idx]
+    hi = plant.GetPositionUpperLimits()[arm_idx]
+    valid = [
+        q for q in branches
+        if np.all(q >= lo - 1e-6) and np.all(q <= hi + 1e-6)
+    ]
+    if not valid:
+        return None
+
+    # Prefer branches that stay in the seed's q3/q5 wrist quadrant —
+    # mirrors what Drake numerical IK does naturally (gradient descent
+    # doesn't cross singularities) AND matches the singularity branch
+    # lock used by the RRT validity_fn. Without this filter, ikfast's
+    # "closest in joint distance" can return a branch whose q3 has the
+    # wrong sign because the unwrapped Δq is smaller than the 2π-shifted
+    # version — but downstream planning then fails the branch-lock.
+    if len(seed_arm_q) >= 5:
+        def _wrap(q):
+            return (q + np.pi) % (2.0 * np.pi) - np.pi
+        seed_w = _wrap(seed_arm_q)
+        seed_q3_sign = +1.0 if seed_w[2] >= 0 else -1.0
+        seed_q5_sign = +1.0 if seed_w[4] >= 0 else -1.0
+
+        def _matches_quadrant(q):
+            qw = _wrap(q)
+            q3_ok = (qw[2] >= 0) == (seed_q3_sign > 0)
+            q5_ok = (qw[4] >= 0) == (seed_q5_sign > 0)
+            return q3_ok and q5_ok
+
+        same_quadrant = [q for q in valid if _matches_quadrant(q)]
+        # Use same-quadrant branches when any exist; fall back to all
+        # valid branches when the goal pose genuinely requires a quadrant
+        # change (rare — usually means the planner will fail downstream
+        # too, but we'd rather hand it the closest-by-distance solution
+        # than refuse to IK at all).
+        valid = same_quadrant if same_quadrant else valid
+
+    # ikfast_goal_branches sorted by joint distance to seed AND shifted
+    # each branch by 2π multiples to land near the seed; quadrant filter
+    # above preserves order — first remaining entry is closest in the
+    # preferred quadrant.
+    best_arm_q = valid[0]
+
+    q_full = np.asarray(seed_q_full, dtype=float).copy()
+    q_full[arm_idx] = best_arm_q
+    if other_arm_instance is not None and other_arm_q is not None:
+        other_idx = _arm_position_indices(plant, other_arm_instance)
+        q_full[other_idx] = other_arm_q
+    return q_full
+
+
 def _ik_pose_to_joints(
     plant: MultibodyPlant,
     plant_context: Context,
@@ -180,8 +313,21 @@ def _ik_pose_to_joints(
     seed_q_full: np.ndarray,
     pos_tolerance_m: float = 0.005,
     rot_tolerance_rad: float = 0.05,
+    arm_name: Optional[str] = None,
+    rtde_ik: Optional[RtdeIkFn] = None,
 ) -> np.ndarray:
     """IK a single TCP pose for the planning arm.
+
+    Three-tier solver ladder:
+      1. **ikfast** (analytical, sim+real). Deterministic, never stalls,
+         returns the closest-to-seed of up to 8 wrist branches.
+      2. **rtde IK** (analytical, real-path only when ``rtde_ik`` is
+         provided). Same closed-form solver UR's controller uses for
+         ``moveL`` — useful sanity backup when ikfast happens to disagree
+         due to URDF/calibration drift.
+      3. **Drake numerical IK** (gradient descent over a constrained NLP).
+         Final fallback — handles tolerance-band edge cases where neither
+         analytical solver finds an exact match but a near solution is OK.
 
     ``seed_q_full`` is the full plant position vector (12 DOF for
     bimanual). The other arm's positions are pinned to ``other_arm_q``
@@ -196,6 +342,37 @@ def _ik_pose_to_joints(
             "the partner arm's pose so collision queries see it."
         )
 
+    # Tier 1: analytical ikfast for known UR arms.
+    if arm_name in ("ur_left", "ur_right"):
+        ikfast_result = _ik_pose_to_joints_ikfast(
+            plant, arm_instance,
+            other_arm_instance, other_arm_q,
+            pose_world, seed_q_full,
+            arm_name,
+        )
+        if ikfast_result is not None:
+            return ikfast_result
+
+    # Tier 2: rtde controller IK (real-path only). Same closed-form solver
+    # the rig uses for moveL — authoritative when ikfast and rtde disagree
+    # due to URDF/calibration drift.
+    if rtde_ik is not None:
+        arm_idx = _arm_position_indices(plant, arm_instance)
+        seed_arm_q = np.asarray(seed_q_full, dtype=float)[arm_idx]
+        rtde_q_arm = rtde_ik(pose_world, seed_arm_q)
+        if rtde_q_arm is not None and len(rtde_q_arm) == len(arm_idx):
+            # Check joint limits.
+            lo = plant.GetPositionLowerLimits()[arm_idx]
+            hi = plant.GetPositionUpperLimits()[arm_idx]
+            if np.all(rtde_q_arm >= lo - 1e-6) and np.all(rtde_q_arm <= hi + 1e-6):
+                q_full = np.asarray(seed_q_full, dtype=float).copy()
+                q_full[arm_idx] = rtde_q_arm
+                if other_arm_instance is not None and other_arm_q is not None:
+                    other_idx = _arm_position_indices(plant, other_arm_instance)
+                    q_full[other_idx] = other_arm_q
+                return q_full
+
+    # Tier 3: Drake numerical IK as fallback.
     ik = InverseKinematics(plant, plant_context)
     prog = ik.get_mutable_prog()
 
@@ -255,12 +432,15 @@ def _pose_chain_to_joints(
     other_arm_q: Optional[np.ndarray] = None,
     pos_tolerance_m: float = 0.005,
     rot_tolerance_rad: float = 0.05,
+    arm_name: Optional[str] = None,
+    rtde_ik: Optional[RtdeIkFn] = None,
 ) -> List[np.ndarray]:
     """IK every waypoint in order, seeding each with the previous IK result.
 
     Returns a list of full-plant position vectors (one per waypoint).
     Chained seeding keeps consecutive solutions on the same IK branch —
-    avoids wrist 360° spins between adjacent waypoints.
+    avoids wrist 360° spins between adjacent waypoints. ``arm_name``
+    enables the analytical-ikfast fast path in ``_ik_pose_to_joints``.
     """
     seeded = np.asarray(seed_q_full, dtype=float).copy()
     if other_arm_instance is not None and other_arm_q is not None:
@@ -275,6 +455,8 @@ def _pose_chain_to_joints(
             wp, seed_q_full=seeded,
             pos_tolerance_m=pos_tolerance_m,
             rot_tolerance_rad=rot_tolerance_rad,
+            arm_name=arm_name,
+            rtde_ik=rtde_ik,
         )
         out.append(q_full)
         seeded = q_full
@@ -489,6 +671,128 @@ def _check_collision_along(
 #  Top-level dispatcher (KTO version added in next chunk)
 # ---------------------------------------------------------------------------
 
+def ikfast_seeds_at_pose(
+    arm_name: str,
+    pose_task: Pose,
+    seed_arm_q: Optional[np.ndarray] = None,
+) -> List[np.ndarray]:
+    """Return all ikfast branches at the given task-frame TCP pose.
+
+    Sorted by joint distance to ``seed_arm_q`` (when provided), with
+    each branch shifted by 2π multiples to land near the seed.
+
+    Useful for enumerating leg-boundary IK branch options to feed to
+    :func:`plan_transit_multi_seed`. Up to 8 branches per pose for the
+    UR5e (3 binary wrist branches: shoulder L/R, elbow up/down, wrist
+    flip).
+    """
+    from .rrt import ikfast_goal_branches
+    return list(ikfast_goal_branches(
+        arm_name, pose_task,
+        seed_arm_q=seed_arm_q,
+        max_branch_dist=None,
+    ))
+
+
+def plan_transit_chained(
+    arm: str,
+    log_label: str,
+    *,
+    prev_terminal_pose: Optional[Pose] = None,
+    chained_arm_q: Optional[np.ndarray] = None,
+    **plan_transit_kwargs,
+) -> "TransitPlan":
+    """Plan a leg with multi-seed retry derived from the previous leg's
+    terminal pose.
+
+    Convenience wrapper around :func:`plan_transit_multi_seed` for the
+    common chained-leg pattern: enumerate ikfast branches at
+    ``prev_terminal_pose`` (sorted by joint distance to ``chained_arm_q``)
+    and try each as the next leg's IK seed. Returns the first plan that
+    succeeds.
+
+    First-leg call sites pass ``prev_terminal_pose=None``, in which case
+    we delegate to :func:`plan_transit` with whatever ``current_q`` is in
+    ``plan_transit_kwargs`` — no retry happens at the first leg because
+    the rig's actual joint config is fixed and we have nothing else to
+    try.
+    """
+    if prev_terminal_pose is not None and chained_arm_q is not None:
+        seeds = list(ikfast_seeds_at_pose(
+            arm, prev_terminal_pose, seed_arm_q=chained_arm_q,
+        )) or [chained_arm_q]
+    else:
+        # No retry — single attempt with caller's ``current_q``.
+        seeds = []
+
+    return plan_transit_multi_seed(
+        arm=arm, log_label=log_label,
+        seed_candidates=seeds,
+        **plan_transit_kwargs,
+    )
+
+
+def plan_transit_multi_seed(
+    arm: str,
+    *,
+    log_label: str = "transit",
+    seed_candidates: Optional[List[np.ndarray]] = None,
+    **plan_transit_kwargs,
+) -> "TransitPlan":
+    """Plan a transit, trying each seed in ``seed_candidates`` as the
+    planning arm's IK seed. Returns the first plan that succeeds; raises
+    :class:`InfeasiblePlanError` if every seed fails.
+
+    Use case: chained leg planning where the previous leg's terminal
+    config can be replaced by any of the (up to 8) ikfast branches at
+    the same task-frame TCP pose. When the next leg fails with the
+    chained config, retry with the alternative branches. ``avoid_arm_
+    singularity`` stays True throughout — within each retry, no
+    singularity is crossed; we just search across leg boundaries for a
+    chain of mutually-compatible IK branches.
+
+    The seeds are merged into ``current_q`` (so existing partner-arm
+    pins are preserved). When ``seed_candidates`` is empty or None,
+    falls through to a single :func:`plan_transit` call with the
+    caller's existing ``current_q``.
+    """
+    if not seed_candidates:
+        return plan_transit(arm=arm, **plan_transit_kwargs)
+
+    last_exc: Optional[InfeasiblePlanError] = None
+    for i, seed in enumerate(seed_candidates):
+        cur_q_seed = {arm: seed} if seed is not None else None
+        existing = plan_transit_kwargs.get("current_q")
+        if existing is not None and cur_q_seed is not None:
+            cur_q = {**existing, **cur_q_seed}
+        elif existing is not None:
+            cur_q = existing
+        else:
+            cur_q = cur_q_seed
+
+        kwargs = {**plan_transit_kwargs, "current_q": cur_q}
+
+        if seed is not None:
+            wrap = (np.asarray(seed, dtype=float) + np.pi) % (2.0 * np.pi) - np.pi
+            print(f"\n[plan] {log_label} "
+                  f"(seed {i + 1}/{len(seed_candidates)}: "
+                  f"q3 sign={'+1' if wrap[2] >= 0 else '-1'}, "
+                  f"q5 sign={'+1' if wrap[4] >= 0 else '-1'})...")
+        else:
+            print(f"\n[plan] {log_label} (no seed)...")
+
+        try:
+            return plan_transit(arm=arm, **kwargs)
+        except InfeasiblePlanError as exc:
+            last_exc = exc
+            print(f"  ✗ seed {i + 1} infeasible: {str(exc)[:180]}")
+            continue
+
+    raise InfeasiblePlanError(
+        f"all {len(seed_candidates)} seed candidates infeasible; last: {last_exc}",
+    )
+
+
 def plan_transit(
     plant: MultibodyPlant,
     arm: str,
@@ -541,6 +845,11 @@ def plan_transit(
     rrt_seed: int = 4,
     rrt_edge_step_size: float = 0.03,
     rrt_shortcut_attempts: int = 100,
+
+    # Optional rtde-controller IK fallback. When provided, used as tier
+    # 2 in waypoint IK (between ikfast and Drake numerical). Build via
+    # ``make_rtde_ik(arm)`` in real-path code.
+    rtde_ik: Optional[RtdeIkFn] = None,
 ) -> TransitPlan:
     """Plan a transit between task-frame TCP poses.
 
@@ -639,6 +948,8 @@ def plan_transit(
         other_arm_q=other_arm_q,
         pos_tolerance_m=ik_pos_tolerance_m,
         rot_tolerance_rad=ik_rot_tolerance_rad,
+        arm_name=arm,
+        rtde_ik=rtde_ik,
     )
 
     if duration_s is None:
@@ -752,12 +1063,14 @@ def plan_transit(
         if not use_rrt_fallback or rrt_diagram is None:
             raise
 
+        # RRT fallback now supports fix_orientation, fix_z_task, and
+        # stay_in_workspace_box via per-q validators (see
+        # _plan_rrt_transit). Constraints still NOT in RRT:
+        #   max_tcp_linear_speed_m_per_s — needs trajectory retiming
+        #   extra_clearance_to           — needs per-pair clearance check
         rrt_supported = (
-            fix_orientation is None
-            and fix_z_task is None
-            and max_tcp_linear_speed_m_per_s is None
+            max_tcp_linear_speed_m_per_s is None
             and not bool(extra_clearance_to)
-            and stay_in_workspace_box is None
         )
         if not rrt_supported:
             raise
@@ -776,6 +1089,11 @@ def plan_transit(
             align_tcp_axis=align_tcp_axis,
             align_tcp_axis_world=align_tcp_axis_world,
             align_tcp_axis_tolerance_rad=align_tcp_axis_tolerance_rad,
+            fix_orientation=fix_orientation,
+            fix_orientation_tolerance_rad=fix_orientation_tolerance_rad,
+            fix_z_task=fix_z_task,
+            z_tolerance_m=z_tolerance_m,
+            stay_in_workspace_box=stay_in_workspace_box,
             avoid_collisions=avoid_collisions,
             avoid_arm_singularity=avoid_arm_singularity,
             self_collision=self_collision,
@@ -811,17 +1129,23 @@ def _plan_rrt_transit(
     align_tcp_axis: Optional[np.ndarray],
     align_tcp_axis_world: Optional[np.ndarray],
     align_tcp_axis_tolerance_rad: float,
-    avoid_collisions: bool,
-    avoid_arm_singularity: bool,
-    self_collision: bool,
-    min_clearance_m: float,
-    min_z_task: Optional[float],
-    max_iters: int,
-    step_size: float,
-    goal_bias: float,
-    seed: int,
-    edge_step_size: float,
-    shortcut_attempts: int,
+    fix_orientation: Optional[object] = None,
+    fix_orientation_tolerance_rad: float = 0.04,
+    fix_z_task: Optional[float] = None,
+    z_tolerance_m: float = 0.01,
+    stay_in_workspace_box: Optional[Tuple[Tuple[float, float, float],
+                                          Tuple[float, float, float]]] = None,
+    avoid_collisions: bool = True,
+    avoid_arm_singularity: bool = True,
+    self_collision: bool = True,
+    min_clearance_m: float = 0.01,
+    min_z_task: Optional[float] = None,
+    max_iters: int = 10000,
+    step_size: float = 0.2,
+    goal_bias: float = 0.2,
+    seed: int = 4,
+    edge_step_size: float = 0.03,
+    shortcut_attempts: int = 100,
 ) -> TransitPlan:
     """Sampling-based transit through TCP waypoints."""
     if len(waypoints) < 2:
@@ -837,7 +1161,12 @@ def _plan_rrt_transit(
     )
 
     arm_idx = _arm_position_indices(plant, arm_instance)
-    validators = []
+    # Each entry: (name, valid_fn, describe_fn). describe_fn returns a
+    # short string summarising *why* the validator rejected the config —
+    # used for diagnostic failure messages in rrt.py.
+    validators: List[Tuple[str, Callable[[np.ndarray], bool],
+                           Callable[[np.ndarray], str]]] = []
+
     if align_tcp_axis is not None:
         axis_ctx = plant.CreateDefaultContext()
         tcp_frame = _tcp_frame(plant, arm_instance)
@@ -851,27 +1180,129 @@ def _plan_rrt_transit(
         axis_world = axis_world / np.linalg.norm(axis_world)
         max_angle = float(align_tcp_axis_tolerance_rad)
 
-        def _axis_alignment_valid(q_full: np.ndarray) -> bool:
+        def _axis_angle(q_full: np.ndarray) -> float:
             plant.SetPositions(axis_ctx, np.asarray(q_full, dtype=float))
             R_world_tcp = tcp_frame.CalcPoseInWorld(axis_ctx).rotation().matrix()
             axis_in_world = R_world_tcp @ axis_tcp
             axis_in_world = axis_in_world / np.linalg.norm(axis_in_world)
-            angle = float(np.arccos(np.clip(
+            return float(np.arccos(np.clip(
                 float(np.dot(axis_in_world, axis_world)), -1.0, 1.0,
             )))
-            return angle <= max_angle
 
-        validators.append(("plate-level axis", _axis_alignment_valid))
+        def _axis_alignment_valid(q_full: np.ndarray) -> bool:
+            return _axis_angle(q_full) <= max_angle
+
+        def _axis_alignment_describe(q_full: np.ndarray) -> str:
+            angle = _axis_angle(q_full)
+            return (f"axis-alignment {np.degrees(angle):.1f}° > "
+                    f"tol {np.degrees(max_angle):.1f}°")
+
+        validators.append(
+            ("plate-level axis", _axis_alignment_valid,
+             _axis_alignment_describe),
+        )
+
     if min_z_task is not None:
         floor_ctx = plant.CreateDefaultContext()
         tcp_frame = _tcp_frame(plant, arm_instance)
 
-        def _floor_valid(q_full: np.ndarray) -> bool:
+        def _floor_z(q_full: np.ndarray) -> float:
             plant.SetPositions(floor_ctx, np.asarray(q_full, dtype=float))
-            tcp_z = float(tcp_frame.CalcPoseInWorld(floor_ctx).translation()[2])
-            return tcp_z >= min_z_task
+            return float(tcp_frame.CalcPoseInWorld(floor_ctx).translation()[2])
 
-        validators.append(("TCP floor", _floor_valid))
+        def _floor_valid(q_full: np.ndarray) -> bool:
+            return _floor_z(q_full) >= min_z_task
+
+        def _floor_describe(q_full: np.ndarray) -> str:
+            z = _floor_z(q_full)
+            return (f"TCP-floor z={z * 1000:.1f}mm < "
+                    f"min={min_z_task * 1000:.1f}mm")
+
+        validators.append(("TCP floor", _floor_valid, _floor_describe))
+
+    if fix_z_task is not None:
+        fix_z_ctx = plant.CreateDefaultContext()
+        tcp_frame = _tcp_frame(plant, arm_instance)
+        z_target = float(fix_z_task)
+        z_tol = float(z_tolerance_m)
+
+        def _fix_z_delta(q_full: np.ndarray) -> float:
+            plant.SetPositions(fix_z_ctx, np.asarray(q_full, dtype=float))
+            return float(
+                tcp_frame.CalcPoseInWorld(fix_z_ctx).translation()[2] - z_target
+            )
+
+        def _fix_z_valid(q_full: np.ndarray) -> bool:
+            return abs(_fix_z_delta(q_full)) <= z_tol
+
+        def _fix_z_describe(q_full: np.ndarray) -> str:
+            d = _fix_z_delta(q_full)
+            return (f"fix_z_task |Δz|={abs(d)*1000:.1f}mm > "
+                    f"tol {z_tol*1000:.1f}mm  (z={z_target*1000+d*1000:.1f}mm)")
+
+        validators.append(("fix_z_task", _fix_z_valid, _fix_z_describe))
+
+    if fix_orientation is not None:
+        ori_ctx = plant.CreateDefaultContext()
+        tcp_frame = _tcp_frame(plant, arm_instance)
+        # ``fix_orientation`` is a util.rotations.Rotation — extract its
+        # 3x3 matrix once.
+        R_target = np.asarray(fix_orientation.as_matrix(), dtype=float)
+        ori_tol = float(fix_orientation_tolerance_rad)
+
+        def _orientation_angle(q_full: np.ndarray) -> float:
+            plant.SetPositions(ori_ctx, np.asarray(q_full, dtype=float))
+            R_actual = np.asarray(
+                tcp_frame.CalcPoseInWorld(ori_ctx).rotation().matrix()
+            )
+            R_rel = R_target.T @ R_actual
+            cos_t = (np.trace(R_rel) - 1.0) / 2.0
+            return float(np.arccos(np.clip(cos_t, -1.0, 1.0)))
+
+        def _orientation_valid(q_full: np.ndarray) -> bool:
+            return _orientation_angle(q_full) <= ori_tol
+
+        def _orientation_describe(q_full: np.ndarray) -> str:
+            angle = _orientation_angle(q_full)
+            return (f"fix_orientation Δθ={np.degrees(angle):.1f}° > "
+                    f"tol {np.degrees(ori_tol):.1f}°")
+
+        validators.append(
+            ("fix_orientation", _orientation_valid, _orientation_describe),
+        )
+
+    if stay_in_workspace_box is not None:
+        ws_ctx = plant.CreateDefaultContext()
+        tcp_frame = _tcp_frame(plant, arm_instance)
+        ws_lo = np.asarray(stay_in_workspace_box[0], dtype=float).reshape(3)
+        ws_hi = np.asarray(stay_in_workspace_box[1], dtype=float).reshape(3)
+
+        def _ws_position(q_full: np.ndarray) -> np.ndarray:
+            plant.SetPositions(ws_ctx, np.asarray(q_full, dtype=float))
+            return np.asarray(
+                tcp_frame.CalcPoseInWorld(ws_ctx).translation(), dtype=float,
+            )
+
+        def _ws_valid(q_full: np.ndarray) -> bool:
+            p = _ws_position(q_full)
+            return bool(np.all(p >= ws_lo) and np.all(p <= ws_hi))
+
+        def _ws_describe(q_full: np.ndarray) -> str:
+            p = _ws_position(q_full)
+            below = np.maximum(ws_lo - p, 0.0)
+            above = np.maximum(p - ws_hi, 0.0)
+            worst = np.maximum(below, above)
+            j = int(np.argmax(worst))
+            axis = "xyz"[j]
+            margin = float(worst[j]) * 1000.0
+            return (f"stay_in_workspace_box: TCP {axis}={p[j]*1000:.1f}mm "
+                    f"out of [{ws_lo[j]*1000:.1f}, {ws_hi[j]*1000:.1f}]mm "
+                    f"by {margin:.1f}mm")
+
+        validators.append(
+            ("stay_in_workspace_box", _ws_valid, _ws_describe),
+        )
+
     if avoid_arm_singularity and len(arm_idx) >= 5:
         q_start_arm = np.asarray(start_q_full, dtype=float)[arm_idx]
         q_start_wrapped = (q_start_arm + np.pi) % (2.0 * np.pi) - np.pi
@@ -879,27 +1310,48 @@ def _plan_rrt_transit(
         q5_sign = 1.0 if q_start_wrapped[4] >= 0 else -1.0
         eps = 0.10
 
-        def _same_branch_valid(q_full: np.ndarray) -> bool:
+        def _branch_check(q_full: np.ndarray) -> Tuple[bool, float, float]:
             q_arm = np.asarray(q_full, dtype=float)[arm_idx]
             q_arm = (q_arm + np.pi) % (2.0 * np.pi) - np.pi
             q3 = q_arm[2]
             q5 = q_arm[4]
+            ok = True
             if q3_sign > 0 and not (eps <= q3 <= np.pi - eps):
-                return False
+                ok = False
             if q3_sign < 0 and not (-np.pi + eps <= q3 <= -eps):
-                return False
+                ok = False
             if q5_sign > 0 and not (eps <= q5 <= np.pi - eps):
-                return False
+                ok = False
             if q5_sign < 0 and not (-np.pi + eps <= q5 <= -eps):
-                return False
-            return True
+                ok = False
+            return ok, q3, q5
 
-        validators.append(("q3/q5 singularity branch", _same_branch_valid))
+        def _same_branch_valid(q_full: np.ndarray) -> bool:
+            return _branch_check(q_full)[0]
 
-    validity_fn = (
-        None if not validators
-        else lambda q_full: all(valid(q_full) for _, valid in validators)
-    )
+        def _same_branch_describe(q_full: np.ndarray) -> str:
+            _, q3, q5 = _branch_check(q_full)
+            return (f"q3/q5 singularity branch: "
+                    f"start q3 sign {q3_sign:+.0f} q5 sign {q5_sign:+.0f}; "
+                    f"goal q3={q3:+.2f} q5={q5:+.2f}")
+
+        validators.append(
+            ("q3/q5 singularity branch", _same_branch_valid,
+             _same_branch_describe),
+        )
+
+    if validators:
+        def validity_fn(q_full: np.ndarray) -> bool:
+            return all(valid(q_full) for _, valid, _ in validators)
+
+        def validity_describe_fn(q_full: np.ndarray) -> Optional[str]:
+            for name, valid, describe in validators:
+                if not valid(q_full):
+                    return f"{name}: {describe(q_full)}"
+            return None
+    else:
+        validity_fn = None
+        validity_describe_fn = None
 
     checker = make_collision_checker(
         diagram,
@@ -911,12 +1363,13 @@ def _plan_rrt_transit(
 
     q_current = np.asarray(start_q_full, dtype=float).copy()
     failed_start_constraints = [
-        name for name, valid in validators if not valid(q_current)
+        f"{name} ({describe(q_current)})"
+        for name, valid, describe in validators if not valid(q_current)
     ]
     if failed_start_constraints:
         raise InfeasiblePlanError(
             "RRT start configuration violates validity constraint(s): "
-            + ", ".join(failed_start_constraints)
+            + "; ".join(failed_start_constraints)
         )
 
     full_path: List[np.ndarray] = [q_current.copy()]
@@ -933,6 +1386,7 @@ def _plan_rrt_transit(
                 goal_bias=goal_bias,
                 seed=seed + segment_i - 1,
                 validity_fn=validity_fn,
+                validity_describe_fn=validity_describe_fn,
                 validity_edge_step_size=edge_step_size,
             )
             segment_path = shortcut_path(

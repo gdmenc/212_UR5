@@ -1,9 +1,8 @@
-"""Microwave geometry — task-frame placeholders.
+"""Microwave geometry — task-frame, single source of truth.
 
-All numbers below are first-pass guesses except the center XY, which
-the user already measured. Re-measure depth and clearance on the rig
-before trusting any motion. Coordinates are in the shared task frame
-the rest of the package uses (same as ``tasks/pick_place_*.py``).
+Coordinates are in the shared task frame the rest of the package uses
+(origin at top-centre of the heavy-duty table clear area; +y toward the
+microwave; +z up).
 
 Layout assumptions
 ------------------
@@ -12,20 +11,23 @@ Layout assumptions
 - Cavity is a rectangular prism with horizontal floor and ceiling.
 - The glass tray is the floor of the *interior* — objects rest at
   ``MICROWAVE_FLOOR_Z``.
+- The microwave sits on a "white table" 3 cm below the main table top
+  (white table top at z = -0.030). The microwave outer body is 7 cm
+  above the white table → outer bottom at z = +0.040. Sim welds the
+  body in place; the white table itself is not modelled.
+- The 13 cm-thick right wall houses the magnetron + control panel; the
+  left wall is only 3 cm. So the cavity centre is **offset** ~5 cm to
+  the left of the outer body centre. ``MICROWAVE_CENTER_XY_TASK`` is
+  the **cavity** centre (where objects go), not the outer-body centre.
+- The front face is split: the door spans 36 cm on the left (hinged at
+  the outer left edge); the right 8 cm is a fixed control-panel face
+  carrying the red on/off button.
 
-Constraints derived from these numbers
---------------------------------------
-- Useful interior height: ``MICROWAVE_CEILING_Z - MICROWAVE_FLOOR_Z``
-  = 15 cm (with the placeholders below).
-- For a hook-on-rim grasp of a 7.2 cm bowl on the tray (rim at task z
-  0.152 m), the wrist sits at the rim z (no vertical wrist offset, see
-  ``calibration.TCP_OFFSET_HOOK``). At entry_z 0.18 m the wrist is 5 cm
-  below the ceiling — comfortable.
-- For a 2F-85 vertical rim grasp of a plate on the tray (TCP near task z
-  0.10 m), the wrist sits ~18.4 cm above the TCP = 0.28 m. That is
-  ABOVE the 0.23 m ceiling — vertical-descent plate-into-microwave does
-  not fit with the current 2F-85 mount. See
-  ``tasks/pick_place_plate_microwave.py`` for the warning.
+Imports
+-------
+``planning/scene/microwave.py`` builds the sim collision geometry from
+these constants — keep this module the single source of truth and the
+sim will track edits automatically.
 """
 
 from __future__ import annotations
@@ -33,22 +35,83 @@ from __future__ import annotations
 import numpy as np
 
 
-MICROWAVE_CENTER_XY_TASK = np.array([-0.225458, 0.508696])
-"""Task-frame XY of the interior center (the canonical place location).
-Measured on the rig."""
+# --- Cavity (interior) geometry — drives object-placement code -----------
 
-MICROWAVE_INTERIOR_DEPTH = 0.26
+MICROWAVE_CENTER_XY_TASK = np.array([-0.210, 0.5025])
+"""Task-frame XY of the interior cavity centre (the canonical place
+location). Derived from the rig measurement: cavity opening spans
+x ∈ [-0.350, -0.070] (28 cm wide, with 3 cm left wall and 13 cm right
+wall inside the 44 cm outer body); door plane at y = +0.375; cavity
+depth 25.5 cm → centre y = +0.5025."""
+
+MICROWAVE_INTERIOR_DEPTH = 0.255
 """Interior depth along the door axis (task Y). The door plane sits at
-``MICROWAVE_CENTER_XY_TASK[1] - MICROWAVE_INTERIOR_DEPTH/2``.
-PLACEHOLDER — typical microwaves are 25-30 cm."""
+``MICROWAVE_CENTER_XY_TASK[1] - MICROWAVE_INTERIOR_DEPTH/2``."""
 
-MICROWAVE_FLOOR_Z = 0.06
-"""Top surface of the rotating glass tray, in task z. From user spec:
-microwave 3.5 cm off the ground + 2.5 cm to glass tray top = 8.5 cm."""
+MICROWAVE_INTERIOR_WIDTH_X = 0.28
+"""Interior width along task X (cavity wall to cavity wall). Outer body
+is 44 cm; left wall is 3 cm; right wall is 13 cm; difference = 28 cm."""
+
+MICROWAVE_FLOOR_Z = 0.07
+"""Top surface of the rotating glass tray, in task z. White table top at
+z = -0.030, objects rest 10 cm above it → +0.070."""
 
 MICROWAVE_CEILING_Z = 0.23
-"""Interior ceiling, in task z. From user spec: microwave 3 cm off the
-ground + 20 cm interior height = 23 cm."""
+"""Interior ceiling, in task z. White table top at z = -0.030, interior
+height 26 cm above it → +0.230. Useful cavity height
+(``CEILING_Z - FLOOR_Z``) is 16 cm."""
+
+
+# --- Outer body geometry — drives sim collision walls ---------------------
+
+MICROWAVE_OUTER_W_X = 0.44
+"""Outer body width along task X (44 cm)."""
+
+MICROWAVE_OUTER_D_Y = 0.285
+"""Outer body depth along task Y (28.5 cm)."""
+
+MICROWAVE_OUTER_H_Z = 0.24
+"""Outer body height along task Z (24 cm)."""
+
+MICROWAVE_OUTER_BOTTOM_Z = 0.04
+"""Z of the outer body's bottom face, derived from white table top
+z = -0.030 plus the 7 cm stand-off. Outer top face is at
+``MICROWAVE_OUTER_BOTTOM_Z + MICROWAVE_OUTER_H_Z`` = +0.280."""
+
+WHITE_TABLE_TOP_Z = -0.030
+"""Z of the supporting white-table top surface that the microwave sits
+on. 3 cm below the main table top (which is at task z = 0). Used by
+button-press geometry (``tasks/press_button.py``), which measures from
+this surface, not from the main table."""
+
+MICROWAVE_LEFT_WALL_X = 0.03
+"""Thickness of the left side wall (cavity to outer left)."""
+
+MICROWAVE_RIGHT_WALL_X = 0.13
+"""Thickness of the right side wall (cavity to outer right). Houses the
+magnetron + control electronics; the front face of this wall is the
+control-panel face carrying ``BUTTON_TASK_XYZ``."""
+
+MICROWAVE_BOTTOM_WALL_Z = 0.03
+"""Thickness of the bottom (outer bottom to glass tray top)."""
+
+MICROWAVE_TOP_WALL_Z = 0.05
+"""Thickness of the top (cavity ceiling to outer top)."""
+
+MICROWAVE_BACK_WALL_Y = 0.030
+"""Thickness of the back wall along task Y (cavity back to outer back)."""
+
+MICROWAVE_DOOR_WIDTH_X = 0.36
+"""Width of the swinging door along task X. Door spans
+x ∈ [-0.380, -0.020]; the right 8 cm of the front face is a fixed
+control-panel face that does not move with the door."""
+
+MICROWAVE_DOOR_THICKNESS_Y = 0.030
+"""Door thickness along task Y when closed (measured: 3 cm)."""
+
+MICROWAVE_HINGE_X = -0.360
+"""Task-frame X of the vertical hinge axis (outer left face of the
+microwave). The door swings in -y from this axis."""
 
 MICROWAVE_ENTRY_CLEARANCE = 0.05
 """Default distance in -Y outside the door plane where the gripper
@@ -74,6 +137,44 @@ def entry_xy_for(
     target_xy = np.asarray(target_xy_task, dtype=float).reshape(2)
     y = door_plane_y() - clearance
     return np.array([target_xy[0], y])
+
+
+def entry_xy_for_motion_direction(
+    target_xy_task,
+    motion_angle_rad: float,
+    clearance: float = MICROWAVE_ENTRY_CLEARANCE,
+) -> np.ndarray:
+    """Entry XY for a specified physical motion direction (independent
+    of tool orientation).
+
+    The lateral entry through the door is a straight-line move from
+    ``entry_xy`` to ``target_xy``; ``motion_angle_rad`` is the heading
+    of that move in the task xy plane (CCW from +x). Entry sits at the
+    door clearance line (``door_plane_y() − clearance``) on the line
+    through ``target_xy`` heading at ``motion_angle_rad``.
+
+    Use this when you want to control where the arm comes FROM during
+    cavity entry, while keeping the tool orientation set independently
+    by your grasp / place pose. Sister of ``entry_xy_for_pose`` (which
+    derives the heading from the tool axis).
+
+    Falls back to ``entry_xy_for`` (perpendicular to the door) when the
+    requested heading has no +y component (would never cross the door
+    plane heading toward +y) or numerically degenerate.
+    """
+    target_xy = np.asarray(target_xy_task, dtype=float).reshape(2)
+    entry_y = door_plane_y() - clearance
+    motion_dir = np.array([np.cos(motion_angle_rad), np.sin(motion_angle_rad)])
+    if abs(motion_dir[1]) < 1e-6:
+        # Pure-x motion never crosses the door plane in y.
+        return entry_xy_for(target_xy, clearance)
+    s = (target_xy[1] - entry_y) / motion_dir[1]
+    if s <= 0.0:
+        # Motion direction points AWAY from the door (toward +y from
+        # outside, or back into +y from inside) — no valid entry on
+        # this line. Fall back to perpendicular.
+        return entry_xy_for(target_xy, clearance)
+    return target_xy - s * motion_dir
 
 
 def entry_xy_for_pose(

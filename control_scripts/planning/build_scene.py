@@ -102,6 +102,7 @@ def _compose_scene_fragments(
     microwave_door_open_angle_rad: float = 0.0,
     skip_static_objects: tuple = (),
     attached_objects: tuple = (),
+    object_xyz_overrides: Optional[dict] = None,
 ) -> SceneFragments:
     """Add every welded body / fixture to ``plant``.
 
@@ -133,20 +134,47 @@ def _compose_scene_fragments(
     )
 
     skip = set(skip_static_objects)
+    overrides = object_xyz_overrides or {}
     objects: dict[str, ObjectHandles] = {}
+
+    def _xyz(name: str):
+        # Tuple of 3 floats if the caller specified an override for this
+        # object kind; None otherwise so the add_X function falls back
+        # to its hardcoded default in scene/objects.py.
+        return overrides.get(name)
+
     if include_objects:
         if "plate" not in skip:
-            objects["plate"] = add_plate(plant)
+            xyz = _xyz("plate")
+            objects["plate"] = (
+                add_plate(plant, xyz_task=xyz) if xyz else add_plate(plant)
+            )
         if "cup" not in skip:
-            objects["cup"] = add_cup(plant)
+            xyz = _xyz("cup")
+            objects["cup"] = (
+                add_cup(plant, xyz_task=xyz) if xyz else add_cup(plant)
+            )
         if "cup_with_stick" not in skip:
-            objects["cup_with_stick"] = add_cup(plant, with_stick=True)
+            xyz = _xyz("cup_with_stick")
+            objects["cup_with_stick"] = (
+                add_cup(plant, with_stick=True, xyz_task=xyz) if xyz
+                else add_cup(plant, with_stick=True)
+            )
         if "bowl" not in skip:
-            objects["bowl"] = add_bowl(plant)
+            xyz = _xyz("bowl")
+            objects["bowl"] = (
+                add_bowl(plant, xyz_task=xyz) if xyz else add_bowl(plant)
+            )
         if "bottle" not in skip:
-            objects["bottle"] = add_bottle(plant)
+            xyz = _xyz("bottle")
+            objects["bottle"] = (
+                add_bottle(plant, xyz_task=xyz) if xyz else add_bottle(plant)
+            )
         if "tray" not in skip:
-            objects["tray"] = add_tray(plant)
+            xyz = _xyz("tray")
+            objects["tray"] = (
+                add_tray(plant, xyz_task=xyz) if xyz else add_tray(plant)
+            )
 
     attached: dict[str, ObjectHandles] = {}
     for entry in attached_objects:
@@ -179,6 +207,7 @@ def build_scene(
     microwave_door_open_angle_rad: float = 0.0,
     skip_static_objects: tuple = (),
     attached_objects: tuple = (),
+    object_xyz_overrides: Optional[dict] = None,
     time_step: float = 0.0,
     meshcat=None,
     show_visual: bool = True,
@@ -222,6 +251,7 @@ def build_scene(
         microwave_door_open_angle_rad=microwave_door_open_angle_rad,
         skip_static_objects=skip_static_objects,
         attached_objects=attached_objects,
+        object_xyz_overrides=object_xyz_overrides,
     )
 
     plant.Finalize()
