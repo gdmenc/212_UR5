@@ -63,7 +63,7 @@ SIM_HOME_Q_LEFT = np.array([
     1.7939346472369593,
     -1.3749521386674424,
     -1.0451715628253382,
-    -2.5229952971087855,
+    -2.5229952971087855 + 2.0 * np.pi,
 ])
 SIM_HOME_Q_RIGHT = np.array([
     -0.8470800558673304,
@@ -71,7 +71,11 @@ SIM_HOME_Q_RIGHT = np.array([
     -1.7470908164978027,
     -1.9068347416319789,
     1.00191330909729,
-    5.435201168060303,
+    # Wrapped from the rig-recorded +5.4352 rad (+311.4°, ~49° below the
+    # +2π upper limit) to its kinematically-equivalent value on the other
+    # side of zero. Same physical pose; ~5.4 rad / 309° headroom in both
+    # directions. Planning-only — does NOT command the rig.
+    5.435201168060303 - 2.0 * np.pi,
 ])
 
 HOME_Q: Dict[str, Optional[np.ndarray]] = {

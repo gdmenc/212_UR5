@@ -155,8 +155,8 @@ a motion-planned transit from current TCP to the grasp hover."""
 MOTION_PLAN_RRT_FALLBACK = True
 """Try RRT after KTO when the optimizer cannot find a planned transit."""
 
-MOTION_PLAN_RRT_MAX_ITERS = 2000
-MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS = 20
+MOTION_PLAN_RRT_MAX_ITERS = 5000
+MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS = 50
 """RRT fallback budget. Lower these to cap worst-case fallback time."""
 
 MOTION_PLAN_AUTO_FALLBACK = True

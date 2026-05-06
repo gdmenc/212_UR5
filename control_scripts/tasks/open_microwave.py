@@ -1205,7 +1205,7 @@ HINGE_POSITION_TASK = np.array([
 CONFIG = PickPlaceConfig(
     # transit_z is in TASK frame. Handle is at ~0.158 m; 0.25 m gives
     # ~9 cm clearance above it and the microwave housing.
-    transit_z=0.25,
+    transit_z=0.35,
     transit_speed=0.15,
     transit_accel=0.3,
     approach_speed=0.04,    # slow final slide onto handle + arc steps
@@ -1242,7 +1242,7 @@ DOOR_SPEC = MicrowaveDoorSpec(
     pull_distance_task=0.25,
     pull_speed_limit=0.05,
     pull_timeout_s=8.0,
-    disengage_offset=0.03,
+    disengage_offset=0.1,
 
     # Motion-planned mode — opt-in. When True, Phase 1 + Phase 3 run
     # through Drake KTO using the rig's actual current joints as the

@@ -89,6 +89,7 @@ from ..util.tray_layout import (
     TrayPose,
     place_pose_on_tray,
 )
+from ..lab_landmarks import CUP_MICROWAVE_TOP_XYZ_TASK
 from ..planning.scene.objects import PLATE_DEFAULT_TASK_XYZ
 from ..world import World
 
@@ -222,14 +223,15 @@ WORLD = World(
     include_microwave=True,
     include_objects=True,
     # The plate is welded via in_hand during the carry leg, so drop the
-    # static plate to avoid double-loading. cup_with_stick / bowl / bottle
-    # are out of scene for this task at this point in the demo sequence.
-    # Keep ``cup`` and ``tray`` — cup overridden to its tray-slot pose
-    # below; tray uses TRAY_POSE_TASK so a one-off override here flows
-    # through to the planning scene.
-    skip_static_objects=("plate", "cup_with_stick", "bowl", "bottle"),
+    # static plate to avoid double-loading. bowl / bottle are out of
+    # scene at this point in the demo. Keep ``cup`` (on the tray),
+    # ``cup_with_stick`` (placed on the microwave roof earlier in the
+    # demo by ``pick_place_cup_microwave``), and ``tray`` — all three
+    # overridden below to their measured task-frame positions.
+    skip_static_objects=("plate", "bowl", "bottle"),
     object_xyz_overrides={
         "cup": tuple(float(v) for v in CUP_ON_TRAY_POSE_TASK.translation),
+        "cup_with_stick": tuple(float(v) for v in CUP_MICROWAVE_TOP_XYZ_TASK),
         "tray": (TRAY_POSE_TASK.x, TRAY_POSE_TASK.y, TRAY_POSE_TASK.z),
     },
     robotiq_mode="closed",
@@ -239,7 +241,9 @@ WORLD = World(
 ``in_hand`` is overridden per-leg via ``dataclasses.replace`` (plate welded
 to the gripper for the post-pick carry, empty for the post-place return).
 The cup sits at its tray-slot position (placed earlier in the demo by
-``pick_place_cup_tray``) so the plate carry plans around it."""
+``pick_place_cup_tray``); the cup-with-stick sits on the microwave roof
+(placed earlier by ``pick_place_cup_microwave``); both are obstacles the
+plate carry plans around."""
 
 CONFIG = PickPlaceConfig(
     transit_z=0.22,
@@ -276,8 +280,8 @@ before the planner was added. Useful when the planner can't be trusted
 MOTION_PLAN_RRT_FALLBACK = True
 """Try RRT after KTO when the optimizer cannot find a planned transit."""
 
-MOTION_PLAN_RRT_MAX_ITERS = 2000
-MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS = 20
+MOTION_PLAN_RRT_MAX_ITERS = 5000
+MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS = 50
 """RRT fallback budget. Lower these to cap worst-case fallback time."""
 
 MOTION_PLAN_AUTO_FALLBACK = True
@@ -651,7 +655,7 @@ def _run_sim(grasp, place_pose: Pose, config: PickPlaceConfig) -> int:
     sim_world = replace(
         WORLD,
         in_hand={ARM: ("plate", None)},
-        skip_static_objects=("cup_with_stick", "bowl", "bottle"),
+        skip_static_objects=("bowl", "bottle"),
         object_xyz_overrides={
             **WORLD.object_xyz_overrides,
             "plate": tuple(float(v) for v in PLATE_PLACE_POSE_TASK.translation),

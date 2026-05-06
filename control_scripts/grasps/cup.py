@@ -27,6 +27,7 @@ import numpy as np
 
 from ..util.poses import Pose
 from ..util.rotations import Rotation
+from ._hook_rim import HOOK_RIM_PREGRASP_OFFSET, hook_rim_rotation
 from .base import Grasp
 
 
@@ -106,5 +107,60 @@ def cup_rim_candidates(
 ) -> list[Grasp]:
     return [
         cup_rim_grasp(X_task_cup, angle_rad=2.0 * np.pi * i / n)
+        for i in range(n)
+    ]
+
+
+def cup_hook_grasp(
+    X_task_cup: Pose,
+    angle_rad: float = 0.0,
+    approach_tilt_rad: float = 0.0,
+    *,
+    rim_outer_radius_m: float | None = None,
+    rim_z_offset_m: float | None = None,
+) -> Grasp:
+    """Hook-gripper rim grasp at the cup's outer rim.
+
+    Mirrors ``bowl_hook_grasp``: hook descends at the chosen rim angle,
+    moving finger sits inside the rim, fixed jaw outside, rim wall
+    captured in the throat. Uses ``CUP_RIM_OUTER_RADIUS_M`` and
+    ``CUP_HEIGHT_M`` for the rim geometry — overridable.
+
+    ``approach_tilt_rad`` (default 0) tips the descent off pure-vertical
+    around tool +Y. Positive lifts the wrist away from the table; see
+    ``hook_rim_rotation`` for the full sign convention.
+    """
+    r = float(rim_outer_radius_m) if rim_outer_radius_m is not None else CUP_RIM_OUTER_RADIUS_M
+    z_rim = float(rim_z_offset_m) if rim_z_offset_m is not None else CUP_HEIGHT_M
+    rim_xyz = np.array([
+        r * np.cos(angle_rad),
+        r * np.sin(angle_rad),
+        z_rim,
+    ])
+    X_cup_grasp = Pose(
+        translation=rim_xyz,
+        rotation=hook_rim_rotation(angle_rad, approach_tilt_rad),
+    )
+    tilt_label = (
+        ""
+        if approach_tilt_rad == 0.0
+        else f", tilt {np.degrees(approach_tilt_rad):+.0f}°"
+    )
+    return Grasp(
+        grasp_pose=X_task_cup @ X_cup_grasp,
+        pregrasp_offset=HOOK_RIM_PREGRASP_OFFSET,
+        grasp_force=CUP_GRASP_FORCE,
+        description=(
+            f"cup hook rim grasp @ {np.degrees(angle_rad):+.0f}°{tilt_label}"
+        ),
+    )
+
+
+def cup_hook_candidates(
+    X_task_cup: Pose,
+    n: int = 8,
+) -> list[Grasp]:
+    return [
+        cup_hook_grasp(X_task_cup, angle_rad=2.0 * np.pi * i / n)
         for i in range(n)
     ]

@@ -35,13 +35,14 @@ A variant file looks like::
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass, replace
-from typing import Optional, Tuple
+from dataclasses import dataclass, field, replace
+from typing import Callable, Optional, Tuple
 
 import numpy as np
 
 from ..arm import ArmHandle
 from ..config import PickPlaceConfig
+from ..grasps.base import Grasp
 from ..grasps.cup import cup_rim_grasp
 from ..moves import transit_xy
 from ..pick import pick
@@ -50,6 +51,13 @@ from ..session import Session, default_session
 from ..util.poses import Pose, pose_at_altitude
 from ..util.rtde_convert import rtde_to_pose
 from ..world import World
+
+
+GraspFn = Callable[[Pose, float], Grasp]
+"""Signature of a cup-grasp factory: takes a task-frame cup pose and an
+``angle_rad``, returns a ``Grasp``. Both ``cup_rim_grasp`` (Robotiq top-
+down pinch) and ``cup_hook_grasp`` (hook on rim) match this signature
+when called with positional args."""
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +85,11 @@ class CupTaskCfg:
     world: World
     config: PickPlaceConfig
 
+    grasp_fn: GraspFn = cup_rim_grasp
+    """Grasp factory called as ``grasp_fn(cup_pose, angle_rad=θ)``.
+    Defaults to the Robotiq top-down rim pinch. Override with
+    ``cup_hook_grasp`` for the left-arm hook variant."""
+
     # ----- Shared motion-planning knobs (defaults match the original task)
     use_motion_planning: bool = True
     motion_plan_pre_pick_approach: bool = True
@@ -86,7 +99,7 @@ class CupTaskCfg:
     motion_plan_auto_fallback: bool = True
     carry_min_clearance_m: float = 0.005
     motion_plan_n_waypoints: int = 30
-    motion_plan_blend_r_m: float = 0.005
+    motion_plan_blend_r_m: float = 0.003
     supports_sim: bool = True
 
 
@@ -95,14 +108,14 @@ class CupTaskCfg:
 # ---------------------------------------------------------------------------
 
 def plan_pick(cfg: CupTaskCfg):
-    return cup_rim_grasp(cfg.pick_pose_task, angle_rad=cfg.grasp_angle_rad)
+    return cfg.grasp_fn(cfg.pick_pose_task, angle_rad=cfg.grasp_angle_rad)
 
 
 def plan_place(cfg: CupTaskCfg) -> Pose:
-    """TCP pose at release. Re-uses the rim-grasp factory at the place
+    """TCP pose at release. Re-uses the same grasp factory at the place
     pose so the gripper orientation stays consistent between pick and
     place — easier on the wrist than re-solving a new orientation."""
-    grasp_at_dest = cup_rim_grasp(
+    grasp_at_dest = cfg.grasp_fn(
         cfg.place_pose_task, angle_rad=cfg.place_angle_rad,
     )
     return grasp_at_dest.grasp_pose

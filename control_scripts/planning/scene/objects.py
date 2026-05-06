@@ -510,12 +510,22 @@ def attach_object_to_gripper(
             full_height=CUP_HEIGHT,
         )
     elif kind == "cup_with_stick":
-        # Cup body: same rim pinch as plain cup.
-        X_TCP_obj_body = _robotiq_rim_X_TCP_obj_body(
-            outer_radius=CUP_RADIUS,
-            rim_z_in_obj=CUP_HEIGHT,
-            full_height=CUP_HEIGHT,
-        )
+        # Cup body grasp style depends on the arm: ur_right uses the
+        # Robotiq top-down rim pinch (``cup_rim_grasp``); ur_left uses
+        # the hook on the rim (``cup_hook_grasp``). Same rim radius and
+        # height for both — only the TCP→object transform differs.
+        if arm_name == "ur_left":
+            X_TCP_obj_body = _hook_rim_X_TCP_obj_body(
+                outer_radius=CUP_RADIUS,
+                rim_z_in_obj=CUP_HEIGHT,
+                full_height=CUP_HEIGHT,
+            )
+        else:
+            X_TCP_obj_body = _robotiq_rim_X_TCP_obj_body(
+                outer_radius=CUP_RADIUS,
+                rim_z_in_obj=CUP_HEIGHT,
+                full_height=CUP_HEIGHT,
+            )
     elif kind == "bowl":
         # Bowl is grasped via HOOK (left) in the actual tasks. If the
         # caller specified the right arm, fall back to a Robotiq rim

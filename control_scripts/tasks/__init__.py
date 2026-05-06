@@ -25,6 +25,7 @@ and will raise a clear error until set.
 from . import (
     pick_place_bowl_hook_microwave,
     pick_place_cup,
+    pick_place_cup_hook_microwave,
     pick_place_cup_microwave,
     pick_place_cup_tray,
     pick_place_plate_microwave,
@@ -36,6 +37,7 @@ from . import (
 TASKS = {
     "pick_place_bowl_hook_microwave": pick_place_bowl_hook_microwave.main,
     "pick_place_cup": pick_place_cup.main,
+    "pick_place_cup_hook_microwave": pick_place_cup_hook_microwave.main,
     "pick_place_cup_microwave": pick_place_cup_microwave.main,
     "pick_place_cup_tray": pick_place_cup_tray.main,
     "pick_place_plate_microwave": pick_place_plate_microwave.main,

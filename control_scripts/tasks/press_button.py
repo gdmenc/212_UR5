@@ -79,9 +79,11 @@ from ..microwave import (
 )
 from ..moves import approach_to, lift_to_transit, move_until_contact, retract_to
 from ..session import Session, default_session
+from ..lab_landmarks import CUP_MICROWAVE_TOP_XYZ_TASK
 from ..util.poses import Pose, pose_at_altitude
 from ..util.rotations import Rotation
 from ..util.rtde_convert import rtde_to_pose
+from ..util.tray_layout import TRAY_DEFAULT_POSE_TASK, place_pose_on_tray
 from ..world import World
 
 
@@ -172,13 +174,28 @@ SUPPORTS_SIM = True
 contact, ``forceMode`` press, retract) are hand-coded ``moveL`` /
 ``forceMode`` and are not simulated; sim ends after the approach leg."""
 
+_TRAY_POSE_TASK = TRAY_DEFAULT_POSE_TASK
+_CUP_ON_TRAY_POSE_TASK = place_pose_on_tray("cup", tray=_TRAY_POSE_TASK)
+
 WORLD = World(
     include_microwave=True,
-    include_objects=False,
+    include_objects=True,
+    # By the time press_button runs in the demo sequence, the cup is on
+    # its tray slot, the cup-with-stick has been placed on the microwave
+    # roof, and the tray is in its measured pose. plate / bowl / bottle
+    # are out of scene at this point.
+    skip_static_objects=("plate", "bowl", "bottle"),
+    object_xyz_overrides={
+        "cup": tuple(float(v) for v in _CUP_ON_TRAY_POSE_TASK.translation),
+        "cup_with_stick": tuple(float(v) for v in CUP_MICROWAVE_TOP_XYZ_TASK),
+        "tray": (_TRAY_POSE_TASK.x, _TRAY_POSE_TASK.y, _TRAY_POSE_TASK.z),
+    },
     robotiq_mode="closed",
     microwave_door_open_rad=0.0,
 )
-"""Single source of env truth for this task's planning + sim scenes."""
+"""Single source of env truth for this task's planning + sim scenes.
+Models the demo state at button-press time: cup on the tray, cup-with-
+stick on the microwave roof, tray at its measured pose."""
 
 USE_MOTION_PLANNING = True
 """Use Drake ``plan_transit`` + ``execute_plan`` for the pre-press approach
@@ -197,8 +214,8 @@ plan a collision-checked joint-space transit from the post-retract hover
 directly back to the task-entry joint configuration."""
 
 MOTION_PLAN_RRT_FALLBACK = True
-MOTION_PLAN_RRT_MAX_ITERS = 2000
-MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS = 20
+MOTION_PLAN_RRT_MAX_ITERS = 5000
+MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS = 50
 """RRT fallback budget. Lower these to cap worst-case fallback time."""
 
 MOTION_PLAN_AUTO_FALLBACK = True

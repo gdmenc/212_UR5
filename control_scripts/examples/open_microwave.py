@@ -27,6 +27,13 @@ import argparse
 import numpy as np
 
 from ..session import default_session
+from ..tasks.go_home import (
+    DEFAULT_ACCEL_RAD_S2 as HOME_ACCEL_RAD_S2,
+    DEFAULT_SPEED_RAD_S as HOME_SPEED_RAD_S,
+    HOME_Q_LEFT,
+    _moveJ_to_home,
+    _planned_to_home,
+)
 from ..tasks.open_microwave import (
     ARM,
     CONFIG,
@@ -112,6 +119,27 @@ def run(dry: bool, motion_planning: bool, mode: str = "real") -> int:
 
         if result.success:
             print(f"  ✓ door opened — arc length {result.door_opened_distance:.3f} m")
+            print("\n→ return left arm home (planning with door open)")
+            ok, reason = _planned_to_home(
+                session,
+                arm,
+                ARM,
+                HOME_Q_LEFT,
+                door_open_rad=door.arc_open_angle_rad,
+            )
+            if not ok:
+                print(f"  ✗ home planning failed: {reason}")
+                print("    Leaving the arm at the post-open transit pose.")
+                return 1
+
+            print("  ✓ planned transit reached. Snapping to exact home q ...")
+            _moveJ_to_home(
+                arm,
+                HOME_Q_LEFT,
+                speed=HOME_SPEED_RAD_S,
+                accel=HOME_ACCEL_RAD_S2,
+            )
+            print("  ✓ at home q.")
             return 0
         print(f"  ✗ FAILED: {result.reason}")
         print(f"    TCP moved {result.door_opened_distance:.3f} m before stopping")

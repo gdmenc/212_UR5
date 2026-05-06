@@ -148,7 +148,7 @@ HOME_Q_RAD_LEFT = np.array([
     1.7939346472369593,
     -1.3749521386674424,
     -1.0451715628253382,
-    -2.5229952971087855,
+    -2.5229952971087855 + 2.0 * np.pi,
 ])
 """Left arm home, measured at the lab via rtde_r.getActualQ()."""
 
@@ -158,7 +158,7 @@ HOME_Q_RAD_RIGHT: "np.ndarray | None" = np.array([
     -1.7470908164978027,
     -1.9068347416319789,
     1.00191330909729,
-    5.435201168060303,
+    5.435201168060303 - 2.0 * np.pi,
 ])
 """Right arm home, measured at the lab via rtde_r.getActualQ().
 NOTE: wrist_3 = 5.4352 rad (311.4°) is within the URDF ±2π limit but only

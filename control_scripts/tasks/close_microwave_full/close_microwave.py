@@ -70,10 +70,10 @@ class CloseMicrowaveDoorSpec:
     """Number of moveJ waypoints for the closing push. Keep ≥ 6 so the
     arc is smooth enough that the hook face stays flush with the door."""
 
-    joint_speed: float = 0.5
+    joint_speed: float = 0.4
     """Joint speed (rad/s) for the ``moveJ`` arc steps."""
 
-    joint_accel: float = 0.3
+    joint_accel: float = 0.2
     """Joint acceleration (rad/s²) for the ``moveJ`` arc steps."""
 
     preclose_pose_task: Optional[Pose] = None

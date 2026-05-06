@@ -634,21 +634,23 @@ def _check_collision_along(
     n_samples: int,
     min_clearance_m: float,
 ) -> float:
-    """Sample the trajectory and find the worst clearance.
+    """Sample the trajectory and find the worst pairwise clearance.
 
-    Raises ``InfeasiblePlanError`` if any sample is below
-    ``min_clearance_m``.
+    Raises :class:`InfeasiblePlanError` if any sampled pose has an
+    inter-model pair distance below ``min_clearance_m``. Returns
+    ``float('nan')`` if the plant isn't wired to a SceneGraph (in which
+    case safety wasn't actually verified — caller's responsibility to
+    decide what to do).
+
+    Mirrors :func:`_check_safety_along` (without the floor / TCP-z
+    constraint): same try/except scope around the geometry-port
+    ``Eval`` so an :class:`InfeasiblePlanError` raised on collision
+    isn't swallowed, and same intra-model pair filtering so a
+    self-distance between gripper finger pads doesn't get counted as a
+    collision.
     """
     if other_arm_instance is not None and other_arm_q is not None:
         plant.SetPositions(plant_context, other_arm_instance, other_arm_q)
-
-    query = plant.get_geometry_query_input_port()
-    # We query SignedDistancePairs through the scene graph context.
-    # For simplicity here, use a sampled MinimumDistanceLowerBoundConstraint
-    # via direct scene_graph query.
-    sg = plant.GetParentSceneGraph() if hasattr(plant, "GetParentSceneGraph") else None
-    # Drake doesn't expose GetParentSceneGraph on MultibodyPlant directly;
-    # we use the geometry query input port instead.
 
     worst = float("inf")
     t0, t1 = traj.start_time(), traj.end_time()
@@ -657,27 +659,47 @@ def _check_collision_along(
         q = np.asarray(traj.value(t)).flatten()
         plant.SetPositions(plant_context, q)
 
-        # Use the scene graph's query object via the plant's context.
-        # Fetch the QueryObject from the plant's geometry query input port.
-        # Note: this requires the plant to be wired into a SceneGraph.
         try:
-            query_object = plant.get_geometry_query_input_port().Eval(plant_context)
-            distances = query_object.ComputeSignedDistancePairwiseClosestPoints(
-                max_distance=float("inf"),
-            )
-            if distances:
-                d = min(p.distance for p in distances)
-                worst = min(worst, d)
-                if d < min_clearance_m:
-                    raise InfeasiblePlanError(
-                        f"collision along trajectory at t={t:.3f} s "
-                        f"(d={d * 1000:.2f} mm < threshold "
-                        f"{min_clearance_m * 1000:.2f} mm)"
-                    )
-        except RuntimeError:
-            # Plant may not be wired to a scene graph in all contexts;
-            # skip distance checks gracefully then.
+            qry = plant.get_geometry_query_input_port().Eval(plant_context)
+        except RuntimeError as exc:
+            # Plant not wired to a SceneGraph — bail with a warning so
+            # the caller knows safety wasn't actually verified.
+            print(f"[plan_transit] WARNING: scene graph query unavailable "
+                  f"at t={t:.3f}s ({exc!s:.120}); collision check skipped.")
             return float("nan")
+        pairs = qry.ComputeSignedDistancePairwiseClosestPoints(
+            max_distance=float("inf"),
+        )
+        if not pairs:
+            continue
+
+        insp = qry.inspector()
+        # Filter same-model-instance pairs (e.g. gripper finger self-
+        # distance). KTO's collision constraint filters these implicitly
+        # via collision filter groups; our manual signed-distance query
+        # doesn't, so we do it here. We still detect arm-vs-other-arm,
+        # arm-vs-microwave, arm-vs-table, gripper-vs-microwave, etc.
+        inter_model_pairs = []
+        for p in pairs:
+            body_A = plant.GetBodyFromFrameId(insp.GetFrameId(p.id_A))
+            body_B = plant.GetBodyFromFrameId(insp.GetFrameId(p.id_B))
+            if body_A.model_instance() == body_B.model_instance():
+                continue
+            inter_model_pairs.append(p)
+
+        if not inter_model_pairs:
+            continue
+
+        worst_pair = min(inter_model_pairs, key=lambda p: p.distance)
+        d = float(worst_pair.distance)
+        worst = min(worst, d)
+        if d < min_clearance_m:
+            raise InfeasiblePlanError(
+                f"collision along trajectory at t={t:.3f}s "
+                f"(d={d*1000:.2f} mm < min={min_clearance_m*1000:.2f} mm) "
+                f"between {insp.GetName(worst_pair.id_A)!r} "
+                f"and {insp.GetName(worst_pair.id_B)!r}"
+            )
 
     return worst
 
