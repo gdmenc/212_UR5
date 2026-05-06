@@ -83,15 +83,34 @@ a perceived pose if vision is available."""
 
 
 # --- Per-object slots (tray-local XY). --------------------------------------
-# Initial guesses near quarter-points of the usable floor; tune at the
-# lab once the tray and grasp orientations are checked end-to-end.
-_DX = TRAY_FLOOR_LENGTH_X * 0.25  # ≈ 0.082 m
-_DY = TRAY_FLOOR_WIDTH_Y * 0.25   # ≈ 0.046 m
+# Slot offsets are chosen so the planner-side cylinders (with the +5 mm
+# pad applied in planning/scene/objects.py) just barely don't overlap.
+# Earlier 25%-of-floor offsets put plate/bowl/cup well into each other.
+#
+#   BOWL_RADIUS = 0.079 m  (= 0.037*2 + 0.005 pad — see objects.py:64)
+#   CUP_RADIUS  = 0.049 m  (= 0.044   + 0.005 pad)
+#   PLATE_RADIUS= 0.130 m  (= 0.125   + 0.005 pad — wider than the tray
+#                            floor in y, so it can never be off-axis)
+#
+# Bowl and cup share the -x half. Putting them at y = ±_BOWL_CUP_DY
+# with _BOWL_CUP_DY = (BOWL_RADIUS + CUP_RADIUS) / 2 = 0.064 m makes
+# their padded cylinders just touch — minimal overlap given that both
+# objects must fit between the tray's slanted walls.
+#
+# Plate sits y-centred (geometrically forced). Pushing it slightly past
+# the previous 0.082 m to 0.090 m widens the plate-vs-{bowl,cup}
+# separation enough that plate↔cup goes from -9 mm overlap to +5 mm
+# clear. Plate↔bowl still overlaps (~25 mm) — physically unavoidable
+# because the plate diameter exceeds the tray floor width and the bowl
+# is 79 mm radius itself.
+_PLATE_DX = 0.090
+_BOWL_CUP_DX = 0.092
+_BOWL_CUP_DY = 0.064
 
 TRAY_SLOT_LOCAL_XY: Dict[str, Tuple[float, float]] = {
-    "plate": (+_DX, 0.0),    # right, y-centred (plate diameter ~ tray width)
-    "bowl":  (-_DX, -_DY),   # bottom left
-    "cup":   (-_DX, +_DY),   # top left
+    "plate": (+_PLATE_DX, 0.0),                # right, y-centred
+    "bowl":  (-_BOWL_CUP_DX, -_BOWL_CUP_DY),   # bottom left
+    "cup":   (-_BOWL_CUP_DX, +_BOWL_CUP_DY),   # top left
 }
 
 # Object-centre z above the tray's base z. Default 0 = object origin

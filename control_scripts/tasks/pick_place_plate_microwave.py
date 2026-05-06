@@ -119,6 +119,11 @@ TRAY_POSE_TASK = TRAY_DEFAULT_POSE_TASK
 
 PLATE_PLACE_POSE_TASK = place_pose_on_tray("plate", tray=TRAY_POSE_TASK)
 
+# By the time this task runs in the demo sequence, ``pick_place_cup_tray``
+# has already deposited the cup at the tray's "cup" slot. Keep it modelled
+# as a static obstacle so the plate-carry plan routes around it.
+CUP_ON_TRAY_POSE_TASK = place_pose_on_tray("cup", tray=TRAY_POSE_TASK)
+
 # Intermediate waypoint between pick and place. Z is ignored —
 # transit_z sets the carry altitude. Picked at a Cartesian location
 # that breaks long pick→place swings into two shorter, predictable
@@ -215,13 +220,26 @@ them. Set False on tasks that have no planner-driven segments."""
 
 WORLD = World(
     include_microwave=True,
-    include_objects=False,                         # task uses live grasp pose, not the demo plate
+    include_objects=True,
+    # The plate is welded via in_hand during the carry leg, so drop the
+    # static plate to avoid double-loading. cup_with_stick / bowl / bottle
+    # are out of scene for this task at this point in the demo sequence.
+    # Keep ``cup`` and ``tray`` — cup overridden to its tray-slot pose
+    # below; tray uses TRAY_POSE_TASK so a one-off override here flows
+    # through to the planning scene.
+    skip_static_objects=("plate", "cup_with_stick", "bowl", "bottle"),
+    object_xyz_overrides={
+        "cup": tuple(float(v) for v in CUP_ON_TRAY_POSE_TASK.translation),
+        "tray": (TRAY_POSE_TASK.x, TRAY_POSE_TASK.y, TRAY_POSE_TASK.z),
+    },
     robotiq_mode="closed",
     microwave_door_open_rad=MICROWAVE_DOOR_OPEN_ANGLE_RAD,
 )
 """Single source of env truth for this task's planning + sim scenes.
 ``in_hand`` is overridden per-leg via ``dataclasses.replace`` (plate welded
-to the gripper for the post-pick carry, empty for the post-place return)."""
+to the gripper for the post-pick carry, empty for the post-place return).
+The cup sits at its tray-slot position (placed earlier in the demo by
+``pick_place_cup_tray``) so the plate carry plans around it."""
 
 CONFIG = PickPlaceConfig(
     transit_z=0.22,
@@ -626,19 +644,16 @@ def _run_sim(grasp, place_pose: Pose, config: PickPlaceConfig) -> int:
               f"duration={plan.duration_s:.2f}s  "
               f"clearance={plan.min_clearance_m * 1000:.1f}mm")
 
-    # Sim-only scene: drop in the tray at TRAY_POSE_TASK and a static
-    # "target" plate at the place pose so the meshcat preview shows
-    # where the carried plate is heading. Other static objects are
-    # skipped so the scene only has what's relevant to this leg. The
-    # planner above already ran against ``WORLD`` (include_objects=
-    # False); these extras are visualization-only.
+    # Sim-only additions on top of WORLD: weld the plate to the gripper,
+    # un-skip "plate" so the static target plate at the place pose is
+    # visible in meshcat, and inherit WORLD's cup-on-tray + tray
+    # overrides (so what the user sees matches what the planner sees).
     sim_world = replace(
         WORLD,
         in_hand={ARM: ("plate", None)},
-        include_objects=True,
-        skip_static_objects=("cup", "cup_with_stick", "bowl", "bottle"),
+        skip_static_objects=("cup_with_stick", "bowl", "bottle"),
         object_xyz_overrides={
-            "tray": (TRAY_POSE_TASK.x, TRAY_POSE_TASK.y, TRAY_POSE_TASK.z),
+            **WORLD.object_xyz_overrides,
             "plate": tuple(float(v) for v in PLATE_PLACE_POSE_TASK.translation),
         },
     )

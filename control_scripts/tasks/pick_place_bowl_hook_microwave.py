@@ -93,6 +93,11 @@ TRAY_POSE_TASK = TRAY_DEFAULT_POSE_TASK
 
 BOWL_PLACE_POSE_TASK = place_pose_on_tray("bowl", tray=TRAY_POSE_TASK)
 
+# By the time this task runs in the demo sequence, ``pick_place_cup_tray``
+# has already deposited the cup at the tray's "cup" slot. Keep it modelled
+# as a static obstacle so the bowl-carry plan routes around it.
+CUP_ON_TRAY_POSE_TASK = place_pose_on_tray("cup", tray=TRAY_POSE_TASK)
+
 # Intermediate waypoint between pick and place. The transit_z is what
 # actually sets the carry altitude; the Z below is ignored. Picked at a
 # Cartesian location that breaks long pick→place swings into two
@@ -269,17 +274,10 @@ CARRY_MIN_CLEARANCE_M = 0.005
 margin in places — keep this positive so penetration still fails, but allow a
 tighter corridor."""
 
-INCLUDE_CUP_OBSTACLE = False
-"""When True, the **plain cup** (no stick) is treated as a static obstacle on
-the table during planning so the bowl carry routes around it. Other tabletop
-objects are still skipped because the bowl itself is welded to the gripper
-for planning.
-
-Was previously ``INCLUDE_CUP_WITH_STICK_OBSTACLE`` keyed to ``cup_with_stick``,
-but the stick body extends up into the workspace and triggered IK-branch
-rejections on far branches (``forearm_link↔stick``, ``wrist_1_link↔stick``).
-Plain ``cup`` is short and stays under the typical wrist altitude — same
-table-footprint obstacle for the carry without the spurious stick collisions."""
+"""``INCLUDE_CUP_OBSTACLE`` toggle removed: by the time this task runs the cup
+is on the tray (placed by ``pick_place_cup_tray``), and that's the obstacle
+the bowl carry needs to plan around — not the cup at its table location.
+The cup-on-tray override below replaces that mechanism."""
 
 MOTION_PLAN_N_WAYPOINTS = 30
 MOTION_PLAN_BLEND_R_M = 0.0025
@@ -296,32 +294,26 @@ MOTION_PLAN_SERVO_TIME_SCALE = 1.5
 
 WORLD = World(
     include_microwave=True,
-    include_objects=INCLUDE_CUP_OBSTACLE,
-    skip_static_objects=(
-        # Skip everything except plain ``cup`` — that's the single static
-        # obstacle the bowl carry must route around. The bowl itself is
-        # welded to the gripper per-leg via ``in_hand``.
-        ("plate", "cup", "bowl", "bottle", "tray")
-        if INCLUDE_CUP_OBSTACLE else ()
-    ),
-    object_xyz_overrides=(
-        # Place plain ``cup`` at the cup-with-stick rig location so the
-        # planning obstacle sits where the actual cup-with-stick is on
-        # the table. ``CUP_DEFAULT_TASK_XYZ = (-0.20, -0.125,
-        # 0.0)`` from ``planning/scene/objects.py``; hardcoded here so
-        # the bowl task is self-contained and doesn't import from
-        # private scene constants.
-        {"cup": (-0.08, -0.125, 0.0)}
-        if INCLUDE_CUP_OBSTACLE else {}
-    ),
+    include_objects=True,
+    # The bowl is welded via in_hand during the carry leg, so drop the
+    # static bowl. plate / cup_with_stick / bottle are out of scene for
+    # this task at this point in the demo sequence. Keep ``cup`` and
+    # ``tray`` — cup overridden to its tray-slot pose below; tray uses
+    # TRAY_POSE_TASK so a one-off override here flows through to the
+    # planning scene.
+    skip_static_objects=("bowl", "plate", "cup_with_stick", "bottle"),
+    object_xyz_overrides={
+        "cup": tuple(float(v) for v in CUP_ON_TRAY_POSE_TASK.translation),
+        "tray": (TRAY_POSE_TASK.x, TRAY_POSE_TASK.y, TRAY_POSE_TASK.z),
+    },
     robotiq_mode="closed",
     microwave_door_open_rad=MICROWAVE_DOOR_OPEN_ANGLE_RAD,
 )
-"""Single source of env truth. ``include_objects=True`` keeps the
-plain cup as an obstacle on the table at the cup-with-stick location
-(the actual physical placement on the rig). The rest are skipped
-because the bowl itself is welded to the gripper during the carry leg
-via ``in_hand`` per-leg overrides."""
+"""Single source of env truth for this task's planning + sim scenes.
+``in_hand`` is overridden per-leg via ``dataclasses.replace`` (bowl welded
+to the gripper for the post-pick carry, empty for the post-place return).
+The cup sits at its tray-slot position (placed earlier in the demo by
+``pick_place_cup_tray``) so the bowl carry plans around it."""
 
 
 # --- Pose / grasp planning -------------------------------------------------
@@ -751,19 +743,16 @@ def _run_sim(grasp, place_pose: Pose, config: PickPlaceConfig) -> int:
               f"duration={plan.duration_s:.2f}s  "
               f"clearance={plan.min_clearance_m * 1000:.1f}mm")
 
-    # Sim-only scene: drop in the tray at TRAY_POSE_TASK and a static
-    # "target" bowl at the place pose so the meshcat preview shows
-    # where the carried bowl is heading. Cup is skipped here too —
-    # ``INCLUDE_CUP_OBSTACLE=False`` already removes it from planning,
-    # this keeps the viz consistent. Planning above ran against
-    # ``WORLD`` (tray skipped); these additions are visualization-only.
+    # Sim-only additions on top of WORLD: weld the bowl to the gripper,
+    # un-skip "bowl" so the static target bowl at the place pose is
+    # visible in meshcat, and inherit WORLD's cup-on-tray + tray
+    # overrides (so what the user sees matches what the planner sees).
     sim_world = replace(
         WORLD,
         in_hand={ARM: ("bowl", None)},
-        include_objects=True,
-        skip_static_objects=("plate", "cup", "cup_with_stick", "bottle"),
+        skip_static_objects=("plate", "cup_with_stick", "bottle"),
         object_xyz_overrides={
-            "tray": (TRAY_POSE_TASK.x, TRAY_POSE_TASK.y, TRAY_POSE_TASK.z),
+            **WORLD.object_xyz_overrides,
             "bowl": tuple(float(v) for v in BOWL_PLACE_POSE_TASK.translation),
         },
     )

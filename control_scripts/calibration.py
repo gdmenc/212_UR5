@@ -142,15 +142,27 @@ produces a pregrasp exactly d above the grasp in task z.
 # session start (before any pick/place is issued). Joint order is UR5e
 # standard: [shoulder_pan, shoulder_lift, elbow, wrist_1, wrist_2, wrist_3].
 # ---------------------------------------------------------------------------
-HOME_Q_RAD_LEFT = np.radians([
-    -48.24, -101.16, -107.03, -99.73, -120.90, -45.00
+HOME_Q_RAD_LEFT = np.array([
+    0.8135381937026978,
+    -1.4808495801738282,
+    1.7939346472369593,
+    -1.3749521386674424,
+    -1.0451715628253382,
+    -2.5229952971087855,
 ])
-"""Left arm home, copied verbatim from ur_2026/object_grasp_example.py.
-Verified by the team in previous runs as a reachable, collision-free
-pose above the workspace."""
+"""Left arm home, measured at the lab via rtde_r.getActualQ()."""
 
-HOME_Q_RAD_RIGHT: "np.ndarray | None" = None
-"""TODO: measure the right arm's home at the lab by manually moving to a
-safe ready pose and reading joint angles via rtde_r.getActualQ(). Setting
-``None`` here means ``Session.move_to_home()`` will SKIP homing the right
-arm — safer than guessing at a pose and commanding a wrong motion."""
+HOME_Q_RAD_RIGHT: "np.ndarray | None" = np.array([
+    -0.8470800558673304,
+    -1.5827747784056605,
+    -1.7470908164978027,
+    -1.9068347416319789,
+    1.00191330909729,
+    5.435201168060303,
+])
+"""Right arm home, measured at the lab via rtde_r.getActualQ().
+NOTE: wrist_3 = 5.4352 rad (311.4°) is within the URDF ±2π limit but only
+~49° below the upper soft-stop. If ``move_to_home`` is ever called from a
+state near the +2π limit, the controller cannot reach this pose without
+unwrapping — re-teach to a wrapped value (-0.848 rad / -48.59°) if that
+becomes a problem."""

@@ -24,6 +24,8 @@ from ..util.poses import Pose
 from ..world import World
 from ._pick_place_cup_core import CupTaskCfg, parse_args, run_main
 
+import numpy as np
+
 
 # --- Tunables -------------------------------------------------------------
 ARM = "ur_right"
@@ -41,7 +43,7 @@ each microwave-top edge (right-front corner). Sourced from
 FINAL_XY = (0.4, 0.0)
 """Task-frame XY to retract to after placing, at ``CONFIG.transit_z``."""
 
-GRASP_ANGLE_RAD = 0.0
+GRASP_ANGLE_RAD = np.radians(15)
 
 PLACE_ANGLE_RAD = 0.0
 """Cup-axis rotation at release. Default 0; tune in ``--mode sim`` if

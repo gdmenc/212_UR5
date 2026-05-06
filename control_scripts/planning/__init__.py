@@ -57,8 +57,22 @@ from pydrake.multibody.plant import MultibodyPlant
 # (incorrect) base_link weld and put the right TCP below the floor
 # (z ≈ -0.014 m) once the welding was fixed. These new shoulder_pans
 # are the 180°-shifted equivalents under the corrected base orientation.
-SIM_HOME_Q_LEFT = np.radians([-110.0, -90.0, -90.0, -90.0, -90.0, 0.0])
-SIM_HOME_Q_RIGHT = np.radians([ -50.0, -90.0, -90.0, -90.0, -90.0, 0.0])
+SIM_HOME_Q_LEFT = np.array([
+    0.8135381937026978,
+    -1.4808495801738282,
+    1.7939346472369593,
+    -1.3749521386674424,
+    -1.0451715628253382,
+    -2.5229952971087855,
+])
+SIM_HOME_Q_RIGHT = np.array([
+    -0.8470800558673304,
+    -1.5827747784056605,
+    -1.7470908164978027,
+    -1.9068347416319789,
+    1.00191330909729,
+    5.435201168060303,
+])
 
 HOME_Q: Dict[str, Optional[np.ndarray]] = {
     "ur_left": SIM_HOME_Q_LEFT,
