@@ -86,7 +86,7 @@ def run(dry: bool, motion_planning: bool, mode: str = "real") -> int:
             # Actually run the planner offline against the cached plant
             # and dump the moveJ(path=[...]) payloads it would send.
             # Seed is SIM_HOME (no rig to query getActualQ from).
-            dry_run_motion_planning(door)
+            return dry_run_motion_planning(door)
         else:
             print("[dry run] skipping RTDE connection. No motion commanded.")
         return 0

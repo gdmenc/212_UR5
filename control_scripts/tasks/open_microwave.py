@@ -232,6 +232,7 @@ class OpenMicrowaveResult:
 # Microwave is welded with the door CLOSED (matches the real state at the
 # start of the open sequence).
 
+_PLANNING_DIAGRAM = None
 _PLANNING_PLANT = None
 _PLANNING_PLANT_CONTEXT = None
 
@@ -242,17 +243,20 @@ def _get_planning_plant():
     instant. Disable workspace demo objects since they clutter the
     cell with bodies the open-microwave task doesn't interact with.
 
-    Routes through ``WORLD.build_sim_scene()`` so this task's planning
-    plant matches the env values declared in ``WORLD``. Effective
-    kwargs to ``build_scene`` are unchanged from the previous direct
-    call (include_objects=False, everything else default)."""
-    global _PLANNING_PLANT, _PLANNING_PLANT_CONTEXT
+    Routes through ``WORLD.build_planning_scene()`` so this task's
+    planning plant matches the env values declared in ``WORLD`` AND the
+    returned diagram is a ``RobotDiagram`` — required for the RRT
+    fallback's ``SceneGraphCollisionChecker``. Effective kwargs are
+    unchanged from the previous direct call (include_objects=False,
+    everything else default)."""
+    global _PLANNING_DIAGRAM, _PLANNING_PLANT, _PLANNING_PLANT_CONTEXT
     if _PLANNING_PLANT is None:
-        scene = WORLD.build_sim_scene()
-        diagram_ctx = scene.diagram.CreateDefaultContext()
-        _PLANNING_PLANT = scene.plant
-        _PLANNING_PLANT_CONTEXT = scene.plant.GetMyContextFromRoot(diagram_ctx)
-    return _PLANNING_PLANT, _PLANNING_PLANT_CONTEXT
+        diagram, plant, _, _ = WORLD.build_planning_scene()
+        diagram_ctx = diagram.CreateDefaultContext()
+        _PLANNING_DIAGRAM = diagram
+        _PLANNING_PLANT = plant
+        _PLANNING_PLANT_CONTEXT = plant.GetMyContextFromRoot(diagram_ctx)
+    return _PLANNING_DIAGRAM, _PLANNING_PLANT, _PLANNING_PLANT_CONTEXT
 
 
 def _build_movej_path_rows(
@@ -351,7 +355,7 @@ def dry_run_motion_planning(door: "MicrowaveDoorSpec") -> int:
               "planning needs it. Aborting.")
         return 1
 
-    plant, plant_ctx = _get_planning_plant()
+    _, plant, plant_ctx = _get_planning_plant()
 
     # Seed plant at the task-specific approach config (same IK branch as
     # PRE_ENGAGE_JOINTS_RAD) so Phase 1 IK doesn't jump branches the
@@ -384,35 +388,26 @@ def dry_run_motion_planning(door: "MicrowaveDoorSpec") -> int:
     plans: list = []
     failures: list = []
 
-    # --- Phase 1: HOME -> pre_engage (collision-aware) ---
-    # Build a RobotDiagram for RRT fallback so Phase 1 can route around
-    # the microwave when the spline path collides with it.
-    from ..planning.build_scene import _compose_scene_fragments
-    from pydrake.planning import RobotDiagramBuilder
-    rdb = RobotDiagramBuilder(time_step=0.0)
-    rdb_plant = rdb.plant()
-    _compose_scene_fragments(
-        rdb_plant,
-        include_microwave=True,
-        include_grippers=True,
-        include_objects=False,
-        robotiq_mode="closed",
+    # --- Phase 1: HOME -> pre_engage ---
+    # Object collision is OFF; the simplified door box has no handle
+    # relief and the hook gripper's AABB always clips into it at the
+    # recorded pre-engage pose. Instead of relying on collision, we cap
+    # TCP y at the pre-engage y (task frame) so the planner physically
+    # can't drive the gripper past the closed-door volume.
+    pre_engage_y = float(door.pre_engage_pose_task.translation[1])
+    phase1_workspace_box = (
+        (-1e3, -1e3, -1e3),
+        (+1e3, pre_engage_y, +1e3),
     )
-    rdb_plant.Finalize()
-    rrt_diagram_dry = rdb.Build()
 
     try:
-        # ``avoid_collisions=False`` for sim viz only — the recorded
-        # pregrasp pose puts the hook gripper ~30 mm inside the sim
-        # microwave's collision body (sim-vs-real calibration drift).
-        # On the live path Phase 1 already routes via getActualQ +
-        # the cushion of the actual rig clearance.
         plan1 = plan_transit(
             plant=plant, arm="ur_left",
             waypoints=[home_pose, door.pre_engage_pose_task],
             plant_context=plant_ctx,
             current_q=cur_q,
             avoid_collisions=False, self_collision=False,
+            stay_in_workspace_box=phase1_workspace_box,
         )
         print(f"\nPhase 1: HOME -> pre_engage  "
               f"planner={plan1.metadata.get('planner')}  "
@@ -431,9 +426,10 @@ def dry_run_motion_planning(door: "MicrowaveDoorSpec") -> int:
         # independent of Phase 1's outcome.
 
     # --- Phase 3: arc through the hinge (collision off) ---
-    # Speed cap is dropped here vs. the live path so plan_transit can
-    # use the simple-spline path; the recorded waypoints already define
-    # the arc shape and we just want to visualize them.
+    # Same plan_transit shape as the live path: TCP speed cap forces
+    # KTO to plan an arc-shaped trajectory through the recorded
+    # waypoints; collisions are off because the hook is in intentional
+    # contact with the door throughout the swing.
     arc_intermediate = _arc_waypoints(door, start_pose_task=door.handle_engage_pose_task)
     arc_waypoints = [door.handle_engage_pose_task, *arc_intermediate]
     try:
@@ -443,6 +439,8 @@ def dry_run_motion_planning(door: "MicrowaveDoorSpec") -> int:
             plant_context=plant_ctx,
             current_q=cur_q,
             avoid_collisions=False, self_collision=False,
+            max_tcp_linear_speed_m_per_s=door.motion_plan_tcp_speed,
+            use_warmstart=False,
         )
         print(f"\nPhase 3: door arc  "
               f"planner={plan3.metadata.get('planner')}  "
@@ -571,42 +569,20 @@ def run_sim(door: "MicrowaveDoorSpec") -> int:
 
     legs: list = []
 
-    # Workspace bound on Phase 1: cap TCP y at the pre_engage y so
-    # the gripper physically can't approach the closed door volume.
-    # Cleaner than relying on URDF door collision (which has a known
-    # 5 cm calibration mismatch — FK of recorded PRE_ENGAGE_JOINTS_RAD
-    # lands 5 cm below where the rig measures the same pose). Same
-    # intent ("don't drive into the door") expressed as a behavioral
-    # constraint that doesn't depend on the door geometry being right.
     pre_engage_y = float(door.pre_engage_pose_task.translation[1])
     phase1_workspace_box = (
         (-1e3, -1e3, -1e3),
         (+1e3, pre_engage_y, +1e3),
     )
 
-    print("\n[sim] planning Phase 1 (HOME → pre_engage)  "
-          f"with TCP y ≤ {pre_engage_y:.3f} m...")
+    print("\n[sim] planning Phase 1 (HOME → pre_engage) — TCP y ≤ "
+          f"{pre_engage_y:.3f} m, no env/self collision...")
     try:
-        # avoid_collisions=False because the URDF/TCP calibration
-        # mismatch makes door-collision checking unreliable; the
-        # y-bound above is the behavioral substitute. Live execution
-        # uses getActualQ() + the actual rig clearance.
-        #
-        # seed_q = PRE_ENGAGE_JOINTS_RAD: chained IK starts the
-        # plan-arm slot from the recorded pre-engage joints, so the
-        # IK at the home_pose waypoint converges from there. Without
-        # this, IK from SIM_HOME's wrist orientation gets stuck at a
-        # ~19° local minimum and Phase 1 fails before KTO ever runs.
-        seed_q_phase1 = (
-            np.asarray(door.pre_engage_joints_rad, dtype=float)
-            if door.pre_engage_joints_rad is not None else None
-        )
         plan1 = plan_transit(
             plant=plan_plant, arm="ur_left",
             waypoints=[home_pose, door.pre_engage_pose_task],
             plant_context=plan_plant_ctx,
             current_q=cur_q,
-            seed_q=seed_q_phase1,
             avoid_collisions=False, self_collision=False,
             stay_in_workspace_box=phase1_workspace_box,
         )
@@ -630,6 +606,7 @@ def run_sim(door: "MicrowaveDoorSpec") -> int:
             plant_context=plan_plant_ctx,
             current_q=cur_q,
             avoid_collisions=False, self_collision=False,
+            use_warmstart=False,
         )
         legs.append(("Phase 3: door arc", plan3))
     except InfeasiblePlanError as exc:
@@ -666,10 +643,16 @@ def _phase1_motion_planned(
 ) -> None:
     """Phase 1 (motion-planned approach): Drake KTO from the rig's
     actual current joints to ``door.pre_engage_pose_task``, executed
-    as a single blended ``moveJ(path)``. Collision-aware so the path
-    routes around the closed microwave instead of through it."""
-    from ..planning.transit import make_rtde_ik, plan_transit
-    plant, plant_ctx = _get_planning_plant()
+    as a single blended ``moveJ(path)``.
+
+    Object/self collision avoidance is OFF — the simplified door box
+    has no handle relief and the hook gripper's AABB always clips into
+    it at the recorded pre-engage pose. We instead cap TCP y at the
+    pre-engage y (task frame) so the planner physically cannot drive
+    the gripper past the closed-door volume. This is a behavioural
+    constraint that doesn't depend on URDF/TCP calibration drift."""
+    from ..planning.transit import plan_transit
+    _, plant, plant_ctx = _get_planning_plant()
 
     actual_q = np.array(arm.receive.getActualQ(), dtype=float)
     start_pose_task = arm.to_task(rtde_to_pose(arm.receive.getActualTCPPose()))
@@ -680,14 +663,20 @@ def _phase1_motion_planned(
             "(the planner targets a Cartesian pose, not raw joints)."
         )
 
+    pre_engage_y = float(door.pre_engage_pose_task.translation[1])
+    phase1_workspace_box = (
+        (-1e3, -1e3, -1e3),
+        (+1e3, pre_engage_y, +1e3),
+    )
+
     plan = plan_transit(
         plant=plant, arm=arm.name,
         waypoints=[start_pose_task, door.pre_engage_pose_task],
         plant_context=plant_ctx,
         current_q={arm.name: actual_q},
-        avoid_collisions=True,
-        self_collision=True,
-        rtde_ik=make_rtde_ik(arm),
+        avoid_collisions=False,
+        self_collision=False,
+        stay_in_workspace_box=phase1_workspace_box,
     )
     _execute_plan_as_movej_path(arm, plant, plan, door.motion_plan_n_waypoints)
 
@@ -707,7 +696,7 @@ def _phase3_motion_planned(
             "use_motion_planning=True for phase 3 requires "
             "hinge_position_task (the arc waypoint generator needs it)."
         )
-    plant, plant_ctx = _get_planning_plant()
+    _, plant, plant_ctx = _get_planning_plant()
 
     actual_q = np.array(arm.receive.getActualQ(), dtype=float)
     start_pose_task = arm.to_task(rtde_to_pose(arm.receive.getActualTCPPose()))
@@ -724,6 +713,7 @@ def _phase3_motion_planned(
         self_collision=False,
         max_tcp_linear_speed_m_per_s=door.motion_plan_tcp_speed,
         rtde_ik=make_rtde_ik(arm),
+        use_warmstart=False,       # door arc has contact-mode dynamics — don't cache
     )
     _execute_plan_as_movej_path(arm, plant, plan, door.motion_plan_n_waypoints)
 
@@ -946,7 +936,6 @@ def open_microwave_door(
             door_opened_distance=arc_length,
         )
     else:
-        distance_moved = 0.0
         opened_ok = distance_moved >= 0.8 * door.pull_distance_task
         return OpenMicrowaveResult(
             success=opened_ok,
@@ -1231,12 +1220,15 @@ DOOR_SPEC = MicrowaveDoorSpec(
     pre_engage_joints_rad=PRE_ENGAGE_JOINTS_RAD,
     pre_engage_pose_task=PRE_ENGAGE_POSE_TASK,
 
-    # Phase-3 path: prefer the recorded waypoints from May 5 — they
-    # round-trip cleanly through both Drake and ikfast IK. Math-generated
-    # arc params (``hinge_position_task`` + ``arc_open_angle_rad`` + ``n_arc_steps``)
-    # are kept as a fallback for hinge geometries we don't have a recording
-    # for; ``recorded_arc_waypoints_task`` overrides them when set.
-    recorded_arc_waypoints_task=RECORDED_ARC_WAYPOINTS_TASK,
+    # Phase-3 path: math-generated arc rotated around
+    # ``hinge_position_task`` by ``arc_open_angle_rad`` in
+    # ``n_arc_steps`` increments. Recorded waypoints
+    # (``RECORDED_ARC_WAYPOINTS_TASK``) are kept defined above as a
+    # quick override — assign them to ``recorded_arc_waypoints_task``
+    # below to swap back. Default = math arc (mandatory for the open-
+    # microwave task; the recorded waypoints don't capture hinge
+    # geometry the planner can introspect).
+    recorded_arc_waypoints_task=None,
     hinge_position_task=HINGE_POSITION_TASK,
     arc_open_angle_rad=1.8,    # ≈ 103° — tune until door is visually fully open
     n_arc_steps=14,             # moveL waypoints along the arc

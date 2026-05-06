@@ -63,7 +63,6 @@ import argparse
 import json
 import os
 import time
-from dataclasses import replace
 from typing import Tuple
 
 import numpy as np
@@ -78,7 +77,7 @@ from ..microwave import (
     WHITE_TABLE_TOP_Z,
     door_plane_y,
 )
-from ..moves import approach_to, lift_to_transit, move_until_contact, retract_to, transit_xy
+from ..moves import approach_to, lift_to_transit, move_until_contact, retract_to
 from ..session import Session, default_session
 from ..util.poses import Pose, pose_at_altitude
 from ..util.rotations import Rotation
@@ -89,11 +88,11 @@ from ..world import World
 # --- Button location, derived from microwave geometry ---------------------
 # Source-of-truth for the microwave lives in ``control_scripts/microwave.py``.
 # Edit there and these update automatically.
-_BUTTON_FROM_OUTER_RIGHT_X = 0.0675
+_BUTTON_FROM_OUTER_RIGHT_X = 0.0675 + 0.01
 """How far the button sits in (toward -x) from the microwave's outer
 right edge. Measured: 6.75 cm."""
 
-_BUTTON_HEIGHT_ABOVE_WHITE_TABLE = 0.105 - 0.01#account for thickness of the fingers
+_BUTTON_HEIGHT_ABOVE_WHITE_TABLE = 0.105 - 0.0025#account for thickness of the fingers
 """How far the button sits above the white-table top surface.
 Measured: 10.5 cm."""
 
@@ -153,13 +152,13 @@ STANDOFF_M = 0.05
 """Standoff distance back along the press axis from the press TCP.
 The arm goes here before move_until_contact."""
 
-PRESS_FORCE_N = 15.0
+PRESS_FORCE_N = 20.0
 """Newtons applied along the press axis once contact is detected."""
 
 PRESS_HOLD_S = 1.0
 """How long to hold ``PRESS_FORCE_N`` after contact, before retracting."""
 
-CONTACT_THRESHOLD_N = 10.0
+CONTACT_THRESHOLD_N = 20.0
 """TCP force threshold (N) that ends move_until_contact."""
 
 APPROACH_SPEED_M_S = 0.02
@@ -194,12 +193,14 @@ becomes a near-no-op."""
 
 MOTION_PLAN_POST_PRESS_RETURN = True
 """When True, after the press completes (steps 7–8: forceMode + retract),
-plan a motion-planned transit from the post-retract standoff hover back
-to the FK of the plant-default arm config — i.e., the sim/rig HOME
-hover. The existing ``moveJ(q_start)`` is kept as a final joint-precision
-settle so the arm finishes at exactly its task-entry joint config."""
+plan a collision-checked joint-space transit from the post-retract hover
+directly back to the task-entry joint configuration."""
 
 MOTION_PLAN_RRT_FALLBACK = True
+MOTION_PLAN_RRT_MAX_ITERS = 2000
+MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS = 20
+"""RRT fallback budget. Lower these to cap worst-case fallback time."""
+
 MOTION_PLAN_AUTO_FALLBACK = True
 """On planner failure, fall back to the original lift + approach_to
 sequence with a loud warning rather than failing the task."""
@@ -450,26 +451,6 @@ def _current_tcp_pose_task(arm: ArmHandle) -> Pose:
     return arm.to_task(rtde_to_pose(arm.receive.getActualTCPPose()))
 
 
-def _home_hover_pose() -> Pose:
-    """FK of plant defaults for ARM — the sim/rig HOME pose used as the
-    target for the post-press return leg. Built fresh from the planning
-    scene so this matches whatever ``WORLD`` produces."""
-    from ..planning.transit import (
-        _arm_model_instance, _tcp_frame,
-    )
-    from ..util.rotations import Rotation as RotUtil
-
-    diagram, plant, _, _ = WORLD.build_planning_scene()
-    root = diagram.CreateDefaultContext()
-    plant_ctx = plant.GetMyMutableContextFromRoot(root)
-    tcp_frame = _tcp_frame(plant, _arm_model_instance(plant, ARM))
-    X = tcp_frame.CalcPoseInWorld(plant_ctx)
-    return Pose(
-        translation=np.asarray(X.translation()),
-        rotation=RotUtil.from_matrix(X.rotation().matrix()),
-    )
-
-
 def _planned_or_linear_press_transit(
     session: Session,
     arm: ArmHandle,
@@ -479,9 +460,8 @@ def _planned_or_linear_press_transit(
 ) -> bool:
     """Plan a free-space transit from the current TCP to ``target``.
 
-    Used for both the pre-press approach (target = standoff hover) and
-    the post-press return (target = HOME hover). Falls back to the
-    original ``approach_to`` moveL when motion planning is disabled,
+    Used for the pre-press approach to the standoff hover. Falls back to
+    the original ``approach_to`` moveL when motion planning is disabled,
     when the planner raises, or when execution fails (with
     ``MOTION_PLAN_AUTO_FALLBACK=True``)."""
     waypoints = [_current_tcp_pose_task(arm), target]
@@ -516,6 +496,8 @@ def _planned_or_linear_press_transit(
             current_q=_current_q(session),
             use_rrt_fallback=MOTION_PLAN_RRT_FALLBACK,
             rrt_diagram=diagram,
+            rrt_max_iters=MOTION_PLAN_RRT_MAX_ITERS,
+            rrt_shortcut_attempts=MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS,
             min_clearance_m=0.01,
             rtde_ik=make_rtde_ik(arm),
         )
@@ -546,9 +528,93 @@ def _planned_or_linear_press_transit(
     return True
 
 
+def _planned_return_to_joint_start(
+    session: Session,
+    arm: ArmHandle,
+    q_start: list[float],
+    config: PickPlaceConfig,
+) -> bool:
+    """Plan and execute a joint-space return to the task-entry joints."""
+    print("\n→ planned transit: post-press return to q_start")
+
+    if not USE_MOTION_PLANNING:
+        print("  ➜ moveJ fallback (USE_MOTION_PLANNING=False)")
+        arm.control.moveJ(q_start)
+        return True
+
+    from ..planning.execute import execute_plan
+    from ..planning.transit import (
+        InfeasiblePlanError,
+        _arm_model_instance,
+        _arm_position_indices,
+        _plan_simple_spline,
+    )
+
+    diagram, plant, _, _ = WORLD.build_planning_scene()
+    root_ctx = diagram.CreateDefaultContext()
+    plant_ctx = plant.GetMyMutableContextFromRoot(root_ctx)
+
+    q_current = _current_q(session)
+    q0_full = plant.GetPositions(plant_ctx).copy()
+    for arm_name, q_arm in q_current.items():
+        inst = _arm_model_instance(plant, arm_name)
+        q0_full[_arm_position_indices(plant, inst)] = np.asarray(q_arm, dtype=float)
+
+    arm_instance = _arm_model_instance(plant, ARM)
+    arm_idx = _arm_position_indices(plant, arm_instance)
+    q1_full = q0_full.copy()
+    q1_full[arm_idx] = np.asarray(q_start, dtype=float)
+    plant.SetPositions(plant_ctx, q0_full)
+
+    max_joint_delta = float(np.max(np.abs(q1_full[arm_idx] - q0_full[arm_idx])))
+    duration_s = max(1.0, max_joint_delta / 0.5 * 2)
+
+    try:
+        plan = _plan_simple_spline(
+            plant=plant,
+            plant_context=plant_ctx,
+            arm=ARM,
+            arm_instance=arm_instance,
+            waypoints_q_full=[q0_full, q1_full],
+            duration_s=duration_s,
+            check_collisions=True,
+            min_clearance_m=0.01,
+            other_arm_q=None,
+            other_arm_instance=None,
+        )
+    except InfeasiblePlanError as exc:
+        print(f"  ✗ q_start return plan infeasible: {exc}")
+        if MOTION_PLAN_AUTO_FALLBACK:
+            print("  ➜ moveJ fallback (planner raised InfeasiblePlanError)")
+            arm.control.moveJ(q_start)
+            return True
+        return False
+
+    plan.metadata["planner"] = "joint_spline_to_q_start"
+    print(f"  planner={plan.metadata.get('planner')}  "
+          f"duration={plan.duration_s:.2f}s  "
+          f"clearance={plan.min_clearance_m * 1000:.1f}mm")
+
+    result = execute_plan(
+        plan, session,
+        method="moveJ_path",
+        n_waypoints=MOTION_PLAN_N_WAYPOINTS,
+        blend_r_m=MOTION_PLAN_BLEND_R_M,
+    )
+    if not result.success:
+        print(f"  ✗ q_start return execution failed: {result.reason}")
+        if MOTION_PLAN_AUTO_FALLBACK:
+            print("  ➜ moveJ fallback (execute_plan failed)")
+            arm.control.moveJ(q_start)
+            return True
+        return False
+    print("  ✓ returned to q_start.")
+    return True
+
+
 def _plan_sim_legs(standoff: Pose, config: PickPlaceConfig):
     """Plan the motion-planned segments (HOME → standoff hover, then
-    standoff hover → HOME hover after the press). The hand-coded
+    standoff hover → the starting joint configuration after the press). The hand-coded
     contact phase (descend → forceMode → retract) is not simulated;
     sim jumps the arm from the end of leg 1 to the start of leg 2 to
     represent that skipped contact sequence."""
@@ -556,9 +622,9 @@ def _plan_sim_legs(standoff: Pose, config: PickPlaceConfig):
         InfeasiblePlanError,
         _arm_model_instance,
         _arm_position_indices,
+        _plan_simple_spline,
         _tcp_frame,
         plan_transit,
-        plan_transit_chained,
     )
     from ..util.rotations import Rotation as RotUtil
 
@@ -567,6 +633,8 @@ def _plan_sim_legs(standoff: Pose, config: PickPlaceConfig):
     root = diagram.CreateDefaultContext()
     plant_ctx = plant.GetMyMutableContextFromRoot(root)
     arm_idx = _arm_position_indices(plant, _arm_model_instance(plant, ARM))
+    q_start_full = plant.GetPositions(plant_ctx).copy()
+    q_start_arm = q_start_full[arm_idx].copy()
     tcp_frame = _tcp_frame(plant, _arm_model_instance(plant, ARM))
     X = tcp_frame.CalcPoseInWorld(plant_ctx)
     home_pose = Pose(
@@ -583,6 +651,8 @@ def _plan_sim_legs(standoff: Pose, config: PickPlaceConfig):
             plant_context=plant_ctx,
             use_rrt_fallback=MOTION_PLAN_RRT_FALLBACK,
             rrt_diagram=diagram,
+            rrt_max_iters=MOTION_PLAN_RRT_MAX_ITERS,
+            rrt_shortcut_attempts=MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS,
             min_clearance_m=0.01,
         )
         legs.append(("pre-press approach to standoff hover", plan))
@@ -595,20 +665,26 @@ def _plan_sim_legs(standoff: Pose, config: PickPlaceConfig):
 
     if MOTION_PLAN_POST_PRESS_RETURN:
         try:
-            plan2 = plan_transit_chained(
-                arm=ARM,
-                log_label="post-press return to HOME hover",
-                prev_terminal_pose=standoff_at_altitude,
-                chained_arm_q=chained_arm_q,
+            q0_full = q_start_full.copy()
+            q0_full[arm_idx] = chained_arm_q
+            q1_full = q0_full.copy()
+            q1_full[arm_idx] = q_start_arm
+            max_joint_delta = float(np.max(np.abs(q1_full[arm_idx] - q0_full[arm_idx])))
+            duration_s = max(1.0, max_joint_delta / 0.5 * 2)
+            plan2 = _plan_simple_spline(
                 plant=plant,
-                waypoints=[standoff_at_altitude, home_pose],
                 plant_context=plant_ctx,
-                current_q={ARM: chained_arm_q},
-                use_rrt_fallback=MOTION_PLAN_RRT_FALLBACK,
-                rrt_diagram=diagram,
+                arm=ARM,
+                arm_instance=_arm_model_instance(plant, ARM),
+                waypoints_q_full=[q0_full, q1_full],
+                duration_s=duration_s,
+                check_collisions=True,
                 min_clearance_m=0.01,
+                other_arm_q=None,
+                other_arm_instance=None,
             )
-            legs.append(("post-press return to HOME hover", plan2))
+            plan2.metadata["planner"] = "joint_spline_to_q_start"
+            legs.append(("post-press return to q_start", plan2))
         except InfeasiblePlanError as exc:
             print(f"  ✗ post-press return infeasible: {exc}")
     return legs
@@ -729,19 +805,13 @@ def run_on_arm(
     print(f"→ lift to transit altitude {config.transit_z} m")
     lift_to_transit(arm, config.transit_z, config.transit_speed, config.transit_accel)
 
-    # 9. Post-press return to HOME hover (motion-planned when enabled).
+    # 9. Post-press return directly to the task-entry joint configuration.
     if MOTION_PLAN_POST_PRESS_RETURN:
-        home_target = _home_hover_pose()
-        if not _planned_or_linear_press_transit(
-            session, arm,
-            "post-press return to HOME hover",
-            home_target, config,
-        ):
+        if not _planned_return_to_joint_start(session, arm, q_start, config):
             return False
-
-    # 10. Final joint-precision settle: moveJ back to start joints.
-    print("→ moveJ back to start joints")
-    arm.control.moveJ(q_start)
+    else:
+        print("→ moveJ back to start joints")
+        arm.control.moveJ(q_start)
 
     print("\nDone.")
     return True

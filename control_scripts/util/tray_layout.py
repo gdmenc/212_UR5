@@ -9,14 +9,16 @@ tray's task-frame pose to yield an OBJECT-CENTRE place pose.
 Slot convention (top-down view of the tray, +x right, +y up):
 
     cup    .    .
-    .      .    .          plate at top right
-    .      .    plate      cup   at top left
-    .      .    .          bowl  at bottom left
-    bowl   .    .
+    .      .    .          plate at right (y-centred — plate diameter
+    .      .    plate      ~25 cm vs tray floor width ~18.6 cm leaves
+    .      .    .          no room for a +y/-y offset)
+    bowl   .    .          cup   at top left
+                           bowl  at bottom left
 
-Run-time integration: replace ``TRAY_DEFAULT_POSE_TASK`` with the
-visually-estimated pose; the slot table and ``place_pose_on_tray`` stay
-the same.
+Run-time integration: ``TRAY_DEFAULT_POSE_TASK`` is the lab-measured
+fallback. Replace at call time with a visually-estimated pose by
+passing it as ``place_pose_on_tray(..., tray=perceived_pose)``; the
+slot table stays the same.
 """
 
 from __future__ import annotations
@@ -71,10 +73,13 @@ class TrayPose:
 
 
 TRAY_DEFAULT_POSE_TASK = TrayPose(
-    x=0.295521, y=0.10, z=0.0, yaw=0.0,
+    x=0.22, y=0.165, z=0.0, yaw=0.0,
 )
-"""Placeholder until vision provides one. Mirrors the task-frame xy used
-by planning/scene/objects.py::TRAY_DEFAULT_TASK_XYZ."""
+"""Lab-measured tray pose (task xy = +22 cm / +16.5 cm from task origin,
+yaw=0, on table top). **Single source of truth** — both
+``planning/scene/objects.py::TRAY_DEFAULT_TASK_XYZ`` and the tray pose
+used in microwave tasks are derived from this. Replace at run-time with
+a perceived pose if vision is available."""
 
 
 # --- Per-object slots (tray-local XY). --------------------------------------
@@ -84,9 +89,9 @@ _DX = TRAY_FLOOR_LENGTH_X * 0.25  # ≈ 0.082 m
 _DY = TRAY_FLOOR_WIDTH_Y * 0.25   # ≈ 0.046 m
 
 TRAY_SLOT_LOCAL_XY: Dict[str, Tuple[float, float]] = {
-    "plate": (+_DX, +_DY),  # top right
-    "bowl":  (-_DX, -_DY),  # bottom left
-    "cup":   (-_DX, +_DY),  # top left
+    "plate": (+_DX, 0.0),    # right, y-centred (plate diameter ~ tray width)
+    "bowl":  (-_DX, -_DY),   # bottom left
+    "cup":   (-_DX, +_DY),   # top left
 }
 
 # Object-centre z above the tray's base z. Default 0 = object origin
@@ -95,8 +100,8 @@ TRAY_SLOT_LOCAL_XY: Dict[str, Tuple[float, float]] = {
 # per object if the tray floor isn't paper-thin or if a specific object
 # needs a small lift.
 TRAY_OBJECT_REST_DZ: Dict[str, float] = {
-    "plate": 0.01,
-    "bowl":  0.0,
+    "plate": 0.05,   # 5 cm lift so the 2F-85 fingers clear the tray rim
+    "bowl":  0.05,   # 5 cm lift so the hook clears the tray rim
     "cup":   0.0,
 }
 
@@ -108,6 +113,9 @@ def _yaw_rotation(yaw: float) -> Rotation:
 def place_pose_on_tray(
     kind: str,
     tray: Optional[TrayPose] = None,
+    *,
+    slot_local_xy: Optional[Tuple[float, float]] = None,
+    rest_dz: Optional[float] = None,
 ) -> Pose:
     """OBJECT-CENTRE place pose in the task frame for ``kind`` at its
     assigned tray slot.
@@ -117,16 +125,32 @@ def place_pose_on_tray(
     edge``) the grasp angle is interpreted in the tray's local frame —
     the plate's rim angle stays "the same edge of the plate" regardless
     of how the tray is rotated.
+
+    ``slot_local_xy`` and ``rest_dz`` override the per-kind defaults from
+    ``TRAY_SLOT_LOCAL_XY`` / ``TRAY_OBJECT_REST_DZ`` for one-off layouts
+    (e.g. centring the plate on the tray, or lifting it for gripper
+    clearance) without mutating the module-level dicts.
     """
     if tray is None:
         tray = TRAY_DEFAULT_POSE_TASK
-    if kind not in TRAY_SLOT_LOCAL_XY:
-        raise ValueError(
-            f"unknown tray slot for {kind!r}; have {sorted(TRAY_SLOT_LOCAL_XY)}"
-        )
 
-    dx_local, dy_local = TRAY_SLOT_LOCAL_XY[kind]
-    dz_local = TRAY_OBJECT_REST_DZ[kind]
+    if slot_local_xy is None:
+        if kind not in TRAY_SLOT_LOCAL_XY:
+            raise ValueError(
+                f"unknown tray slot for {kind!r}; have {sorted(TRAY_SLOT_LOCAL_XY)}"
+            )
+        dx_local, dy_local = TRAY_SLOT_LOCAL_XY[kind]
+    else:
+        dx_local, dy_local = slot_local_xy
+
+    if rest_dz is None:
+        if kind not in TRAY_OBJECT_REST_DZ:
+            raise ValueError(
+                f"unknown tray rest_dz for {kind!r}; have {sorted(TRAY_OBJECT_REST_DZ)}"
+            )
+        dz_local = TRAY_OBJECT_REST_DZ[kind]
+    else:
+        dz_local = rest_dz
 
     c, s = math.cos(tray.yaw), math.sin(tray.yaw)
     x_task = tray.x + c * dx_local - s * dy_local

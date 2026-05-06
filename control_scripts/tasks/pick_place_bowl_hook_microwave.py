@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import replace
-from typing import Literal
+from typing import Literal, Optional
 
 import numpy as np
 
@@ -60,17 +60,38 @@ from ..place import place, place_into_box
 from ..session import Session, default_session
 from ..util.poses import Pose, offset_along_tool_z, pose_at_altitude
 from ..util.rtde_convert import rtde_to_pose
+from ..util.tray_layout import (
+    TRAY_DEFAULT_POSE_TASK,
+    TrayPose,
+    place_pose_on_tray,
+)
+from ..planning.scene.objects import BOWL_DEFAULT_TASK_XYZ
 from ..world import World
 
 
 # --- Tunables --------------------------------------------------------------
 
-PICK_FROM: Literal["outside", "microwave"] = "microwave"
-PLACE_TO: Literal["outside", "microwave"] = "outside"
+# Default forward direction: pick OUTSIDE the microwave, place INTO it.
+# ``--reverse`` swaps these (pick from microwave, place outside).
+PICK_FROM: Literal["outside", "microwave"] = "outside"
+PLACE_TO: Literal["outside", "microwave"] = "microwave"
 
-# Free-standing bowl poses (used when the corresponding side is "outside").
-BOWL_PICK_POSE_TASK = Pose(translation=[0.05, -0.125, -0.01])
-BOWL_PLACE_POSE_TASK = Pose(translation=[0.05, -0.125, -0.01])
+# Free-standing bowl pick pose (used when PICK_FROM == "outside").
+BOWL_PICK_POSE_TASK = Pose(translation=BOWL_DEFAULT_TASK_XYZ)
+"""Sourced from ``BOWL_DEFAULT_TASK_XYZ`` (planning/scene/objects.py)
+— the canonical lab bowl position. Override here with a literal
+``Pose(translation=[...])`` if a one-off setup needs a different start."""
+
+# Tray pose for the outside-side place leg. Sourced from
+# ``TRAY_DEFAULT_POSE_TASK`` (lab-measured, in util/tray_layout.py).
+# Override here with a literal ``TrayPose(...)`` if a one-off layout is
+# needed for this task without touching the canonical value. Bowl slot
+# xy and rest-z come from ``TRAY_SLOT_LOCAL_XY`` /
+# ``TRAY_OBJECT_REST_DZ`` (canonical 3 cm lift so the hook clears the
+# tray rim during release) — edits there auto-propagate.
+TRAY_POSE_TASK = TRAY_DEFAULT_POSE_TASK
+
+BOWL_PLACE_POSE_TASK = place_pose_on_tray("bowl", tray=TRAY_POSE_TASK)
 
 # Intermediate waypoint between pick and place. The transit_z is what
 # actually sets the carry altitude; the Z below is ignored. Picked at a
@@ -85,16 +106,34 @@ between pick and place. Off-by-default would replicate the failure mode
 the user just saw on the rig — leave True unless you've shortened the
 pick↔place geometry."""
 
-# Bowl-frame angle at which to engage the rim. π = approach from −X
-# side; forearm exits back through the −X microwave door. Keep at π
-# for any microwave-side leg.
-GRASP_ANGLE_RAD = float(np.radians(180-30))
-PLACE_ANGLE_RAD = float(-np.radians(90 + 10))
-MIDPOINT_ANGLE_RAD = PLACE_ANGLE_RAD
-"""Bowl-frame angle used at the midpoint. Mirrors the plate microwave task:
-the midpoint has an explicit orientation knob rather than inferring from
-PICK_FROM / PLACE_TO branches. Default matches the place leg so wrist
-rotation happens before the final entry/place move."""
+# Bowl-frame rim angles, **keyed by both action and side**. Two axes of
+# variation matter: SIDE (microwave constrains door clearance; outside
+# is freer) and ACTION (pick = empty hook, place = hook + bowl in hand;
+# clearance and start-pose differ). Reversing PICK_FROM/PLACE_TO
+# automatically routes the right knob to each leg via ``_angle_for``.
+
+# Microwave-side rim angles. Forearm must exit back through the −Y
+# microwave door at any microwave-side leg. Pick (empty hook) and
+# place (hook + bowl) may need slightly different orientations because
+# the in-cavity clearance with the carried bowl is tighter.
+PICK_ANGLE_AT_MICROWAVE_RAD  = float(-np.radians(90 + 10))
+PLACE_ANGLE_AT_MICROWAVE_RAD = PICK_ANGLE_AT_MICROWAVE_RAD
+
+# Outside-side rim angles. Free-standing bowl on table or tray; door
+# clearance does not constrain. Pick and place poses are usually at
+# different table locations, so different angles are typical.
+PICK_ANGLE_AT_OUTSIDE_RAD    = float(np.radians(180 - 30))
+PLACE_ANGLE_AT_OUTSIDE_RAD   = float(np.radians(180 + 35))
+
+# Default forward run uses (PICK_ANGLE_AT_OUTSIDE_RAD, PLACE_ANGLE_AT_MICROWAVE_RAD);
+# ``--reverse`` uses (PICK_ANGLE_AT_MICROWAVE_RAD, PLACE_ANGLE_AT_OUTSIDE_RAD).
+# Each knob may need independent rig validation.
+
+MIDPOINT_ANGLE_RAD: float | None = None
+"""Bowl-frame angle used at the carry midpoint. ``None`` (default) means
+"match the place-leg angle" — wrist rotation happens during the
+pick→midpoint leg, not the longer midpoint→place transit. Set explicitly
+to override (e.g. when a non-side angle helps clear an obstacle)."""
 
 # Tilt of the descent off pure-vertical (rotation around tool +Y).
 # +15° lifts the wrist ~2.7 cm to clear the table for free-standing bowls.
@@ -192,6 +231,10 @@ known-safe path."""
 MOTION_PLAN_RRT_FALLBACK = True
 """Try RRT after KTO when the optimizer cannot find a planned transit."""
 
+MOTION_PLAN_RRT_MAX_ITERS = 2000
+MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS = 20
+"""RRT fallback budget. Lower these to cap worst-case fallback time."""
+
 MOTION_PLAN_AUTO_FALLBACK = True
 """When the motion planner fails (``plan_transit`` raises, or
 ``execute_plan`` reports a failure), fall back to the sequential moveL
@@ -226,7 +269,7 @@ CARRY_MIN_CLEARANCE_M = 0.005
 margin in places — keep this positive so penetration still fails, but allow a
 tighter corridor."""
 
-INCLUDE_CUP_OBSTACLE = True
+INCLUDE_CUP_OBSTACLE = False
 """When True, the **plain cup** (no stick) is treated as a static obstacle on
 the table during planning so the bowl carry routes around it. Other tabletop
 objects are still skipped because the bowl itself is welded to the gripper
@@ -239,15 +282,15 @@ Plain ``cup`` is short and stays under the typical wrist altitude — same
 table-footprint obstacle for the carry without the spurious stick collisions."""
 
 MOTION_PLAN_N_WAYPOINTS = 30
-MOTION_PLAN_BLEND_R_M = 0.005
-MOTION_PLAN_EXECUTION_METHOD = "servoJ"
+MOTION_PLAN_BLEND_R_M = 0.0025
+MOTION_PLAN_EXECUTION_METHOD = "moveJ_path"
 """Execution method for planned transits.
 
 ``servoJ`` streams dense setpoints from the planned trajectory and is smoother
 for KTO carries. Set to ``"moveJ_path"`` to use sparse blended waypoints.
 """
-MOTION_PLAN_SERVO_DT_S = 0.008
-MOTION_PLAN_SERVO_TIME_SCALE = 2.0
+MOTION_PLAN_SERVO_DT_S = 0.006
+MOTION_PLAN_SERVO_TIME_SCALE = 1.5
 """Stretch servoJ execution in time. 2.0 means half-speed playback."""
 
 
@@ -258,17 +301,17 @@ WORLD = World(
         # Skip everything except plain ``cup`` — that's the single static
         # obstacle the bowl carry must route around. The bowl itself is
         # welded to the gripper per-leg via ``in_hand``.
-        ("plate", "cup_with_stick", "bowl", "bottle", "tray")
+        ("plate", "cup", "bowl", "bottle", "tray")
         if INCLUDE_CUP_OBSTACLE else ()
     ),
     object_xyz_overrides=(
         # Place plain ``cup`` at the cup-with-stick rig location so the
         # planning obstacle sits where the actual cup-with-stick is on
-        # the table. ``CUP_WITH_STICK_DEFAULT_TASK_XYZ = (-0.20, -0.125,
+        # the table. ``CUP_DEFAULT_TASK_XYZ = (-0.20, -0.125,
         # 0.0)`` from ``planning/scene/objects.py``; hardcoded here so
         # the bowl task is self-contained and doesn't import from
         # private scene constants.
-        {"cup": (-0.20, -0.125, 0.0)}
+        {"cup": (-0.08, -0.125, 0.0)}
         if INCLUDE_CUP_OBSTACLE else {}
     ),
     robotiq_mode="closed",
@@ -301,10 +344,23 @@ def _tilt_for(side: str) -> float:
     )
 
 
+def _angle_for(action: str, side: str) -> float:
+    """Bowl-frame rim engagement angle for a given (action, side).
+    Reversal of PICK_FROM/PLACE_TO automatically routes the right knob.
+    Action ∈ {"pick", "place"}; side ∈ {"microwave", "outside"}."""
+    table = {
+        ("pick",  "microwave"): PICK_ANGLE_AT_MICROWAVE_RAD,
+        ("pick",  "outside"):   PICK_ANGLE_AT_OUTSIDE_RAD,
+        ("place", "microwave"): PLACE_ANGLE_AT_MICROWAVE_RAD,
+        ("place", "outside"):   PLACE_ANGLE_AT_OUTSIDE_RAD,
+    }
+    return table[(action, side)]
+
+
 def plan_pick():
     grasp = bowl_hook_grasp(
         _bowl_pose_for(PICK_FROM, BOWL_PICK_POSE_TASK),
-        angle_rad=GRASP_ANGLE_RAD,
+        angle_rad=_angle_for("pick", PICK_FROM),
         approach_tilt_rad=_tilt_for(PICK_FROM),
     )
     if PICK_FROM == "microwave":
@@ -318,20 +374,26 @@ def plan_pick():
 def plan_place() -> Pose:
     grasp_at_dest = bowl_hook_grasp(
         _bowl_pose_for(PLACE_TO, BOWL_PLACE_POSE_TASK),
-        angle_rad=PLACE_ANGLE_RAD,
+        angle_rad=_angle_for("place", PLACE_TO),
         approach_tilt_rad=_tilt_for(PLACE_TO),
     )
     return grasp_at_dest.grasp_pose
 
 
 def plan_midpoint(
-    angle_rad: float = MIDPOINT_ANGLE_RAD,
+    angle_rad: float | None = None,
     approach_tilt_rad: float | None = None,
 ) -> Pose:
     """TCP pose for carrying the held bowl through the midpoint XY at
-    transit_z. Orientation is explicit, matching the plate microwave task's
-    current midpoint planning style. By default the tilt still follows the
-    place side so microwave-side entries stay ceiling-safe."""
+    transit_z. ``angle_rad=None`` resolves to ``MIDPOINT_ANGLE_RAD`` if
+    set, else to the place-leg angle. Tilt likewise defaults to the
+    place-side tilt so microwave-side entries stay ceiling-safe."""
+    if angle_rad is None:
+        angle_rad = (
+            MIDPOINT_ANGLE_RAD
+            if MIDPOINT_ANGLE_RAD is not None
+            else _angle_for("place", PLACE_TO)
+        )
     if approach_tilt_rad is None:
         approach_tilt_rad = _tilt_for(PLACE_TO)
     grasp_at_midpoint = bowl_hook_grasp(
@@ -478,6 +540,8 @@ def _plan_sim_legs(grasp, place_pose: Pose, config: PickPlaceConfig):
                 plant_context=approach_plant_ctx,
                 use_rrt_fallback=MOTION_PLAN_RRT_FALLBACK,
                 rrt_diagram=approach_diagram,
+                rrt_max_iters=MOTION_PLAN_RRT_MAX_ITERS,
+                rrt_shortcut_attempts=MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS,
                 min_clearance_m=0.01,
             )
             legs.append(("pre-pick approach to grasp hover", approach_plan))
@@ -563,6 +627,8 @@ def _plan_sim_legs(grasp, place_pose: Pose, config: PickPlaceConfig):
                 current_q=cur_q,
                 use_rrt_fallback=MOTION_PLAN_RRT_FALLBACK,
                 rrt_diagram=carry_diagram,
+                rrt_max_iters=MOTION_PLAN_RRT_MAX_ITERS,
+                rrt_shortcut_attempts=MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS,
                 align_tcp_axis=bowl_up_tcp,
                 align_tcp_axis_world=np.array([0.0, 0.0, 1.0]),
                 align_tcp_axis_tolerance_rad=CARRY_BOWL_LEVEL_TOLERANCE_RAD,
@@ -644,6 +710,8 @@ def _plan_sim_legs(grasp, place_pose: Pose, config: PickPlaceConfig):
                     current_q=cur_q,
                     use_rrt_fallback=MOTION_PLAN_RRT_FALLBACK,
                     rrt_diagram=return_diagram,
+                    rrt_max_iters=MOTION_PLAN_RRT_MAX_ITERS,
+                    rrt_shortcut_attempts=MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS,
                     min_clearance_m=0.01,
                 )
                 break
@@ -683,7 +751,22 @@ def _run_sim(grasp, place_pose: Pose, config: PickPlaceConfig) -> int:
               f"duration={plan.duration_s:.2f}s  "
               f"clearance={plan.min_clearance_m * 1000:.1f}mm")
 
-    sim_world = replace(WORLD, in_hand={ARM: ("bowl", None)})
+    # Sim-only scene: drop in the tray at TRAY_POSE_TASK and a static
+    # "target" bowl at the place pose so the meshcat preview shows
+    # where the carried bowl is heading. Cup is skipped here too —
+    # ``INCLUDE_CUP_OBSTACLE=False`` already removes it from planning,
+    # this keeps the viz consistent. Planning above ran against
+    # ``WORLD`` (tray skipped); these additions are visualization-only.
+    sim_world = replace(
+        WORLD,
+        in_hand={ARM: ("bowl", None)},
+        include_objects=True,
+        skip_static_objects=("plate", "cup", "cup_with_stick", "bottle"),
+        object_xyz_overrides={
+            "tray": (TRAY_POSE_TASK.x, TRAY_POSE_TASK.y, TRAY_POSE_TASK.z),
+            "bowl": tuple(float(v) for v in BOWL_PLACE_POSE_TASK.translation),
+        },
+    )
     meshcat = StartMeshcat()
     print(f"\n[sim] meshcat → {meshcat.web_url()}")
     scene = sim_world.build_sim_scene(meshcat=meshcat)
@@ -775,6 +858,8 @@ def _planned_or_linear_transit(
             current_q=_current_q(session),
             use_rrt_fallback=MOTION_PLAN_RRT_FALLBACK,
             rrt_diagram=diagram,
+            rrt_max_iters=MOTION_PLAN_RRT_MAX_ITERS,
+            rrt_shortcut_attempts=MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS,
             align_tcp_axis=bowl_up_tcp,
             align_tcp_axis_world=np.array([0.0, 0.0, 1.0]),
             align_tcp_axis_tolerance_rad=CARRY_BOWL_LEVEL_TOLERANCE_RAD,
@@ -853,15 +938,21 @@ def _print_plan(grasp, place_pose: Pose) -> None:
     print(f"  Place to      : {PLACE_TO}")
     print(f"  Grasp pose    : {grasp.grasp_pose.translation} (task)")
     print(f"  Place pose    : {place_pose.translation} (task)")
-    print(f"  Grasp angle   : {np.degrees(GRASP_ANGLE_RAD):+.0f}°")
-    print(f"  Place angle   : {np.degrees(PLACE_ANGLE_RAD):+.0f}°")
+    print(f"  Grasp angle   : {np.degrees(_angle_for('pick', PICK_FROM)):+.0f}°  (pick @ {PICK_FROM})")
+    print(f"  Place angle   : {np.degrees(_angle_for('place', PLACE_TO)):+.0f}°  (place @ {PLACE_TO})")
     print(f"  Tilt (pick)   : {np.degrees(_tilt_for(PICK_FROM)):+.1f}°")
     print(f"  Tilt (place)  : {np.degrees(_tilt_for(PLACE_TO)):+.1f}°")
     print(f"  Midpoint      : "
           f"{BOWL_MIDPOINT_POSE_TASK.translation if USE_MIDPOINT else 'disabled'}"
           f"{' (task)' if USE_MIDPOINT else ''}")
     if USE_MIDPOINT:
-        print(f"  Midpoint angle: {np.degrees(MIDPOINT_ANGLE_RAD):+.0f}°")
+        mid_angle = (
+            MIDPOINT_ANGLE_RAD
+            if MIDPOINT_ANGLE_RAD is not None
+            else _angle_for("place", PLACE_TO)
+        )
+        print(f"  Midpoint angle: {np.degrees(mid_angle):+.0f}°"
+              f"{' (auto: place-leg)' if MIDPOINT_ANGLE_RAD is None else ''}")
     print(f"  Transit Z     : {CONFIG.transit_z} m")
     if PICK_FROM == "microwave" or PLACE_TO == "microwave":
         print(f"  Microwave entry Z : {MICROWAVE_ENTRY_Z} m")
@@ -985,12 +1076,18 @@ def main(
     dry: bool = False,
     mode: str = "real",
     motion_planning: bool = True,
+    reverse: bool = False,
 ) -> int:
     if not motion_planning:
         global USE_MOTION_PLANNING
         USE_MOTION_PLANNING = False
         print("[CLI] motion planning DISABLED — every transit will use the "
               "sequential moveL fallback (the original pre-planner flow).")
+
+    if reverse:
+        global PICK_FROM, PLACE_TO
+        PICK_FROM, PLACE_TO = PLACE_TO, PICK_FROM
+        print(f"[CLI] --reverse: PICK_FROM={PICK_FROM}, PLACE_TO={PLACE_TO}")
 
     grasp = plan_pick()
     place_pose = plan_place()
@@ -1044,8 +1141,19 @@ if __name__ == "__main__":
             "forces it for every segment up front."
         ),
     )
+    ap.add_argument(
+        "--reverse",
+        action="store_true",
+        help=(
+            "Swap PICK_FROM and PLACE_TO. Side-keyed angles/tilts route "
+            "automatically, so the pick/place legs and their orientations "
+            "flip to match. Useful for running the inverse task without "
+            "editing the source."
+        ),
+    )
     args = ap.parse_args()
     raise SystemExit(main(
         dry=args.dry, mode=args.mode,
         motion_planning=not args.no_motion_planning,
+        reverse=args.reverse,
     ))

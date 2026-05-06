@@ -48,7 +48,7 @@ TCP yaw by ``angle_rad + π``, so picking the rim angle orients the
 wrist on the OPPOSITE side of the plate. The microwave door faces
 task -Y, so for a microwave-side leg the wrist should sit on the +Y
 side of the plate (forearm exits back through the -Y door). The user-
-tuned ``PLACE_ANGLE_RAD = -0.88 rad`` (~-50°) places the wrist at
+tuned ``ANGLE_AT_MICROWAVE_RAD = -0.88 rad`` (~-50°) places the wrist at
 ~+130° around the plate from center, which is mostly +Y from the
 plate's center — consistent with -Y door exit. Re-tune if door
 geometry changes.
@@ -84,22 +84,40 @@ from ..place import place, place_into_box
 from ..session import Session, default_session
 from ..util.poses import Pose, offset_along_tool_z, pose_at_altitude
 from ..util.rtde_convert import rtde_to_pose
+from ..util.tray_layout import (
+    TRAY_DEFAULT_POSE_TASK,
+    TrayPose,
+    place_pose_on_tray,
+)
+from ..planning.scene.objects import PLATE_DEFAULT_TASK_XYZ
 from ..world import World
 
 
 # --- Tunables --------------------------------------------------------------
-# PICK_FROM: Literal["outside", "microwave"] = "outside"
-# PLACE_TO: Literal["outside", "microwave"] = "microwave"
-PICK_FROM: Literal["outside", "microwave"] = "microwave"
-PLACE_TO: Literal["outside", "microwave"] = "outside"
+# Default forward direction: pick OUTSIDE the microwave, place INTO it.
+# ``--reverse`` swaps these (pick from microwave, place outside).
+PICK_FROM: Literal["outside", "microwave"] = "outside"
+PLACE_TO: Literal["outside", "microwave"] = "microwave"
 
 # Free-standing plate poses (used when the corresponding side is "outside").
 # 0.025 m is the height of the plate rim that is reasonable for pickup /
 # setdown — same convention as ``pick_place_plate.py``.
 
-# These are the same given these are the outside poses to set these plates down
-PLATE_PICK_POSE_TASK = Pose(translation=[0.295521, -0.1, 0.01])
-PLATE_PLACE_POSE_TASK = Pose(translation=[0.295521, -0.1, 0.01])
+PLATE_PICK_POSE_TASK = Pose(translation=PLATE_DEFAULT_TASK_XYZ)
+"""Sourced from ``PLATE_DEFAULT_TASK_XYZ`` (planning/scene/objects.py)
+— the canonical lab plate position. Override here with a literal
+``Pose(translation=[...])`` if a one-off setup needs a different start."""
+
+# Tray pose for the outside-side place leg. Sourced from
+# ``TRAY_DEFAULT_POSE_TASK`` (lab-measured, in util/tray_layout.py).
+# Override here with a literal ``TrayPose(...)`` if a one-off layout is
+# needed for this task without touching the canonical value. Plate slot
+# xy and rest-z come from ``TRAY_SLOT_LOCAL_XY`` /
+# ``TRAY_OBJECT_REST_DZ`` (canonical 5 cm lift so the 2F-85 fingers
+# clear the tray rim during release) — edits there auto-propagate.
+TRAY_POSE_TASK = TRAY_DEFAULT_POSE_TASK
+
+PLATE_PLACE_POSE_TASK = place_pose_on_tray("plate", tray=TRAY_POSE_TASK)
 
 # Intermediate waypoint between pick and place. Z is ignored —
 # transit_z sets the carry altitude. Picked at a Cartesian location
@@ -114,22 +132,43 @@ between pick and place. Mirrors ``examples/pick_place_plate.py`` —
 disabling this is what caused the rig over-extend on a long direct
 pick→entry swing."""
 
-# Plate-frame angle at which to engage the rim. Choose so the wrist
-# exits back through the -X microwave door for any microwave-side leg.
-# 2F-85 closes along tool +Y, so the rim-radial axis is tool +X. With
-# ``plate_rim_grasp_edge`` the TCP yaw = angle_rad + π.
+# Plate-frame rim angles, **keyed by both action and side**. Two axes
+# of variation: SIDE (microwave constrains door clearance) and ACTION
+# (pick = empty gripper, place = gripper + plate). Reversing
+# PICK_FROM/PLACE_TO automatically routes the right knob via
+# ``_angle_for(action, side)``. 2F-85 closes along tool +Y, so the
+# rim-radial axis is tool +X; with ``plate_rim_grasp_edge`` the TCP
+# yaw = angle_rad + π.
 
-GRASP_ANGLE_RAD = 0.0
-PLACE_ANGLE_RAD = -np.radians(55)
-# GRASP_ANGLE_RAD = -np.radians(55)
-# PLACE_ANGLE_RAD = 0 # ~-50.6° — same as the non-microwave plate task
+# Microwave-side rim angles. Forearm must exit back through the −Y
+# microwave door at any microwave-side leg. Pick (empty gripper) and
+# place (gripper + plate) may need different orientations because
+# in-cavity clearance with the carried plate is tighter.
+PICK_ANGLE_AT_MICROWAVE_RAD  = -np.radians(55)
+PLACE_ANGLE_AT_MICROWAVE_RAD = PICK_ANGLE_AT_MICROWAVE_RAD
+
+# Outside-side rim angles. Free-standing plate on table or tray; door
+# clearance does not constrain. Pick and place poses are usually at
+# different table locations, so different angles are typical.
+PICK_ANGLE_AT_OUTSIDE_RAD    = 0
+PLACE_ANGLE_AT_OUTSIDE_RAD   = 0  # ~-50.6° — same as the non-microwave plate task
+
+# Default forward run uses (PICK_ANGLE_AT_OUTSIDE_RAD, PLACE_ANGLE_AT_MICROWAVE_RAD);
+# ``--reverse`` uses (PICK_ANGLE_AT_MICROWAVE_RAD, PLACE_ANGLE_AT_OUTSIDE_RAD).
+# Each knob may need independent rig validation.
 
 # Approach angles — used ONLY for the cavity-aware microwave legs
 # (pick_from_box / place_into_box). These are the **physical xy motion
 # direction** the arm moves in during the lateral entry through the
 # door — NOT a plate-rim azimuth. Tool orientation throughout the
-# entry stays at the corresponding GRASP/PLACE orientation; only the
-# placement of the entry point relative to the target changes.
+# entry stays at the corresponding rim angle; only the placement of
+# the entry point relative to the target changes.
+#
+# Each is keyed by which leg uses the microwave: PICK if PICK_FROM ==
+# "microwave", PLACE if PLACE_TO == "microwave". Reversing the task
+# flips which one is active. We keep them as separate constants
+# because the wrist's clearance constraints differ between holding-
+# something (place) and not-holding (pick).
 #
 # Convention: angle measured CCW from task +x.
 #   +90°  = motion in +y (straight through the door, perpendicular)
@@ -140,8 +179,8 @@ PLACE_ANGLE_RAD = -np.radians(55)
 # +90° (perpendicular through door) is the natural default. Set to
 # None to fall back to ``entry_xy_for_pose``, which derives the entry
 # heading from the tool axis instead of an explicit motion angle.
-APPROACH_ANGLE_RAD = np.radians(90)
-RELEASE_APPROACH_ANGLE_RAD = np.radians(90)
+MICROWAVE_PICK_APPROACH_ANGLE_RAD = np.radians(90)
+MICROWAVE_PLACE_APPROACH_ANGLE_RAD = np.radians(90)
 
 # Constrained altitude inside the cavity. Plate on tray sits at task z
 # ~10 cm (8 + 2 cm rim). Top of plate rim ~ 11 cm. 14 cm gives ~3 cm
@@ -219,6 +258,10 @@ before the planner was added. Useful when the planner can't be trusted
 MOTION_PLAN_RRT_FALLBACK = True
 """Try RRT after KTO when the optimizer cannot find a planned transit."""
 
+MOTION_PLAN_RRT_MAX_ITERS = 2000
+MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS = 20
+"""RRT fallback budget. Lower these to cap worst-case fallback time."""
+
 MOTION_PLAN_AUTO_FALLBACK = True
 """When the motion planner fails (``plan_transit`` raises, or
 ``execute_plan`` reports a failure), fall back to the sequential moveL
@@ -263,48 +306,62 @@ def _plate_pose_for(side: str, default: Pose) -> Pose:
     return default
 
 
+def _angle_for(action: str, side: str) -> float:
+    """Plate-frame rim engagement angle for a given (action, side).
+    Reversal of PICK_FROM/PLACE_TO automatically routes the right knob.
+    Action ∈ {"pick", "place"}; side ∈ {"microwave", "outside"}."""
+    table = {
+        ("pick",  "microwave"): PICK_ANGLE_AT_MICROWAVE_RAD,
+        ("pick",  "outside"):   PICK_ANGLE_AT_OUTSIDE_RAD,
+        ("place", "microwave"): PLACE_ANGLE_AT_MICROWAVE_RAD,
+        ("place", "outside"):   PLACE_ANGLE_AT_OUTSIDE_RAD,
+    }
+    return table[(action, side)]
+
+
 def plan_pick():
     return plate_rim_grasp_edge(
         _plate_pose_for(PICK_FROM, PLATE_PICK_POSE_TASK),
-        angle_rad=GRASP_ANGLE_RAD,
+        angle_rad=_angle_for("pick", PICK_FROM),
     )
 
 
 def plan_place() -> Pose:
     grasp_at_dest = plate_rim_grasp_edge(
         _plate_pose_for(PLACE_TO, PLATE_PLACE_POSE_TASK),
-        angle_rad=PLACE_ANGLE_RAD,
+        angle_rad=_angle_for("place", PLACE_TO),
     )
     return grasp_at_dest.grasp_pose
 
 
-
 def _pick_entry_xy(grasp_pose: Pose) -> np.ndarray:
-    """Entry XY for the microwave pick leg. Uses APPROACH_ANGLE_RAD
-    (motion direction) when set; falls back to the tool-axis-derived
-    ``entry_xy_for_pose`` otherwise."""
-    if APPROACH_ANGLE_RAD is not None:
+    """Entry XY for the microwave pick leg. Uses
+    MICROWAVE_PICK_APPROACH_ANGLE_RAD (motion direction) when set;
+    falls back to the tool-axis-derived ``entry_xy_for_pose``
+    otherwise."""
+    if MICROWAVE_PICK_APPROACH_ANGLE_RAD is not None:
         return entry_xy_for_motion_direction(
             grasp_pose.translation[:2],
-            APPROACH_ANGLE_RAD,
+            MICROWAVE_PICK_APPROACH_ANGLE_RAD,
             clearance=PLATE_ENTRY_CLEARANCE,
         )
     return entry_xy_for_pose(grasp_pose, clearance=PLATE_ENTRY_CLEARANCE)
 
 
 def _place_entry_xy(place_pose: Pose) -> np.ndarray:
-    """Entry XY for the microwave place leg. Uses RELEASE_APPROACH_ANGLE_RAD
-    (motion direction) when set; falls back to ``entry_xy_for_pose``."""
-    if RELEASE_APPROACH_ANGLE_RAD is not None:
+    """Entry XY for the microwave place leg. Uses
+    MICROWAVE_PLACE_APPROACH_ANGLE_RAD (motion direction) when set;
+    falls back to ``entry_xy_for_pose``."""
+    if MICROWAVE_PLACE_APPROACH_ANGLE_RAD is not None:
         return entry_xy_for_motion_direction(
             place_pose.translation[:2],
-            RELEASE_APPROACH_ANGLE_RAD,
+            MICROWAVE_PLACE_APPROACH_ANGLE_RAD,
             clearance=PLATE_ENTRY_CLEARANCE,
         )
     return entry_xy_for_pose(place_pose, clearance=PLATE_ENTRY_CLEARANCE)
 
 
-def plan_midpoint(angle_rad: float = GRASP_ANGLE_RAD) -> Pose:
+def plan_midpoint(angle_rad: float = MIDPOINT_ANGLE_RAD) -> Pose:
     """TCP pose for carrying the held plate through the midpoint XY at
     transit_z. Orientation matches the upcoming PLACE leg so the wrist
     rotation happens during the pick→midpoint leg, not the longer
@@ -424,6 +481,8 @@ def _plan_sim_legs(grasp, place_pose: Pose, config: PickPlaceConfig):
                 plant_context=approach_plant_ctx,
                 use_rrt_fallback=MOTION_PLAN_RRT_FALLBACK,
                 rrt_diagram=approach_diagram,
+                rrt_max_iters=MOTION_PLAN_RRT_MAX_ITERS,
+                rrt_shortcut_attempts=MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS,
                 min_clearance_m=0.01,
             )
             legs.append(("pre-pick approach to grasp hover", approach_plan))
@@ -472,6 +531,8 @@ def _plan_sim_legs(grasp, place_pose: Pose, config: PickPlaceConfig):
             current_q={ARM: chained_arm_q} if chained_arm_q is not None else None,
             use_rrt_fallback=MOTION_PLAN_RRT_FALLBACK,
             rrt_diagram=carry_diagram,
+            rrt_max_iters=MOTION_PLAN_RRT_MAX_ITERS,
+            rrt_shortcut_attempts=MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS,
             align_tcp_axis=plate_normal_tcp,
             align_tcp_axis_world=np.array([0.0, 0.0, 1.0]),
             align_tcp_axis_tolerance_rad=CARRY_PLATE_LEVEL_TOLERANCE_RAD,
@@ -526,6 +587,8 @@ def _plan_sim_legs(grasp, place_pose: Pose, config: PickPlaceConfig):
             current_q={ARM: chained_arm_q} if chained_arm_q is not None else None,
             use_rrt_fallback=MOTION_PLAN_RRT_FALLBACK,
             rrt_diagram=return_diagram,
+            rrt_max_iters=MOTION_PLAN_RRT_MAX_ITERS,
+            rrt_shortcut_attempts=MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS,
             min_clearance_m=0.01,
         )
     except InfeasiblePlanError as exc:
@@ -563,7 +626,22 @@ def _run_sim(grasp, place_pose: Pose, config: PickPlaceConfig) -> int:
               f"duration={plan.duration_s:.2f}s  "
               f"clearance={plan.min_clearance_m * 1000:.1f}mm")
 
-    sim_world = replace(WORLD, in_hand={ARM: ("plate", None)})
+    # Sim-only scene: drop in the tray at TRAY_POSE_TASK and a static
+    # "target" plate at the place pose so the meshcat preview shows
+    # where the carried plate is heading. Other static objects are
+    # skipped so the scene only has what's relevant to this leg. The
+    # planner above already ran against ``WORLD`` (include_objects=
+    # False); these extras are visualization-only.
+    sim_world = replace(
+        WORLD,
+        in_hand={ARM: ("plate", None)},
+        include_objects=True,
+        skip_static_objects=("cup", "cup_with_stick", "bowl", "bottle"),
+        object_xyz_overrides={
+            "tray": (TRAY_POSE_TASK.x, TRAY_POSE_TASK.y, TRAY_POSE_TASK.z),
+            "plate": tuple(float(v) for v in PLATE_PLACE_POSE_TASK.translation),
+        },
+    )
     meshcat = StartMeshcat()
     print(f"\n[sim] meshcat → {meshcat.web_url()}")
     scene = sim_world.build_sim_scene(meshcat=meshcat)
@@ -658,6 +736,8 @@ def _planned_or_linear_transit(
             current_q=_current_q(session),
             use_rrt_fallback=MOTION_PLAN_RRT_FALLBACK,
             rrt_diagram=diagram,
+            rrt_max_iters=MOTION_PLAN_RRT_MAX_ITERS,
+            rrt_shortcut_attempts=MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS,
             align_tcp_axis=plate_normal_tcp,
             align_tcp_axis_world=np.array([0.0, 0.0, 1.0]),
             align_tcp_axis_tolerance_rad=CARRY_PLATE_LEVEL_TOLERANCE_RAD,
@@ -762,14 +842,14 @@ def _print_plan(grasp, place_pose: Pose) -> None:
     print(f"  Place to      : {PLACE_TO}")
     print(f"  Grasp pose    : {grasp.grasp_pose.translation} (task)")
     print(f"  Place pose    : {place_pose.translation} (task)")
-    print(f"  Grasp angle   : {np.degrees(GRASP_ANGLE_RAD):+.0f}°  (plate-rim azimuth)")
-    print(f"  Place angle   : {np.degrees(PLACE_ANGLE_RAD):+.0f}°  (plate-rim azimuth)")
+    print(f"  Grasp angle   : {np.degrees(_angle_for('pick', PICK_FROM)):+.0f}°  (pick @ {PICK_FROM}, plate-rim azimuth)")
+    print(f"  Place angle   : {np.degrees(_angle_for('place', PLACE_TO)):+.0f}°  (place @ {PLACE_TO}, plate-rim azimuth)")
     if PICK_FROM == "microwave":
-        a = APPROACH_ANGLE_RAD
+        a = MICROWAVE_PICK_APPROACH_ANGLE_RAD
         print(f"  Approach (pick) : "
               f"{('%+.0f° (motion dir)' % np.degrees(a)) if a is not None else 'tool-axis (entry_xy_for_pose)'}")
     if PLACE_TO == "microwave":
-        a = RELEASE_APPROACH_ANGLE_RAD
+        a = MICROWAVE_PLACE_APPROACH_ANGLE_RAD
         print(f"  Approach (place): "
               f"{('%+.0f° (motion dir)' % np.degrees(a)) if a is not None else 'tool-axis (entry_xy_for_pose)'}")
     print(f"  Midpoint      : "
@@ -879,12 +959,18 @@ def main(
     dry: bool = False,
     mode: str = "real",
     motion_planning: bool = True,
+    reverse: bool = False,
 ) -> int:
     if not motion_planning:
         global USE_MOTION_PLANNING
         USE_MOTION_PLANNING = False
         print("[CLI] motion planning DISABLED — every transit will use the "
               "sequential moveL fallback (the original pre-planner flow).")
+
+    if reverse:
+        global PICK_FROM, PLACE_TO
+        PICK_FROM, PLACE_TO = PLACE_TO, PICK_FROM
+        print(f"[CLI] --reverse: PICK_FROM={PICK_FROM}, PLACE_TO={PLACE_TO}")
 
     grasp = plan_pick()
     place_pose = plan_place()
@@ -940,8 +1026,19 @@ if __name__ == "__main__":
             "it for every segment up front."
         ),
     )
+    ap.add_argument(
+        "--reverse",
+        action="store_true",
+        help=(
+            "Swap PICK_FROM and PLACE_TO. Side-keyed angles route "
+            "automatically, so the pick/place legs and their orientations "
+            "flip to match. Useful for running the inverse task without "
+            "editing the source."
+        ),
+    )
     args = ap.parse_args()
     raise SystemExit(main(
         dry=args.dry, mode=args.mode,
         motion_planning=not args.no_motion_planning,
+        reverse=args.reverse,
     ))

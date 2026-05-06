@@ -9,7 +9,7 @@ Two flavours live here:
     sensible defaults, so they're meant to be CALLED FROM ROUTINES, not
     invoked from the CLI.
 
-  - **End-to-end single-arm tasks** (``pick_place_plate``) wrap a
+  - **End-to-end single-arm tasks** (``pick_place_cup``) wrap a
     self-contained operation behind ``main(dry=False) -> int`` so they
     can run standalone OR be dispatched from ``run.py task <name>``.
     Module-level constants pin the workspace coordinates; edit the
@@ -23,22 +23,34 @@ and will raise a clear error until set.
 """
 
 from . import (
+<<<<<<< HEAD
     pick_place_bowl_hook_microwave,
     pick_place_cup,
     pick_place_plate,
     pick_place_plate_microwave,
     pour_bottle,
     pour_bottle_hook,
+=======
+    pick_place_cup,
+    pick_place_cup_microwave,
+    pick_place_cup_tray,
+>>>>>>> main
     press_button,
 )
 
 # Maps CLI task name → main(dry: bool = False) -> int.
 TASKS = {
+<<<<<<< HEAD
     "pick_place_bowl_hook_microwave": pick_place_bowl_hook_microwave.main,
     "pick_place_plate": pick_place_plate.main,
     "pick_place_plate_microwave": pick_place_plate_microwave.main,
     "pick_place_cup": pick_place_cup.main,
     "pour_bottle": pour_bottle.main,
     "pour_bottle_hook": pour_bottle_hook.main,
+=======
+    "pick_place_cup": pick_place_cup.main,
+    "pick_place_cup_tray": pick_place_cup_tray.main,
+    "pick_place_cup_microwave": pick_place_cup_microwave.main,
+>>>>>>> main
     "press_button": press_button.main,
 }
