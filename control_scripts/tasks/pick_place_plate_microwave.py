@@ -89,7 +89,6 @@ from ..util.tray_layout import (
     TrayPose,
     place_pose_on_tray,
 )
-from ..lab_landmarks import CUP_MICROWAVE_TOP_XYZ_TASK
 from ..planning.scene.objects import PLATE_DEFAULT_TASK_XYZ
 from ..world import World
 
@@ -120,18 +119,13 @@ TRAY_POSE_TASK = TRAY_DEFAULT_POSE_TASK
 
 PLATE_PLACE_POSE_TASK = place_pose_on_tray("plate", tray=TRAY_POSE_TASK)
 
-# By the time this task runs in the demo sequence, ``pick_place_cup_tray``
-# has already deposited the cup at the tray's "cup" slot. Keep it modelled
-# as a static obstacle so the plate-carry plan routes around it.
-CUP_ON_TRAY_POSE_TASK = place_pose_on_tray("cup", tray=TRAY_POSE_TASK)
-
 # Intermediate waypoint between pick and place. Z is ignored —
 # transit_z sets the carry altitude. Picked at a Cartesian location
 # that breaks long pick→place swings into two shorter, predictable
 # legs. Same value as ``examples/pick_place_plate.py`` since the pick/
 # place geometry is similar.
 PLATE_MIDPOINT_POSE_TASK = Pose(translation=[0.0, 0.0, 0.0])
-USE_MIDPOINT = False
+USE_MIDPOINT = True
 MIDPOINT_ANGLE_RAD = np.radians(0)
 """Whether to carry the held plate through ``PLATE_MIDPOINT_POSE_TASK``
 between pick and place. Mirrors ``examples/pick_place_plate.py`` —
@@ -150,7 +144,7 @@ pick→entry swing."""
 # microwave door at any microwave-side leg. Pick (empty gripper) and
 # place (gripper + plate) may need different orientations because
 # in-cavity clearance with the carried plate is tighter.
-PICK_ANGLE_AT_MICROWAVE_RAD  = -np.radians(60)
+PICK_ANGLE_AT_MICROWAVE_RAD  = -np.radians(55)
 PLACE_ANGLE_AT_MICROWAVE_RAD = PICK_ANGLE_AT_MICROWAVE_RAD
 
 # Outside-side rim angles. Free-standing plate on table or tray; door
@@ -221,29 +215,13 @@ them. Set False on tasks that have no planner-driven segments."""
 
 WORLD = World(
     include_microwave=True,
-    include_objects=True,
-    # The plate is welded via in_hand during the carry leg, so drop the
-    # static plate to avoid double-loading. bowl / bottle are out of
-    # scene at this point in the demo. Keep ``cup`` (on the tray),
-    # ``cup_with_stick`` (placed on the microwave roof earlier in the
-    # demo by ``pick_place_cup_microwave``), and ``tray`` — all three
-    # overridden below to their measured task-frame positions.
-    skip_static_objects=("plate", "bowl", "bottle"),
-    object_xyz_overrides={
-        "cup": tuple(float(v) for v in CUP_ON_TRAY_POSE_TASK.translation),
-        "cup_with_stick": tuple(float(v) for v in CUP_MICROWAVE_TOP_XYZ_TASK),
-        "tray": (TRAY_POSE_TASK.x, TRAY_POSE_TASK.y, TRAY_POSE_TASK.z),
-    },
+    include_objects=False,                         # task uses live grasp pose, not the demo plate
     robotiq_mode="closed",
     microwave_door_open_rad=MICROWAVE_DOOR_OPEN_ANGLE_RAD,
 )
 """Single source of env truth for this task's planning + sim scenes.
 ``in_hand`` is overridden per-leg via ``dataclasses.replace`` (plate welded
-to the gripper for the post-pick carry, empty for the post-place return).
-The cup sits at its tray-slot position (placed earlier in the demo by
-``pick_place_cup_tray``); the cup-with-stick sits on the microwave roof
-(placed earlier by ``pick_place_cup_microwave``); both are obstacles the
-plate carry plans around."""
+to the gripper for the post-pick carry, empty for the post-place return)."""
 
 CONFIG = PickPlaceConfig(
     transit_z=0.22,
@@ -280,7 +258,7 @@ before the planner was added. Useful when the planner can't be trusted
 MOTION_PLAN_RRT_FALLBACK = True
 """Try RRT after KTO when the optimizer cannot find a planned transit."""
 
-MOTION_PLAN_RRT_MAX_ITERS = 10000
+MOTION_PLAN_RRT_MAX_ITERS = 2000
 MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS = 20
 """RRT fallback budget. Lower these to cap worst-case fallback time."""
 
@@ -435,46 +413,25 @@ def _build_planning_context(*, attached_plate: bool):
     return diagram, plant, plant_context
 
 
-def _expected_motion_leg_count() -> int:
-    """Number of free-space legs both real and sim require."""
-    expected = 1  # post-pick carry
-    if MOTION_PLAN_PRE_PICK_APPROACH:
-        expected += 1
-    # Plate task always returns after place.
-    expected += 1
-    return expected
-
-
-def _plan_motion_legs(
-    grasp,
-    place_pose: Pose,
-    config: PickPlaceConfig,
-    *,
-    start_pose: Pose | None = None,
-    start_q: dict[str, np.ndarray] | None = None,
-    log_prefix: str = "sim",
-):
-    """Plan the full free-space chain before any task motion is commanded.
+def _plan_sim_legs(grasp, place_pose: Pose, config: PickPlaceConfig):
+    """Plan the same motion-planned segments the real path plans, but
+    from synthetic start states (no live RTDE).
 
     Three legs (when ``MOTION_PLAN_PRE_PICK_APPROACH=True``, otherwise
     skip the first):
 
-      1. pre-pick approach — start pose → grasp hover. No plate in hand.
+      1. pre-pick approach — HOME (FK) → grasp hover. No plate in hand.
+         Mirrors the planned transit run before ``pick`` on the rig.
       2. post-pick carry   — grasp hover (plate in hand) → optional
          midpoint → place hover. Starting altitude mirrors what
          ``pick``/``pick_from_box`` actually leaves on the rig:
          descend to grasp, close, ascend back to ``config.transit_z``.
-      3. post-place return — place hover (no plate) → start/midpoint hover.
-
-    ``start_pose`` / ``start_q`` are supplied by real mode from live RTDE.
-    Sim mode leaves them unset, so the planning-scene default HOME is used.
+      3. post-place return — place hover (no plate) → midpoint hover.
     """
     from ..planning.transit import (
         InfeasiblePlanError,
-        ikfast_seeds_at_pose,
         plan_transit,
         plan_transit_chained,
-        plan_transit_multi_seed,
     )
 
     from ..planning.transit import _arm_model_instance, _arm_position_indices, _tcp_frame
@@ -500,6 +457,9 @@ def _plan_motion_legs(
         approach_plant_ctx = approach_plant.GetMyMutableContextFromRoot(
             approach_root,
         )
+        # Read HOME pose via FK from plant defaults so the approach
+        # starts where the rig would at task entry (sim seeds from the
+        # plant's default_home_q which both arms land at).
         approach_arm_idx = _arm_position_indices(
             approach_plant, _arm_model_instance(approach_plant, ARM),
         )
@@ -507,77 +467,24 @@ def _plan_motion_legs(
             approach_plant, _arm_model_instance(approach_plant, ARM),
         )
         X = approach_tcp_frame.CalcPoseInWorld(approach_plant_ctx)
-        default_start_pose = Pose(
+        home_pose = Pose(
             translation=np.asarray(X.translation()),
             rotation=RotUtil.from_matrix(X.rotation().matrix()),
         )
-        chain_start_pose = start_pose if start_pose is not None else default_start_pose
-        approach_waypoints = [chain_start_pose, _hover_before_pick(grasp, config)]
-        # Multi-seed at the START pose: enumerate every ikfast branch
-        # at ``chain_start_pose`` and try each as the planning arm's IK
-        # seed. Sorted by joint distance to ``start_q[ARM]`` (when
-        # provided), so real mode tries the live-q branch first — same
-        # effective seed as the old single-seed call. Fallback branches
-        # give the planner a way out when the live IK branch is awkward
-        # for the upcoming grasp hover (e.g. near-singularity wrist).
-        # Sim mode: ``start_q`` is None → branches are returned in
-        # ikfast's natural order, also fine.
-        seed_arm_q = (
-            start_q[ARM] if (start_q is not None and ARM in start_q) else None
-        )
-        approach_seeds = list(ikfast_seeds_at_pose(
-            ARM, chain_start_pose, seed_arm_q=seed_arm_q,
-        ))
-        if not approach_seeds and seed_arm_q is not None:
-            approach_seeds = [seed_arm_q]
-        # Leg 1 clearance budget: when the upcoming hover is INSIDE the
-        # microwave (PICK_FROM == "microwave"), the approach has to
-        # squeeze past the URDF Vention's conservative ``lower_trap_+x``
-        # box — same tight neighbourhood that forced ``CARRY_MIN_CLEARANCE_M
-        # = 5 mm`` for the carry. Use that smaller budget here too in
-        # reverse mode; default 10 mm everywhere else.
-        approach_min_clearance = (
-            CARRY_MIN_CLEARANCE_M if PICK_FROM == "microwave" else 0.01
-        )
-        print(f"\n[{log_prefix}] planning pre-pick approach "
-              f"({len(approach_seeds) or 1} start-branch seed(s), "
-              f"min_clearance={approach_min_clearance*1000:.1f} mm)...")
+        approach_waypoints = [home_pose, _hover_before_pick(grasp, config)]
+        print("\n[sim] planning pre-pick approach...")
         try:
-            approach_plan = plan_transit_multi_seed(
-                arm=ARM,
-                log_label=f"[{log_prefix}] pre-pick approach",
-                seed_candidates=approach_seeds,
+            approach_plan = plan_transit(
                 plant=approach_plant,
+                arm=ARM,
                 waypoints=approach_waypoints,
                 plant_context=approach_plant_ctx,
-                current_q=start_q,
                 use_rrt_fallback=MOTION_PLAN_RRT_FALLBACK,
                 rrt_diagram=approach_diagram,
                 rrt_max_iters=MOTION_PLAN_RRT_MAX_ITERS,
                 rrt_shortcut_attempts=MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS,
-                min_clearance_m=approach_min_clearance,
+                min_clearance_m=0.01,
             )
-            # Real-mode safety: the multi-seed retry can pick a non-live
-            # branch as the plan's start q when the live-q seed is
-            # infeasible. Executing that plan from the live rig would
-            # require a moveJ to a different start q first — surface
-            # rather than silently jump.
-            if start_q is not None and ARM in start_q:
-                q_plan_start = np.asarray(
-                    approach_plan.trajectory.value(
-                        approach_plan.trajectory.start_time(),
-                    ),
-                ).flatten()[approach_arm_idx]
-                start_delta = float(np.linalg.norm(
-                    q_plan_start - np.asarray(start_q[ARM], dtype=float),
-                ))
-                if start_delta > 0.05:
-                    print(
-                        f"  ✗ pre-pick approach plan starts at q "
-                        f"{start_delta:.3f} rad (~{np.degrees(start_delta):.1f}°) "
-                        f"from the live arm config — won't execute from rig."
-                    )
-                    return legs
             legs.append(("pre-pick approach to grasp hover", approach_plan))
             # Chain: the carry leg starts where the approach ended.
             chained_arm_q = np.asarray(
@@ -643,14 +550,23 @@ def _plan_motion_legs(
     return_diagram, return_plant, _, _ = WORLD.build_planning_scene()
     return_root = return_diagram.CreateDefaultContext()
     return_plant_ctx = return_plant.GetMyMutableContextFromRoot(return_root)
+    return_arm_idx = _arm_position_indices(
+        return_plant, _arm_model_instance(return_plant, ARM),
+    )
 
-    # Return to the chain start (sim HOME or the real task-entry pose)
-    # rather than the midpoint hover. That keeps the whole free-space
-    # chain knowable before real execution starts.
+    # Return to HOME (the FK of plant defaults computed above for the
+    # approach leg's start) rather than the midpoint hover. HOME is the
+    # rig's neutral pose by construction — IK is trivial there, and the
+    # elbow/wrist quadrants match the carry's terminal joint config so
+    # the q3/q5 singularity-branch lock passes. Going to a midpoint
+    # at the workspace edge can force an elbow flip that the lock
+    # forbids (was the failure mode for bowl).
     if MOTION_PLAN_PRE_PICK_APPROACH:
-        return_target_pose = chain_start_pose
-        return_target_label = "start hover" if start_pose is not None else "HOME hover"
+        return_target_pose = home_pose
+        return_target_label = "HOME hover"
     else:
+        # Fall back to the midpoint when we don't have a cached
+        # home_pose (approach leg disabled).
         midpoint_pose = plan_midpoint(angle_rad=MIDPOINT_ANGLE_RAD)
         return_target_pose = pose_at_altitude(midpoint_pose, config.transit_z)
         return_target_label = "midpoint hover"
@@ -659,19 +575,10 @@ def _plan_motion_legs(
         return_target_pose,
     ]
 
-    # Same logic as leg 1: the return leg starts at the place hover.
-    # In FORWARD mode that hover is inside the microwave (tight Vention
-    # neighbourhood), so use the carry's smaller clearance budget.
-    return_min_clearance = (
-        CARRY_MIN_CLEARANCE_M if PLACE_TO == "microwave" else 0.01
-    )
     try:
         return_plan = plan_transit_chained(
             arm=ARM,
-            log_label=(
-                f"post-place return to {return_target_label} "
-                f"(min_clearance={return_min_clearance*1000:.1f} mm)"
-            ),
+            log_label=f"post-place return to {return_target_label}",
             prev_terminal_pose=prev_terminal_pose,
             chained_arm_q=chained_arm_q,
             plant=return_plant,
@@ -682,7 +589,7 @@ def _plan_motion_legs(
             rrt_diagram=return_diagram,
             rrt_max_iters=MOTION_PLAN_RRT_MAX_ITERS,
             rrt_shortcut_attempts=MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS,
-            min_clearance_m=return_min_clearance,
+            min_clearance_m=0.01,
         )
     except InfeasiblePlanError as exc:
         print(f"  ✗ post-place return plan infeasible: {exc}")
@@ -690,16 +597,6 @@ def _plan_motion_legs(
     legs.append((f"post-place return to {return_target_label}", return_plan))
 
     return legs
-
-
-def _plan_sim_legs(grasp, place_pose: Pose, config: PickPlaceConfig):
-    """Plan the same full free-space chain used by real mode, from HOME."""
-    return _plan_motion_legs(
-        grasp,
-        place_pose,
-        config,
-        log_prefix="sim",
-    )
 
 
 def _run_sim(grasp, place_pose: Pose, config: PickPlaceConfig) -> int:
@@ -717,16 +614,9 @@ def _run_sim(grasp, place_pose: Pose, config: PickPlaceConfig) -> int:
 
     from ..planning import preview
 
-    if not USE_MOTION_PLANNING:
-        print("[sim] motion planning is disabled, but sim mode replays planned "
-              "free-space legs. Run real mode with --no-motion-planning for "
-              "the sequential moveL fallback.")
-        return 1
-
     legs = _plan_sim_legs(grasp, place_pose, config)
-    expected_legs = _expected_motion_leg_count()
-    if len(legs) != expected_legs:
-        print(f"[sim] planned {len(legs)}/{expected_legs} required legs; aborting")
+    if not legs:
+        print("[sim] no legs planned; aborting")
         return 1
 
     print()
@@ -736,17 +626,20 @@ def _run_sim(grasp, place_pose: Pose, config: PickPlaceConfig) -> int:
               f"duration={plan.duration_s:.2f}s  "
               f"clearance={plan.min_clearance_m * 1000:.1f}mm")
 
-    # Sim-only additions on top of WORLD: weld the plate to the gripper,
-    # un-skip "plate" so the static target plate at the place pose is
-    # visible in meshcat, and inherit WORLD's cup-on-tray + tray
-    # overrides (so what the user sees matches what the planner sees).
+    # Sim-only scene: drop in the tray at TRAY_POSE_TASK and a static
+    # "target" plate at the place pose so the meshcat preview shows
+    # where the carried plate is heading. Other static objects are
+    # skipped so the scene only has what's relevant to this leg. The
+    # planner above already ran against ``WORLD`` (include_objects=
+    # False); these extras are visualization-only.
     sim_world = replace(
         WORLD,
         in_hand={ARM: ("plate", None)},
-        skip_static_objects=("bowl", "bottle"),
+        include_objects=True,
+        skip_static_objects=("cup", "cup_with_stick", "bowl", "bottle"),
         object_xyz_overrides={
-            **WORLD.object_xyz_overrides,
-            "plate": tuple(float(v) for v in place_pose.translation),
+            "tray": (TRAY_POSE_TASK.x, TRAY_POSE_TASK.y, TRAY_POSE_TASK.z),
+            "plate": tuple(float(v) for v in PLATE_PLACE_POSE_TASK.translation),
         },
     )
     meshcat = StartMeshcat()
@@ -885,40 +778,6 @@ def _planned_or_linear_transit(
     return True
 
 
-def _execute_planned_transit(
-    session: Session,
-    label: str,
-    plan,
-    config: PickPlaceConfig,
-) -> bool:
-    """Execute a precomputed transit plan with the task's execution knobs."""
-    from ..planning.execute import execute_plan
-
-    print(f"\n→ execute planned transit: {label}")
-    print(f"  planner={plan.metadata.get('planner')}  "
-          f"duration={plan.duration_s:.2f}s  "
-          f"clearance={plan.min_clearance_m * 1000:.1f}mm")
-    fallback = plan.metadata.get("spline_fallback_reason")
-    if fallback:
-        print(f"  (spline fell back to KTO: {fallback})")
-    kto_fallback = plan.metadata.get("kto_fallback_reason")
-    if kto_fallback:
-        print(f"  (KTO fell back to RRT: {kto_fallback})")
-
-    result = execute_plan(
-        plan,
-        session,
-        method="moveJ_path",
-        n_waypoints=MOTION_PLAN_N_WAYPOINTS,
-        blend_r_m=MOTION_PLAN_BLEND_R_M,
-    )
-    if not result.success:
-        print(f"  ✗ planned transit execution failed: {result.reason}")
-        return False
-    print("  ✓ planned transit reached.")
-    return True
-
-
 def _hover_before_pick(grasp, config: PickPlaceConfig) -> Pose:
     """The transit-altitude pose ``pick`` / ``pick_from_box`` will target
     before descending. Mirrors ``_hover_before_place`` for the pick side.
@@ -1018,42 +877,16 @@ def run_on_arm(
     place_pose: Pose,
     config: PickPlaceConfig = CONFIG,
 ) -> bool:
-    planned_legs: list[tuple[str, object]] = []
-    if USE_MOTION_PLANNING:
-        print("\n[real] pre-planning all free-space motion legs before execution...")
-        planned_legs = _plan_motion_legs(
-            grasp,
-            place_pose,
-            config,
-            start_pose=_current_tcp_pose_task(arm),
-            start_q=_current_q(session),
-            log_prefix="real",
-        )
-        expected_legs = _expected_motion_leg_count()
-        if len(planned_legs) != expected_legs:
-            print(f"[real] planned {len(planned_legs)}/{expected_legs} required "
-                  "legs; aborting before commanding motion.")
-            return False
-        print("[real] all free-space motion legs planned successfully.")
-
-    leg_i = 0
-
     if MOTION_PLAN_PRE_PICK_APPROACH:
-        if USE_MOTION_PLANNING:
-            label, plan = planned_legs[leg_i]
-            leg_i += 1
-            if not _execute_planned_transit(session, label, plan, config):
-                return False
-        else:
-            if not _planned_or_linear_transit(
-                session,
-                arm,
-                "pre-pick approach to grasp hover",
-                [_current_tcp_pose_task(arm), _hover_before_pick(grasp, config)],
-                config,
-                attached_plate=False,
-            ):
-                return False
+        if not _planned_or_linear_transit(
+            session,
+            arm,
+            "pre-pick approach to grasp hover",
+            [_current_tcp_pose_task(arm), _hover_before_pick(grasp, config)],
+            config,
+            attached_plate=False,
+        ):
+            return False
 
     print(f"\n→ pick: {grasp.description}  (from {PICK_FROM})")
     if PICK_FROM == "microwave":
@@ -1068,26 +901,20 @@ def run_on_arm(
         return False
     print("  ✓ pick succeeded.")
 
-    if USE_MOTION_PLANNING:
-        label, plan = planned_legs[leg_i]
-        leg_i += 1
-        if not _execute_planned_transit(session, label, plan, config):
-            return False
-    else:
-        carry_waypoints = [_current_tcp_pose_task(arm)]
-        if USE_MIDPOINT:
-            midpoint_pose = plan_midpoint(angle_rad=MIDPOINT_ANGLE_RAD)
-            carry_waypoints.append(pose_at_altitude(midpoint_pose, config.transit_z))
-        carry_waypoints.append(_hover_before_place(place_pose, config))
-        if not _planned_or_linear_transit(
-            session,
-            arm,
-            "post-pick carry to place hover",
-            carry_waypoints,
-            config,
-            attached_plate=True,
-        ):
-            return False
+    carry_waypoints = [_current_tcp_pose_task(arm)]
+    if USE_MIDPOINT:
+        midpoint_pose = plan_midpoint(angle_rad=MIDPOINT_ANGLE_RAD)
+        carry_waypoints.append(pose_at_altitude(midpoint_pose, config.transit_z))
+    carry_waypoints.append(_hover_before_place(place_pose, config))
+    if not _planned_or_linear_transit(
+        session,
+        arm,
+        "post-pick carry to place hover",
+        carry_waypoints,
+        config,
+        attached_plate=True,
+    ):
+        return False
 
     if USE_MIDPOINT:
         print("  ✓ carried through midpoint.")
@@ -1111,25 +938,20 @@ def run_on_arm(
 
     print("\nDone — arm retracted to transit altitude.")
 
-    if USE_MOTION_PLANNING:
-        label, plan = planned_legs[leg_i]
-        leg_i += 1
-        if not _execute_planned_transit(session, label, plan, config):
-            return False
-    else:
-        midpoint_pose = plan_midpoint(angle_rad=MIDPOINT_ANGLE_RAD)
-        if not _planned_or_linear_transit(
-            session,
-            arm,
-            "post-place return to midpoint",
-            [
-                _current_tcp_pose_task(arm),
-                pose_at_altitude(midpoint_pose, config.transit_z),
-            ],
-            config,
-            attached_plate=False,
-        ):
-            return False
+    # return to midpoint at the very end
+    midpoint_pose = plan_midpoint(angle_rad=MIDPOINT_ANGLE_RAD)
+    if not _planned_or_linear_transit(
+        session,
+        arm,
+        "post-place return to midpoint",
+        [
+            _current_tcp_pose_task(arm),
+            pose_at_altitude(midpoint_pose, config.transit_z),
+        ],
+        config,
+        attached_plate=False,
+    ):
+        return False
     return True
 
 
