@@ -105,7 +105,7 @@ UR5E_SHOULDER_OFFSET_FROM_BASE = np.array([0.0, 0.0, 0.1625])
 """Position of the shoulder joint (J2 pivot) in base frame. Used as the
 reference point for the reach-sphere pre-filter."""
 
-UR5E_TCP_OFFSET_ROBOTIQ_M = 0.174
+UR5E_TCP_OFFSET_ROBOTIQ_M = 0.17 #0.174
 """Default TCP Z offset — matches ``calibration.TCP_OFFSET_ROBOTIQ_2F85``."""
 
 UR5E_READY_Q = np.array([0.0, -np.pi / 2, np.pi / 2, -np.pi / 2, -np.pi / 2, 0.0])

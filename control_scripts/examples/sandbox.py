@@ -56,14 +56,14 @@ from ..util.rtde_convert import pose_to_rtde, rtde_to_pose
 # =====================================================================
 
 # Which arm. Options: "ur_left", "ur_right".
-ARM = "ur_right"
+ARM = "ur_left"
 
 # --- Which tests to run. Start with False for motion-producing tests. ---
 RUN_CONNECTION          = True
 RUN_READ_STATE          = True
 RUN_FRAME_CONVERSIONS   = True
 RUN_REACHABILITY_PROBE  = True
-RUN_GRIPPER             = True
+RUN_GRIPPER             = False
 RUN_MOVEJ               = False
 RUN_MOVEL_DELTA         = True
 

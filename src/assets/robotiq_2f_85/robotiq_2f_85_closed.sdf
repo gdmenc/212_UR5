@@ -1,0 +1,121 @@
+<?xml version='1.0'?>
+<!--
+  Robotiq 2F-85 with custom 3-in fingers — STATIC CLOSED variant.
+
+  This is a single rigid body for visualisation + collision in Drake.
+  The Robotiq's parallel-jaw kinematics are NOT modelled; we don't need
+  open/close in sim.
+
+  Frame convention (matches the xacro):
+    origin: at the wrist-3 flange face (= where the gripper bolts on)
+    +z    : toward the fingers
+    +y    : along the fingertip-stroke axis
+    +x    : "side" of gripper
+
+  Geometry summary (closed = fingertip pads touching at y=0):
+    base body : 85 × 60 × 55 mm collision box (visual = base_link mesh)
+    each finger:
+      base section  : 22 × 19.23 × 15.75 mm  (z 54.9..70.65)
+      tip / pad     : 22 ×  7.19 × 60.45 mm  (z 70.65..131.1)
+
+  Update for the actual lab Robotiq + 3-in fingers: the SDF originally
+  modeled the base body as 55 mm tall, but the real Robotiq 2F-85
+  housing on this rig is closer to 123 mm. With a 123 mm base and
+  76.2 mm fingers stacked on top, the fingertips land at 199 mm —
+  TCP_OFFSET_ROBOTIQ_2F85 = 184 mm sits 61 mm into the fingers, 15 mm
+  before the fingertip end. So a welded held object (plate, cup, ...)
+  with its rim at TCP is "inside the fingers" by 15 mm. The base is
+  modeled as a 40 mm radius cylinder spanning z ∈ [0, 123] mm; the
+  finger boxes are unchanged in size but shifted up by 68 mm so they
+  sit on top of the new base.
+-->
+<sdf xmlns:drake="http://drake.mit.edu" version="1.8">
+  <model name="robotiq_2f_85">
+    <link name="robotiq_2f_85">
+      <inertial>
+        <pose>0.0 0.0 0.060 0 0 0</pose>
+        <mass>0.93</mass>
+        <inertia>
+          <ixx>1.5e-3</ixx><ixy>0</ixy><ixz>0</ixz>
+          <iyy>1.5e-3</iyy><iyz>0</iyz>
+          <izz>5.0e-4</izz>
+        </inertia>
+      </inertial>
+
+      <!-- Base body: visual = real Robotiq base_link mesh + cylinder
+           extension to fill the gap up to the fingers (the mesh alone is
+           too short for the actual lab Robotiq + 3-in fingers).
+           Collision = the full 12.3 cm cylinder. -->
+      <visual name="base_visual">
+        <pose>0 0 0 0 0 0</pose>
+        <geometry>
+          <mesh>
+            <uri>../../../ur_description/robotiq_2f_85_gripper_visualization/meshes/visual/robotiq_arg2f_85_base_link.dae</uri>
+            <scale>0.001 0.001 0.001</scale>
+          </mesh>
+        </geometry>
+      </visual>
+      <visual name="base_extension_visual">
+        <pose>0 0 0.0615 0 0 0</pose>
+        <geometry>
+          <cylinder><radius>0.040</radius><length>0.123</length></cylinder>
+        </geometry>
+        <material><diffuse>0.45 0.45 0.50 1</diffuse></material>
+      </visual>
+      <collision name="base_collision">
+        <pose>0 0 0.0615 0 0 0</pose>
+        <geometry>
+          <cylinder><radius>0.040</radius><length>0.123</length></cylinder>
+        </geometry>
+      </collision>
+
+      <!-- ============== RIGHT finger (at +y) ==============
+           Visual: stepped (base + tip) for fidelity.
+           Collision: ONE box at base thickness running the full length.
+           This conservative envelope (overestimates the thin pad by
+           ~6 mm per side) avoids checking two collision pairs per
+           finger and removes the convex-hull cost on the stepped step. -->
+      <visual name="right_finger_base_visual">
+        <pose>0 +0.00962 0.13078 0 0 0</pose>
+        <geometry>
+          <box><size>0.022 0.01923 0.01575</size></box>
+        </geometry>
+        <material><diffuse>0.45 0.45 0.50 1</diffuse></material>
+      </visual>
+      <visual name="right_finger_tip_visual">
+        <pose>0 +0.00360 0.16893 0 0 0</pose>
+        <geometry>
+          <box><size>0.022 0.00719 0.06045</size></box>
+        </geometry>
+        <material><diffuse>0.55 0.55 0.60 1</diffuse></material>
+      </visual>
+      <collision name="right_finger_collision">
+        <!-- Shifted up 68 mm from original (0.0930 → 0.1610) so the
+             3-in finger sits on top of the new 123-mm base cylinder.
+             Full finger span: 122.9..199.1 mm. -->
+        <pose>0 +0.00962 0.1610 0 0 0</pose>
+        <geometry><box><size>0.022 0.01923 0.0762</size></box></geometry>
+      </collision>
+
+      <!-- ============== LEFT finger (at -y) ============== -->
+      <visual name="left_finger_base_visual">
+        <pose>0 -0.00962 0.13078 0 0 0</pose>
+        <geometry>
+          <box><size>0.022 0.01923 0.01575</size></box>
+        </geometry>
+        <material><diffuse>0.45 0.45 0.50 1</diffuse></material>
+      </visual>
+      <visual name="left_finger_tip_visual">
+        <pose>0 -0.00360 0.16893 0 0 0</pose>
+        <geometry>
+          <box><size>0.022 0.00719 0.06045</size></box>
+        </geometry>
+        <material><diffuse>0.55 0.55 0.60 1</diffuse></material>
+      </visual>
+      <collision name="left_finger_collision">
+        <pose>0 -0.00962 0.1610 0 0 0</pose>
+        <geometry><box><size>0.022 0.01923 0.0762</size></box></geometry>
+      </collision>
+    </link>
+  </model>
+</sdf>

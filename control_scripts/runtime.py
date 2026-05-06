@@ -126,12 +126,12 @@ def print_arm_state(arm: ArmHandle, label: Optional[str] = None) -> None:
     print_pose("task", task_pose)
 
 
-def _build_gripper(defn: ArmRuntimeDefinition, control, rtde_io):
-    """``control`` drives Robotiq URScript paths; hook actuation uses ``rtde_io``."""
+def _build_gripper(defn: ArmRuntimeDefinition, control):
+    """Build gripper drivers using the existing RTDE control channel."""
     if defn.gripper_kind == "robotiq_2f85":
         return Robotiq2F85(control)
     if defn.gripper_kind == "hook":
-        return HookGripper(rtde_io, do_pin=defn.hook_do_pin)
+        return HookGripper(control, do_pin=defn.hook_do_pin)
     return None
 
 
@@ -154,7 +154,6 @@ def connect_arms(
     gripper_arms: Optional[Iterable[str]] = None,
 ) -> dict[str, ArmHandle]:
     from rtde_control import RTDEControlInterface as RTDEControlInterface
-    from rtde_io import RTDEIOInterface as RTDEIOInterface
     from rtde_receive import RTDEReceiveInterface as RTDEReceiveInterface
 
     requested = list(arm_names)
@@ -177,11 +176,7 @@ def connect_arms(
 
             gripper = None
             if name in with_grippers:
-                rtde_io_iface = None
-                if defn.gripper_kind == "hook":
-                    rtde_io_iface = RTDEIOInterface(defn.ip)
-                    _ensure_connected_rtde(rtde_io_iface, defn.ip)
-                gripper = _build_gripper(defn, control, rtde_io_iface)
+                gripper = _build_gripper(defn, control)
             arm = ArmHandle(
                 name=name,
                 control=control,

@@ -1,0 +1,95 @@
+<?xml version='1.0'?>
+<!--
+  Robotiq 2F-85 with custom 3-in fingers — STATIC OPEN variant.
+
+  Same as ``robotiq_2f_85_closed.sdf`` except the fingers sit at the
+  fully-open position: fingertip pad inner faces 85 mm apart (Robotiq
+  2F-85's spec stroke), so each pad is at y = ±42.5 mm from centre.
+
+  See the closed-variant SDF for the full convention notes and for
+  the geometry update (123-mm base cylinder + fingers shifted +68 mm
+  so the fingertips reach past TCP).
+-->
+<sdf xmlns:drake="http://drake.mit.edu" version="1.8">
+  <model name="robotiq_2f_85">
+    <link name="robotiq_2f_85">
+      <inertial>
+        <pose>0.0 0.0 0.060 0 0 0</pose>
+        <mass>0.93</mass>
+        <inertia>
+          <ixx>1.5e-3</ixx><ixy>0</ixy><ixz>0</ixz>
+          <iyy>1.5e-3</iyy><iyz>0</iyz>
+          <izz>5.0e-4</izz>
+        </inertia>
+      </inertial>
+
+      <!-- Base body: visual = real Robotiq base_link mesh + cylinder
+           extension to fill the gap up to the fingers. Collision = the
+           full 12.3 cm cylinder. See closed-variant SDF for rationale. -->
+      <visual name="base_visual">
+        <pose>0 0 0 0 0 0</pose>
+        <geometry>
+          <mesh>
+            <uri>../../../ur_description/robotiq_2f_85_gripper_visualization/meshes/visual/robotiq_arg2f_85_base_link.dae</uri>
+            <scale>0.001 0.001 0.001</scale>
+          </mesh>
+        </geometry>
+      </visual>
+      <visual name="base_extension_visual">
+        <pose>0 0 0.0615 0 0 0</pose>
+        <geometry>
+          <cylinder><radius>0.040</radius><length>0.123</length></cylinder>
+        </geometry>
+        <material><diffuse>0.45 0.45 0.50 1</diffuse></material>
+      </visual>
+      <collision name="base_collision">
+        <pose>0 0 0.0615 0 0 0</pose>
+        <geometry>
+          <cylinder><radius>0.040</radius><length>0.123</length></cylinder>
+        </geometry>
+      </collision>
+
+      <!-- ============== RIGHT finger (at +y, +42.5 mm pad inner face) ==============
+           Visual: stepped (base + tip) for fidelity.
+           Collision: ONE box at base thickness running the full length. -->
+      <visual name="right_finger_base_visual">
+        <pose>0 +0.05212 0.13078 0 0 0</pose>
+        <geometry>
+          <box><size>0.022 0.01923 0.01575</size></box>
+        </geometry>
+        <material><diffuse>0.45 0.45 0.50 1</diffuse></material>
+      </visual>
+      <visual name="right_finger_tip_visual">
+        <pose>0 +0.04610 0.16893 0 0 0</pose>
+        <geometry>
+          <box><size>0.022 0.00719 0.06045</size></box>
+        </geometry>
+        <material><diffuse>0.55 0.55 0.60 1</diffuse></material>
+      </visual>
+      <collision name="right_finger_collision">
+        <pose>0 +0.05212 0.1610 0 0 0</pose>
+        <geometry><box><size>0.022 0.01923 0.0762</size></box></geometry>
+      </collision>
+
+      <!-- ============== LEFT finger (at -y, -42.5 mm pad inner face) ============== -->
+      <visual name="left_finger_base_visual">
+        <pose>0 -0.05212 0.13078 0 0 0</pose>
+        <geometry>
+          <box><size>0.022 0.01923 0.01575</size></box>
+        </geometry>
+        <material><diffuse>0.45 0.45 0.50 1</diffuse></material>
+      </visual>
+      <visual name="left_finger_tip_visual">
+        <pose>0 -0.04610 0.16893 0 0 0</pose>
+        <geometry>
+          <box><size>0.022 0.00719 0.06045</size></box>
+        </geometry>
+        <material><diffuse>0.55 0.55 0.60 1</diffuse></material>
+      </visual>
+      <collision name="left_finger_collision">
+        <pose>0 -0.05212 0.1610 0 0 0</pose>
+        <geometry><box><size>0.022 0.01923 0.0762</size></box></geometry>
+      </collision>
+    </link>
+  </model>
+</sdf>
