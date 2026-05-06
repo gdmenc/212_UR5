@@ -32,8 +32,8 @@ from .transit import TransitPlan
 
 
 # Defaults for moveJ_path. Lift these into PickPlaceConfig later if useful.
-_DEFAULT_SPEED = 1.0     # rad/s — joint speed cap
-_DEFAULT_ACCEL = 1.4     # rad/s² — joint acceleration cap
+_DEFAULT_SPEED = 1.5     # rad/s — joint speed cap
+_DEFAULT_ACCEL = 2.0     # rad/s² — joint acceleration cap
 
 
 @dataclass

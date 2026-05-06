@@ -81,7 +81,7 @@ PLACE_ANGLE_RAD = float(np.radians(180 + 45))
 # the rim ~5 mm of "play" inside the hook's throat — light contact
 # with the rim wall as the cup is lifted, no hard interference if
 # the cup pose drifts ±5 mm. Set to 0 to revert to a flush rim grasp.
-TCP_RIM_LEEWAY_M = 0.005
+TCP_RIM_LEEWAY_M = 0.02
 
 
 def _cup_hook_grasp_with_leeway(cup_pose: Pose, angle_rad: float = 0.0) -> Grasp:

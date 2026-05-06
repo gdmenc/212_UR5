@@ -38,9 +38,11 @@ from ..planning.execute import execute_plan
 from ..planning.transit import (
     InfeasiblePlanError,
     _arm_model_instance,
+    _arm_position_indices,
     _tcp_frame,
+    ikfast_seeds_at_pose,
     make_rtde_ik,
-    plan_transit,
+    plan_transit_multi_seed,
 )
 from ..session import Session, default_session
 from ..util.poses import Pose
@@ -63,6 +65,8 @@ MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS = 50
 MOTION_PLAN_N_WAYPOINTS = 30
 MOTION_PLAN_BLEND_R_M = 0.005
 MOTION_PLAN_MIN_CLEARANCE_M = 0.01
+MOTION_PLAN_START_TOLERANCE_RAD = 0.05
+"""Reject planned paths whose first q is not the live arm q."""
 
 
 # --- Helpers ---------------------------------------------------------------
@@ -140,11 +144,21 @@ def _planned_to_home(
         for name, a in session.arms.items()
     }
 
-    print(f"  planning transit: current → home ...")
+    q_current_arm = current_q[arm_name]
+    seed_candidates = list(ikfast_seeds_at_pose(
+        arm_name,
+        current_pose,
+        seed_arm_q=q_current_arm,
+    )) or [q_current_arm]
+
+    print(f"  planning transit: current → home "
+          f"({len(seed_candidates)} start-branch seed(s)) ...")
     try:
-        plan = plan_transit(
+        plan = plan_transit_multi_seed(
             plant=plant,
             arm=arm_name,
+            log_label=f"{arm_name} go_home",
+            seed_candidates=seed_candidates,
             waypoints=[current_pose, target_pose],
             plant_context=plant_ctx,
             current_q=current_q,
@@ -161,6 +175,25 @@ def _planned_to_home(
     print(f"  planner={plan.metadata.get('planner')}  "
           f"duration={plan.duration_s:.2f}s  "
           f"clearance={plan.min_clearance_m * 1000:.1f}mm")
+    fallback = plan.metadata.get("spline_fallback_reason")
+    if fallback:
+        print(f"  (spline fell back to KTO: {fallback})")
+    kto_fallback = plan.metadata.get("kto_fallback_reason")
+    if kto_fallback:
+        print(f"  (KTO fell back to RRT: {kto_fallback})")
+
+    arm_idx = _arm_position_indices(plant, _arm_model_instance(plant, arm_name))
+    q_plan_start = np.asarray(
+        plan.trajectory.value(plan.trajectory.start_time()),
+        dtype=float,
+    ).flatten()[arm_idx]
+    start_delta = float(np.linalg.norm(q_plan_start - q_current_arm))
+    if start_delta > MOTION_PLAN_START_TOLERANCE_RAD:
+        return (
+            False,
+            f"planned start differs from live q by {start_delta:.3f} rad "
+            f"(limit {MOTION_PLAN_START_TOLERANCE_RAD:.3f})",
+        )
 
     result = execute_plan(
         plan, session,

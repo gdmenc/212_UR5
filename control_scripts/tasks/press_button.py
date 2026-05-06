@@ -629,19 +629,37 @@ def _planned_return_to_joint_start(
     return True
 
 
-def _plan_sim_legs(standoff: Pose, config: PickPlaceConfig):
-    """Plan the motion-planned segments (HOME → standoff hover, then
-    standoff hover → the starting joint configuration after the press). The hand-coded
-    contact phase (descend → forceMode → retract) is not simulated;
-    sim jumps the arm from the end of leg 1 to the start of leg 2 to
-    represent that skipped contact sequence."""
+def _expected_motion_leg_count() -> int:
+    expected = 0
+    if MOTION_PLAN_PRE_PRESS_APPROACH:
+        expected += 1
+    if MOTION_PLAN_POST_PRESS_RETURN:
+        expected += 1
+    return expected
+
+
+def _plan_motion_legs(
+    standoff: Pose,
+    config: PickPlaceConfig,
+    *,
+    start_pose: Pose | None = None,
+    start_q: dict[str, np.ndarray] | None = None,
+    q_start: np.ndarray | None = None,
+    log_prefix: str = "sim",
+):
+    """Plan all free-space press legs before any task motion is commanded.
+
+    The contact phase itself is still live-only. The planned return assumes
+    the real retract/lift lands back at the standoff hover before returning
+    to the task-entry joint configuration.
+    """
     from ..planning.transit import (
         InfeasiblePlanError,
         _arm_model_instance,
         _arm_position_indices,
         _plan_simple_spline,
         _tcp_frame,
-        plan_transit,
+        plan_transit_chained,
     )
     from ..util.rotations import Rotation as RotUtil
 
@@ -649,40 +667,63 @@ def _plan_sim_legs(standoff: Pose, config: PickPlaceConfig):
     diagram, plant, _, _ = WORLD.build_planning_scene()
     root = diagram.CreateDefaultContext()
     plant_ctx = plant.GetMyMutableContextFromRoot(root)
-    arm_idx = _arm_position_indices(plant, _arm_model_instance(plant, ARM))
-    q_start_full = plant.GetPositions(plant_ctx).copy()
-    q_start_arm = q_start_full[arm_idx].copy()
+    arm_instance = _arm_model_instance(plant, ARM)
+    arm_idx = _arm_position_indices(plant, arm_instance)
+
+    q_seed_full = plant.GetPositions(plant_ctx).copy()
+    if start_q is not None:
+        for arm_name, q_arm in start_q.items():
+            inst = _arm_model_instance(plant, arm_name)
+            q_seed_full[_arm_position_indices(plant, inst)] = np.asarray(
+                q_arm,
+                dtype=float,
+            )
+    plant.SetPositions(plant_ctx, q_seed_full)
+
+    q_start_arm = (
+        np.asarray(q_start, dtype=float)
+        if q_start is not None
+        else q_seed_full[arm_idx].copy()
+    )
     tcp_frame = _tcp_frame(plant, _arm_model_instance(plant, ARM))
     X = tcp_frame.CalcPoseInWorld(plant_ctx)
-    home_pose = Pose(
+    default_start_pose = Pose(
         translation=np.asarray(X.translation()),
         rotation=RotUtil.from_matrix(X.rotation().matrix()),
     )
+    chain_start_pose = start_pose if start_pose is not None else default_start_pose
     standoff_at_altitude = pose_at_altitude(standoff, config.transit_z)
 
-    print("\n[sim] planning pre-press approach...")
-    try:
-        plan = plan_transit(
-            plant=plant, arm=ARM,
-            waypoints=[home_pose, standoff_at_altitude],
-            plant_context=plant_ctx,
-            use_rrt_fallback=MOTION_PLAN_RRT_FALLBACK,
-            rrt_diagram=diagram,
-            rrt_max_iters=MOTION_PLAN_RRT_MAX_ITERS,
-            rrt_shortcut_attempts=MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS,
-            min_clearance_m=0.01,
-        )
-        legs.append(("pre-press approach to standoff hover", plan))
-        chained_arm_q = np.asarray(
-            plan.trajectory.value(plan.trajectory.end_time())
-        ).flatten()[arm_idx]
-    except InfeasiblePlanError as exc:
-        print(f"  ✗ pre-press approach infeasible: {exc}")
-        return legs
+    chained_arm_q = q_seed_full[arm_idx].copy()
+    if MOTION_PLAN_PRE_PRESS_APPROACH:
+        print(f"\n[{log_prefix}] planning pre-press approach...")
+        try:
+            plan = plan_transit_chained(
+                arm=ARM,
+                log_label="pre-press approach",
+                prev_terminal_pose=chain_start_pose,
+                chained_arm_q=chained_arm_q,
+                plant=plant,
+                waypoints=[chain_start_pose, standoff_at_altitude],
+                plant_context=plant_ctx,
+                current_q=start_q,
+                use_rrt_fallback=MOTION_PLAN_RRT_FALLBACK,
+                rrt_diagram=diagram,
+                rrt_max_iters=MOTION_PLAN_RRT_MAX_ITERS,
+                rrt_shortcut_attempts=MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS,
+                min_clearance_m=0.01,
+            )
+            legs.append(("pre-press approach to standoff hover", plan))
+            chained_arm_q = np.asarray(
+                plan.trajectory.value(plan.trajectory.end_time())
+            ).flatten()[arm_idx]
+        except InfeasiblePlanError as exc:
+            print(f"  ✗ pre-press approach infeasible: {exc}")
+            return legs
 
     if MOTION_PLAN_POST_PRESS_RETURN:
         try:
-            q0_full = q_start_full.copy()
+            q0_full = q_seed_full.copy()
             q0_full[arm_idx] = chained_arm_q
             q1_full = q0_full.copy()
             q1_full[arm_idx] = q_start_arm
@@ -707,6 +748,44 @@ def _plan_sim_legs(standoff: Pose, config: PickPlaceConfig):
     return legs
 
 
+def _plan_sim_legs(standoff: Pose, config: PickPlaceConfig):
+    """Plan the same free-space press legs used by real mode, from HOME."""
+    return _plan_motion_legs(standoff, config, log_prefix="sim")
+
+
+def _execute_planned_transit(
+    session: Session,
+    label: str,
+    plan,
+    config: PickPlaceConfig,
+) -> bool:
+    from ..planning.execute import execute_plan
+
+    print(f"\n→ execute planned transit: {label}")
+    print(f"  planner={plan.metadata.get('planner')}  "
+          f"duration={plan.duration_s:.2f}s  "
+          f"clearance={plan.min_clearance_m * 1000:.1f}mm")
+    fallback = plan.metadata.get("spline_fallback_reason")
+    if fallback:
+        print(f"  (spline fell back to KTO: {fallback})")
+    kto_fallback = plan.metadata.get("kto_fallback_reason")
+    if kto_fallback:
+        print(f"  (KTO fell back to RRT: {kto_fallback})")
+
+    result = execute_plan(
+        plan,
+        session,
+        method="moveJ_path",
+        n_waypoints=MOTION_PLAN_N_WAYPOINTS,
+        blend_r_m=MOTION_PLAN_BLEND_R_M,
+    )
+    if not result.success:
+        print(f"  ✗ planned transit execution failed: {result.reason}")
+        return False
+    print("  ✓ planned transit reached.")
+    return True
+
+
 def _run_sim(standoff: Pose, config: PickPlaceConfig) -> int:
     """Plan and replay the pre-press approach in meshcat."""
     from pydrake.geometry import StartMeshcat
@@ -714,9 +793,16 @@ def _run_sim(standoff: Pose, config: PickPlaceConfig) -> int:
 
     from ..planning import preview
 
+    if not USE_MOTION_PLANNING:
+        print("[sim] motion planning is disabled, but sim mode replays planned "
+              "free-space legs. Run real mode with --no-motion-planning for "
+              "the moveL/moveJ fallback.")
+        return 1
+
     legs = _plan_sim_legs(standoff, config)
-    if not legs:
-        print("[sim] no legs planned; aborting")
+    expected_legs = _expected_motion_leg_count()
+    if len(legs) != expected_legs:
+        print(f"[sim] planned {len(legs)}/{expected_legs} required legs; aborting")
         return 1
 
     print()
@@ -747,7 +833,27 @@ def run_on_arm(
 ) -> bool:
     """Execute the press on a connected arm. Returns True on success."""
     # 1. Save start joints for the final return move.
-    q_start = list(arm.receive.getActualQ())
+    q_start = np.asarray(arm.receive.getActualQ(), dtype=float)
+
+    planned_legs: list[tuple[str, object]] = []
+    if USE_MOTION_PLANNING:
+        print("\n[real] pre-planning all free-space press legs before execution...")
+        planned_legs = _plan_motion_legs(
+            standoff,
+            config,
+            start_pose=_current_tcp_pose_task(arm),
+            start_q=_current_q(session),
+            q_start=q_start,
+            log_prefix="real",
+        )
+        expected_legs = _expected_motion_leg_count()
+        if len(planned_legs) != expected_legs:
+            print(f"[real] planned {len(planned_legs)}/{expected_legs} required "
+                  "legs; aborting before commanding motion.")
+            return False
+        print("[real] all free-space press legs planned successfully.")
+
+    leg_i = 0
 
     # 2. Close the gripper before any motion. If a press tool is held,
     # this locks it rigidly to the fingers so the tip's offset from the
@@ -763,21 +869,30 @@ def run_on_arm(
         arm.gripper.set_speed_pct(config.gripper_close_speed_pct)
         arm.gripper.close()
 
-    # 3. Lift to transit altitude (purely vertical in task z).
-    print("\n→ lift to transit altitude")
-    lift_to_transit(arm, config.transit_z, config.transit_speed, config.transit_accel)
+    # 3. Lift to transit altitude (purely vertical in task z), unless the
+    # planned approach owns the full free-space move from task-entry pose
+    # to standoff hover.
+    if not (USE_MOTION_PLANNING and MOTION_PLAN_PRE_PRESS_APPROACH):
+        print("\n→ lift to transit altitude")
+        lift_to_transit(arm, config.transit_z, config.transit_speed, config.transit_accel)
 
     # 4. Transit to standoff at altitude (motion-planned when enabled,
     # falls back to the original Cartesian approach_to otherwise or on
     # planner failure).
     standoff_at_altitude = pose_at_altitude(standoff, config.transit_z)
     if MOTION_PLAN_PRE_PRESS_APPROACH:
-        if not _planned_or_linear_press_transit(
-            session, arm,
-            "pre-press approach to standoff hover",
-            standoff_at_altitude, config,
-        ):
-            return False
+        if USE_MOTION_PLANNING:
+            label, plan = planned_legs[leg_i]
+            leg_i += 1
+            if not _execute_planned_transit(session, label, plan, config):
+                return False
+        else:
+            if not _planned_or_linear_press_transit(
+                session, arm,
+                "pre-press approach to standoff hover",
+                standoff_at_altitude, config,
+            ):
+                return False
     else:
         print(f"→ transit to standoff XY at altitude {config.transit_z} m")
         approach_to(arm, standoff_at_altitude, config.transit_speed, config.transit_accel)
@@ -824,11 +939,17 @@ def run_on_arm(
 
     # 9. Post-press return directly to the task-entry joint configuration.
     if MOTION_PLAN_POST_PRESS_RETURN:
-        if not _planned_return_to_joint_start(session, arm, q_start, config):
-            return False
+        if USE_MOTION_PLANNING:
+            label, plan = planned_legs[leg_i]
+            leg_i += 1
+            if not _execute_planned_transit(session, label, plan, config):
+                return False
+        else:
+            if not _planned_return_to_joint_start(session, arm, list(q_start), config):
+                return False
     else:
         print("→ moveJ back to start joints")
-        arm.control.moveJ(q_start)
+        arm.control.moveJ(list(q_start))
 
     print("\nDone.")
     return True

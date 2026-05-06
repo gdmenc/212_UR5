@@ -52,7 +52,7 @@ CUP_PLACE_POSE_TASK = Pose(translation=[
 ``CUP_POUR_STATION_XY_TASK`` (lab_landmarks.py) so the pour task and any
 future cup-pickup task land on the same xy. Z is the resting-surface z."""
 
-FINAL_XY = (0.4, 0.0)
+FINAL_XY = (0.425, 0.0)
 """Task-frame XY to move the arm to after placing, at ``CONFIG.transit_z``."""
 
 GRASP_ANGLE_RAD = 0.0

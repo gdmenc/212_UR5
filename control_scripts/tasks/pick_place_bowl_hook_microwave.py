@@ -62,7 +62,6 @@ from ..util.poses import Pose, offset_along_tool_z, pose_at_altitude
 from ..util.rtde_convert import rtde_to_pose
 from ..util.tray_layout import (
     TRAY_DEFAULT_POSE_TASK,
-    TrayPose,
     place_pose_on_tray,
 )
 from ..lab_landmarks import CUP_MICROWAVE_TOP_XYZ_TASK
@@ -106,7 +105,7 @@ CUP_ON_TRAY_POSE_TASK = place_pose_on_tray("cup", tray=TRAY_POSE_TASK)
 # extend through awkward joint configurations even when the start and
 # end are reachable. Move this until the path looks clean on the rig.
 BOWL_MIDPOINT_POSE_TASK = Pose(translation=[-0.1, 0.1, 0.0])
-USE_MIDPOINT = True
+USE_MIDPOINT = False
 """Whether to carry the held bowl through ``BOWL_MIDPOINT_POSE_TASK``
 between pick and place. Off-by-default would replicate the failure mode
 the user just saw on the rig — leave True unless you've shortened the
@@ -275,13 +274,25 @@ CARRY_MIN_CLEARANCE_M = 0.005
 margin in places — keep this positive so penetration still fails, but allow a
 tighter corridor."""
 
+MOTION_PLAN_MIN_JOINT_LIMIT_MARGIN_RAD = 0.15
+"""Reject planned carry/return branches that pass too close to a joint limit.
+
+This catches IKFast branch choices that are collision-feasible but put a wrist
+joint near the UR controller's practical limit. 0.15 rad is about 8.6 degrees.
+"""
+
+MOTION_PLAN_START_TOLERANCE_RAD = 0.2
+"""Reject execution if a preplanned leg does not start at the live arm q."""
+
+MOTION_PLAN_JOINT_LIMIT_SAMPLES = 80
+
 """``INCLUDE_CUP_OBSTACLE`` toggle removed: by the time this task runs the cup
 is on the tray (placed by ``pick_place_cup_tray``), and that's the obstacle
 the bowl carry needs to plan around — not the cup at its table location.
 The cup-on-tray override below replaces that mechanism."""
 
 MOTION_PLAN_N_WAYPOINTS = 30
-MOTION_PLAN_BLEND_R_M = 0.0025
+MOTION_PLAN_BLEND_R_M = 0.003
 MOTION_PLAN_EXECUTION_METHOD = "moveJ_path"
 """Execution method for planned transits.
 
@@ -445,6 +456,62 @@ def _build_planning_context(*, attached_bowl: bool):
     return diagram, plant, plant_context
 
 
+def _expected_motion_leg_count() -> int:
+    """Number of free-space legs both real and sim require."""
+    expected = 1  # post-pick carry
+    if MOTION_PLAN_PRE_PICK_APPROACH:
+        expected += 1
+    if USE_MIDPOINT:
+        expected += 1
+    return expected
+
+
+def _arm_joint_limit_margin(plant, arm_idx: np.ndarray, q_arm: np.ndarray) -> tuple[float, int]:
+    """Smallest distance from ``q_arm`` to Drake's position bounds."""
+    lo = plant.GetPositionLowerLimits()[arm_idx]
+    hi = plant.GetPositionUpperLimits()[arm_idx]
+    q = np.asarray(q_arm, dtype=float)
+    margins = np.minimum(q - lo, hi - q)
+    j = int(np.argmin(margins))
+    return float(margins[j]), j
+
+
+def _plan_joint_limit_margin(plant, arm_idx: np.ndarray, plan) -> tuple[float, int]:
+    """Smallest sampled joint-limit margin along a planned trajectory."""
+    times = np.linspace(
+        plan.trajectory.start_time(),
+        plan.trajectory.end_time(),
+        MOTION_PLAN_JOINT_LIMIT_SAMPLES,
+    )
+    best_margin = float("inf")
+    best_joint = 0
+    for t in times:
+        q_full = np.asarray(plan.trajectory.value(float(t)), dtype=float).flatten()
+        margin, joint = _arm_joint_limit_margin(plant, arm_idx, q_full[arm_idx])
+        if margin < best_margin:
+            best_margin = margin
+            best_joint = joint
+    return best_margin, best_joint
+
+
+def _sort_seed_candidates_by_limit_margin(
+    plant,
+    arm_idx: np.ndarray,
+    seed_candidates: list[np.ndarray | None],
+) -> list[np.ndarray | None]:
+    """Try IK branches farthest from joint limits first."""
+    if not seed_candidates or all(seed is None for seed in seed_candidates):
+        return seed_candidates
+    return sorted(
+        seed_candidates,
+        key=lambda q: (
+            _arm_joint_limit_margin(plant, arm_idx, q)[0]
+            if q is not None else -float("inf")
+        ),
+        reverse=True,
+    )
+
+
 def _hover_before_pick(grasp, config: PickPlaceConfig) -> Pose:
     """The transit-altitude pose ``pick`` / ``pick_from_box`` will target
     before descending. Mirrors ``_hover_before_place`` for the pick side.
@@ -483,17 +550,27 @@ def _hover_before_place(place_pose: Pose, config: PickPlaceConfig) -> Pose:
     return pose_at_altitude(preplace, config.transit_z)
 
 
-def _plan_sim_legs(grasp, place_pose: Pose, config: PickPlaceConfig):
-    """Plan the same motion-planned segments the real path plans, but
-    from synthetic start states (no live RTDE).
+def _plan_motion_legs(
+    grasp,
+    place_pose: Pose,
+    config: PickPlaceConfig,
+    *,
+    start_pose: Pose | None = None,
+    start_q: dict[str, np.ndarray] | None = None,
+    log_prefix: str = "sim",
+):
+    """Plan the full free-space chain before any task motion is commanded.
 
     Three legs (when ``MOTION_PLAN_PRE_PICK_APPROACH=True``, otherwise
     skip the first):
 
-      1. pre-pick approach — HOME (FK) → grasp hover. No bowl in hand.
-      2. post-pick carry   — grasp hover (bowl in hand) → optional
+      1. pre-pick approach — start pose → pick hover. No bowl in hand.
+      2. post-pick carry   — pick hover (bowl in hand) → optional
          midpoint → place hover.
-      3. post-place return — place hover (no bowl) → midpoint hover.
+      3. post-place return — place hover (no bowl) → start/midpoint hover.
+
+    ``start_pose`` / ``start_q`` are provided by real mode from live RTDE.
+    Sim mode leaves them unset, so the planning-scene default HOME is used.
     """
     from ..planning.transit import InfeasiblePlanError, plan_transit
 
@@ -522,18 +599,20 @@ def _plan_sim_legs(grasp, place_pose: Pose, config: PickPlaceConfig):
             approach_plant, _arm_model_instance(approach_plant, ARM),
         )
         X = approach_tcp_frame.CalcPoseInWorld(approach_plant_ctx)
-        home_pose = Pose(
+        default_start_pose = Pose(
             translation=np.asarray(X.translation()),
             rotation=RotUtil.from_matrix(X.rotation().matrix()),
         )
-        approach_waypoints = [home_pose, _hover_before_pick(grasp, config)]
-        print("\n[sim] planning pre-pick approach...")
+        chain_start_pose = start_pose if start_pose is not None else default_start_pose
+        approach_waypoints = [chain_start_pose, _hover_before_pick(grasp, config)]
+        print(f"\n[{log_prefix}] planning pre-pick approach...")
         try:
             approach_plan = plan_transit(
                 plant=approach_plant,
                 arm=ARM,
                 waypoints=approach_waypoints,
                 plant_context=approach_plant_ctx,
+                current_q=start_q,
                 use_rrt_fallback=MOTION_PLAN_RRT_FALLBACK,
                 rrt_diagram=approach_diagram,
                 rrt_max_iters=MOTION_PLAN_RRT_MAX_ITERS,
@@ -559,9 +638,7 @@ def _plan_sim_legs(grasp, place_pose: Pose, config: PickPlaceConfig):
         carry_plant, _arm_model_instance(carry_plant, ARM),
     )
 
-    carry_waypoints: list[Pose] = [
-        pose_at_altitude(grasp.grasp_pose, config.transit_z),
-    ]
+    carry_waypoints: list[Pose] = [_hover_before_pick(grasp, config)]
     if USE_MIDPOINT:
         midpoint_pose = plan_midpoint(angle_rad=MIDPOINT_ANGLE_RAD)
         carry_waypoints.append(pose_at_altitude(midpoint_pose, config.transit_z))
@@ -602,18 +679,26 @@ def _plan_sim_legs(grasp, place_pose: Pose, config: PickPlaceConfig):
         )) or [chained_arm_q]
     else:
         seed_candidates = [None]  # let plan_transit use plant defaults
+    seed_candidates = _sort_seed_candidates_by_limit_margin(
+        carry_plant, carry_arm_idx, seed_candidates,
+    )
 
     carry_plan = None
     for i, seed_arm in enumerate(seed_candidates):
         cur_q = {ARM: seed_arm} if seed_arm is not None else None
         if seed_arm is not None:
+            seed_margin, seed_joint = _arm_joint_limit_margin(
+                carry_plant, carry_arm_idx, seed_arm,
+            )
             wrap = (seed_arm + np.pi) % (2.0 * np.pi) - np.pi
-            print(f"\n[sim] planning post-pick carry "
+            print(f"\n[{log_prefix}] planning post-pick carry "
                   f"(seed option {i + 1}/{len(seed_candidates)}: "
                   f"q3 sign={'+1' if wrap[2] >= 0 else '-1'}, "
-                  f"q5 sign={'+1' if wrap[4] >= 0 else '-1'})...")
+                  f"q5 sign={'+1' if wrap[4] >= 0 else '-1'}, "
+                  f"limit margin={seed_margin:.2f} rad @ q{seed_joint + 1})...")
         else:
-            print("\n[sim] planning post-pick carry (no seed; plant defaults)...")
+            print(f"\n[{log_prefix}] planning post-pick carry "
+                  f"(no seed; plant defaults)...")
         try:
             carry_plan = plan_transit(
                 plant=carry_plant,
@@ -630,6 +715,17 @@ def _plan_sim_legs(grasp, place_pose: Pose, config: PickPlaceConfig):
                 align_tcp_axis_tolerance_rad=CARRY_BOWL_LEVEL_TOLERANCE_RAD,
                 min_clearance_m=CARRY_MIN_CLEARANCE_M,
             )
+            plan_margin, plan_joint = _plan_joint_limit_margin(
+                carry_plant, carry_arm_idx, carry_plan,
+            )
+            if plan_margin < MOTION_PLAN_MIN_JOINT_LIMIT_MARGIN_RAD:
+                print(f"  ✗ seed {i + 1} rejected: planned carry comes within "
+                      f"{plan_margin:.3f} rad of joint q{plan_joint + 1} limit "
+                      f"(min {MOTION_PLAN_MIN_JOINT_LIMIT_MARGIN_RAD:.3f})")
+                carry_plan = None
+                continue
+            print(f"  ✓ joint-limit margin: {plan_margin:.3f} rad "
+                  f"(worst q{plan_joint + 1})")
             break
         except InfeasiblePlanError as exc:
             print(f"  ✗ seed {i + 1} infeasible: {exc!s:.180}")
@@ -648,16 +744,12 @@ def _plan_sim_legs(grasp, place_pose: Pose, config: PickPlaceConfig):
         return_root = return_diagram.CreateDefaultContext()
         return_plant_ctx = return_plant.GetMyMutableContextFromRoot(return_root)
 
-        # Return to HOME (the FK of plant defaults computed above for
-        # the approach leg's start) rather than the midpoint hover.
-        # HOME is the rig's neutral pose by construction — IK is
-        # trivial there, and the elbow/wrist quadrants match the
-        # carry's terminal joint config so the q3/q5 singularity-branch
-        # lock passes. Going to the workspace-edge midpoint forces an
-        # elbow flip that the lock forbids.
+        # Return to the chain start (sim HOME or the real task-entry
+        # pose) rather than the midpoint hover. That keeps the full
+        # motion chain knowable before real execution starts.
         if MOTION_PLAN_PRE_PICK_APPROACH:
-            return_target_pose = home_pose
-            return_target_label = "HOME hover"
+            return_target_pose = chain_start_pose
+            return_target_label = "start hover" if start_pose is not None else "HOME hover"
         else:
             midpoint_pose = plan_midpoint(angle_rad=MIDPOINT_ANGLE_RAD)
             return_target_pose = pose_at_altitude(
@@ -683,19 +775,29 @@ def _plan_sim_legs(grasp, place_pose: Pose, config: PickPlaceConfig):
             )) or [chained_arm_q]
         else:
             return_seeds = [None]
+        return_arm_idx = _arm_position_indices(
+            return_plant, _arm_model_instance(return_plant, ARM),
+        )
+        return_seeds = _sort_seed_candidates_by_limit_margin(
+            return_plant, return_arm_idx, return_seeds,
+        )
 
         return_plan = None
         for i, seed_arm in enumerate(return_seeds):
             cur_q = {ARM: seed_arm} if seed_arm is not None else None
             if seed_arm is not None:
+                seed_margin, seed_joint = _arm_joint_limit_margin(
+                    return_plant, return_arm_idx, seed_arm,
+                )
                 wrap = (seed_arm + np.pi) % (2.0 * np.pi) - np.pi
-                print(f"\n[sim] planning post-place return to "
+                print(f"\n[{log_prefix}] planning post-place return to "
                       f"{return_target_label} "
                       f"(seed option {i + 1}/{len(return_seeds)}: "
                       f"q3 sign={'+1' if wrap[2] >= 0 else '-1'}, "
-                      f"q5 sign={'+1' if wrap[4] >= 0 else '-1'})...")
+                      f"q5 sign={'+1' if wrap[4] >= 0 else '-1'}, "
+                      f"limit margin={seed_margin:.2f} rad @ q{seed_joint + 1})...")
             else:
-                print(f"\n[sim] planning post-place return to "
+                print(f"\n[{log_prefix}] planning post-place return to "
                       f"{return_target_label} (no seed)...")
             try:
                 return_plan = plan_transit(
@@ -710,6 +812,17 @@ def _plan_sim_legs(grasp, place_pose: Pose, config: PickPlaceConfig):
                     rrt_shortcut_attempts=MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS,
                     min_clearance_m=0.01,
                 )
+                plan_margin, plan_joint = _plan_joint_limit_margin(
+                    return_plant, return_arm_idx, return_plan,
+                )
+                if plan_margin < MOTION_PLAN_MIN_JOINT_LIMIT_MARGIN_RAD:
+                    print(f"  ✗ seed {i + 1} rejected: planned return comes within "
+                          f"{plan_margin:.3f} rad of joint q{plan_joint + 1} limit "
+                          f"(min {MOTION_PLAN_MIN_JOINT_LIMIT_MARGIN_RAD:.3f})")
+                    return_plan = None
+                    continue
+                print(f"  ✓ joint-limit margin: {plan_margin:.3f} rad "
+                      f"(worst q{plan_joint + 1})")
                 break
             except InfeasiblePlanError as exc:
                 print(f"  ✗ seed {i + 1} infeasible: {exc!s:.180}")
@@ -721,6 +834,16 @@ def _plan_sim_legs(grasp, place_pose: Pose, config: PickPlaceConfig):
         legs.append((f"post-place return to {return_target_label}", return_plan))
 
     return legs
+
+
+def _plan_sim_legs(grasp, place_pose: Pose, config: PickPlaceConfig):
+    """Plan the same full free-space chain used by real mode, from HOME."""
+    return _plan_motion_legs(
+        grasp,
+        place_pose,
+        config,
+        log_prefix="sim",
+    )
 
 
 def _run_sim(grasp, place_pose: Pose, config: PickPlaceConfig) -> int:
@@ -735,9 +858,16 @@ def _run_sim(grasp, place_pose: Pose, config: PickPlaceConfig) -> int:
 
     from ..planning import preview
 
+    if not USE_MOTION_PLANNING:
+        print("[sim] motion planning is disabled, but sim mode replays planned "
+              "free-space legs. Run real mode with --no-motion-planning for "
+              "the sequential moveL fallback.")
+        return 1
+
     legs = _plan_sim_legs(grasp, place_pose, config)
-    if not legs:
-        print("[sim] no legs planned; aborting")
+    expected_legs = _expected_motion_leg_count()
+    if len(legs) != expected_legs:
+        print(f"[sim] planned {len(legs)}/{expected_legs} required legs; aborting")
         return 1
 
     print()
@@ -757,7 +887,7 @@ def _run_sim(grasp, place_pose: Pose, config: PickPlaceConfig) -> int:
         skip_static_objects=("plate", "bottle"),
         object_xyz_overrides={
             **WORLD.object_xyz_overrides,
-            "bowl": tuple(float(v) for v in BOWL_PLACE_POSE_TASK.translation),
+            "bowl": tuple(float(v) for v in place_pose.translation),
         },
     )
     meshcat = StartMeshcat()
@@ -895,6 +1025,51 @@ def _planned_or_linear_transit(
     return True
 
 
+def _execute_planned_transit(
+    session: Session,
+    label: str,
+    plan,
+    config: PickPlaceConfig,
+) -> bool:
+    """Execute a precomputed transit plan with the task's execution knobs."""
+    from ..planning.execute import execute_plan
+
+    print(f"\n→ execute planned transit: {label}")
+    print(f"  planner={plan.metadata.get('planner')}  "
+          f"duration={plan.duration_s:.2f}s  "
+          f"clearance={plan.min_clearance_m * 1000:.1f}mm")
+    fallback = plan.metadata.get("spline_fallback_reason")
+    if fallback:
+        print(f"  (spline fell back to KTO: {fallback})")
+    kto_fallback = plan.metadata.get("kto_fallback_reason")
+    if kto_fallback:
+        print(f"  (KTO fell back to RRT: {kto_fallback})")
+
+    live_q = np.asarray(session.arms[plan.arm].receive.getActualQ(), dtype=float)
+    q_start = np.asarray(plan.waypoints_q[0], dtype=float)
+    start_delta = float(np.linalg.norm(live_q - q_start))
+    if start_delta > MOTION_PLAN_START_TOLERANCE_RAD:
+        print(f"  ✗ refusing to execute: plan starts {start_delta:.3f} rad "
+              f"from live q (limit {MOTION_PLAN_START_TOLERANCE_RAD:.3f}). "
+              "This usually means sim/real picked different IK branches.")
+        return False
+
+    result = execute_plan(
+        plan,
+        session,
+        method=MOTION_PLAN_EXECUTION_METHOD,
+        n_waypoints=MOTION_PLAN_N_WAYPOINTS,
+        dt=MOTION_PLAN_SERVO_DT_S,
+        servo_time_scale=MOTION_PLAN_SERVO_TIME_SCALE,
+        blend_r_m=MOTION_PLAN_BLEND_R_M,
+    )
+    if not result.success:
+        print(f"  ✗ planned transit execution failed: {result.reason}")
+        return False
+    print("  ✓ planned transit reached.")
+    return True
+
+
 def _check_in_cavity_clearance(grasp, place_pose: Pose) -> None:
     """Loudly warn if any in-cavity TCP pose (place, grasp, preplace,
     pregrasp) sits above the cavity ceiling minus a small margin.
@@ -981,16 +1156,42 @@ def run_on_arm(
     place_pose: Pose,
     config: PickPlaceConfig = CONFIG,
 ) -> bool:
-    if MOTION_PLAN_PRE_PICK_APPROACH:
-        if not _planned_or_linear_transit(
-            session,
-            arm,
-            "pre-pick approach to grasp hover",
-            [_current_tcp_pose_task(arm), _hover_before_pick(grasp, config)],
+    planned_legs: list[tuple[str, object]] = []
+    if USE_MOTION_PLANNING:
+        print("\n[real] pre-planning all free-space motion legs before execution...")
+        planned_legs = _plan_motion_legs(
+            grasp,
+            place_pose,
             config,
-            attached_bowl=False,
-        ):
+            start_pose=_current_tcp_pose_task(arm),
+            start_q=_current_q(session),
+            log_prefix="real",
+        )
+        expected_legs = _expected_motion_leg_count()
+        if len(planned_legs) != expected_legs:
+            print(f"[real] planned {len(planned_legs)}/{expected_legs} required "
+                  "legs; aborting before commanding motion.")
             return False
+        print("[real] all free-space motion legs planned successfully.")
+
+    leg_i = 0
+
+    if MOTION_PLAN_PRE_PICK_APPROACH:
+        if USE_MOTION_PLANNING:
+            label, plan = planned_legs[leg_i]
+            leg_i += 1
+            if not _execute_planned_transit(session, label, plan, config):
+                return False
+        else:
+            if not _planned_or_linear_transit(
+                session,
+                arm,
+                "pre-pick approach to grasp hover",
+                [_current_tcp_pose_task(arm), _hover_before_pick(grasp, config)],
+                config,
+                attached_bowl=False,
+            ):
+                return False
 
     print(f"\n→ pick: {grasp.description}  (from {PICK_FROM})")
     if PICK_FROM == "microwave":
@@ -1008,20 +1209,26 @@ def run_on_arm(
         return False
     print("  ✓ pick succeeded.")
 
-    carry_waypoints = [_current_tcp_pose_task(arm)]
-    if USE_MIDPOINT:
-        midpoint_pose = plan_midpoint(angle_rad=MIDPOINT_ANGLE_RAD)
-        carry_waypoints.append(pose_at_altitude(midpoint_pose, config.transit_z))
-    carry_waypoints.append(_hover_before_place(place_pose, config))
-    if not _planned_or_linear_transit(
-        session,
-        arm,
-        "post-pick carry to place hover",
-        carry_waypoints,
-        config,
-        attached_bowl=True,
-    ):
-        return False
+    if USE_MOTION_PLANNING:
+        label, plan = planned_legs[leg_i]
+        leg_i += 1
+        if not _execute_planned_transit(session, label, plan, config):
+            return False
+    else:
+        carry_waypoints = [_current_tcp_pose_task(arm)]
+        if USE_MIDPOINT:
+            midpoint_pose = plan_midpoint(angle_rad=MIDPOINT_ANGLE_RAD)
+            carry_waypoints.append(pose_at_altitude(midpoint_pose, config.transit_z))
+        carry_waypoints.append(_hover_before_place(place_pose, config))
+        if not _planned_or_linear_transit(
+            session,
+            arm,
+            "post-pick carry to place hover",
+            carry_waypoints,
+            config,
+            attached_bowl=True,
+        ):
+            return False
 
     if USE_MIDPOINT:
         print("  ✓ carried through midpoint.")
@@ -1049,19 +1256,25 @@ def run_on_arm(
     print("\nDone — arm retracted to transit altitude.")
 
     if USE_MIDPOINT:
-        midpoint_pose = plan_midpoint(angle_rad=MIDPOINT_ANGLE_RAD)
-        if not _planned_or_linear_transit(
-            session,
-            arm,
-            "post-place return to midpoint",
-            [
-                _current_tcp_pose_task(arm),
-                pose_at_altitude(midpoint_pose, config.transit_z),
-            ],
-            config,
-            attached_bowl=False,
-        ):
-            return False
+        if USE_MOTION_PLANNING:
+            label, plan = planned_legs[leg_i]
+            leg_i += 1
+            if not _execute_planned_transit(session, label, plan, config):
+                return False
+        else:
+            midpoint_pose = plan_midpoint(angle_rad=MIDPOINT_ANGLE_RAD)
+            if not _planned_or_linear_transit(
+                session,
+                arm,
+                "post-place return to midpoint",
+                [
+                    _current_tcp_pose_task(arm),
+                    pose_at_altitude(midpoint_pose, config.transit_z),
+                ],
+                config,
+                attached_bowl=False,
+            ):
+                return False
     return True
 
 
