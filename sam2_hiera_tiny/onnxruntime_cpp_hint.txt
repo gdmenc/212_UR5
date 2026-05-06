@@ -1,0 +1,34 @@
+Using ONNX Runtime C++ on macOS (from the universal2 .tgz you extracted)
+========================================================================
+
+After:  tar -xzvf onnxruntime-osx-universal2-1.23.2.tgz
+
+Set (example paths — adjust to where you unpacked):
+
+  export ONNXRUNTIME_ROOT="$HOME/Downloads/onnxruntime-osx-universal2-1.23.2"
+
+CMake (minimal pattern):
+
+  cmake_minimum_required(VERSION 3.16)
+  project(sam2_ort LANGUAGES CXX)
+
+  set(ONNXRUNTIME_ROOT "/path/to/onnxruntime-osx-universal2-1.23.2" CACHE PATH "")
+
+  add_executable(demo main.cpp)
+  target_include_directories(demo PRIVATE "${ONNXRUNTIME_ROOT}/include")
+  target_link_directories(demo PRIVATE "${ONNXRUNTIME_ROOT}/lib")
+  target_link_libraries(demo PRIVATE onnxruntime)
+
+  # If linking fails, use full path to dylib:
+  # target_link_libraries(demo PRIVATE "${ONNXRUNTIME_ROOT}/lib/libonnxruntime.1.23.2.dylib")
+
+Runtime: ensure DYLD_LIBRARY_PATH includes "${ONNXRUNTIME_ROOT}/lib" when running,
+or copy/fix rpath (install_name_tool) if you ship the dylib next to the binary.
+
+SAM2 ONNX in this repo
+======================
+
+  Encoder:  sam2_hiera_tiny.encoder.onnx   input  image  [1,3,1024,1024] float32
+  Decoder:  sam2_hiera_tiny.decoder.onnx   see run_sam2_box_onnx.py for I/O names.
+
+Your C++ flow should match that Python reference (preprocess → encoder → decoder).
