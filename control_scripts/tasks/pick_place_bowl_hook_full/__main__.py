@@ -122,6 +122,13 @@ POSE_SAMPLES_DEFAULT = 1
 TABLE_Z_TASK_M = 0.0
 CXX_WARMUP_FRAMES = 1
 CXX_DETECT_FRAMES = 1
+GRASP_RADIAL_INSET_M = 0.008
+
+# If the perception-detected XY deviates more than this from BOWL_EXPECTED_TASK,
+# fall back to the precalculated reference pose.
+# 3 cm: a correctly placed bowl + calibrated camera should agree to ~1-2 cm;
+# anything beyond 3 cm likely means a bad detection or wrong object.
+GRASP_DEVIATION_FALLBACK_M = 0.02
 
 
 # ---------------------------------------------------------------------------
@@ -266,6 +273,7 @@ def _run_perception_best(
     sam_decoder: Path = _SAM2_DECODER_DEFAULT,
 ) -> tuple[dict, np.ndarray]:
     best = None
+    best_dist = float("inf")
     for i in range(attempts):
         T_task_cam = _compute_T_task_camera_stable(arm, T_ee_cam, samples=pose_samples)
         print(f"  [attempt {i+1}/{attempts}] camera origin = {np.round(T_task_cam[:3,3], 4)} m")
@@ -281,11 +289,16 @@ def _run_perception_best(
         )
         if not result.get("detected", False):
             continue
-        conf = float(result.get("confidence", 0.0))
-        if best is None or conf > float(best[0].get("confidence", 0.0)):
+        detected_xy = np.array(result["bowl_base_task_m"][:2], dtype=float)
+        dist = float(np.linalg.norm(detected_xy - BOWL_EXPECTED_TASK))
+        print(f"  [attempt {i+1}/{attempts}] bowl XY {np.round(detected_xy, 4)} m  "
+              f"conf={result.get('confidence', 0.0):.2f}  dist_to_ref={dist*100:.1f} cm")
+        if dist < best_dist:
             best = (result, T_task_cam)
+            best_dist = dist
     if best is None:
         raise RuntimeError(f"Bowl not detected after {attempts} attempt(s).")
+    print(f"  [best] selected attempt closest to reference: dist={best_dist*100:.1f} cm")
     return best
 
 
@@ -380,11 +393,82 @@ def _sanity_check(bowl_base_task_m: list[float]) -> None:
         print(f"  [OK]   Bowl XY {np.round(xy,3)} m — {dist*100:.1f} cm from expected.")
 
 
-def _print_plan(bowl_base_pose: Pose, grasp, place_pose: Pose) -> None:
+def _apply_fallback_if_needed(
+    detected_pose: Pose,
+    reference_pose: Pose,
+    threshold_m: float,
+    label: str,
+) -> tuple[Pose, bool]:
+    """Return (pose_to_use, used_fallback).
+
+    When the detected XY is within ``threshold_m`` of the reference, the
+    perception result is returned.  When it exceeds the threshold the
+    reference pose is returned instead and a fallback notice is printed.
+    """
+    xy_det = np.array(detected_pose.translation[:2], dtype=float)
+    xy_ref = np.array(reference_pose.translation[:2], dtype=float)
+    deviation = float(np.linalg.norm(xy_det - xy_ref))
+
+    if deviation > threshold_m:
+        print(f"  [FALLBACK] {label} XY {np.round(xy_det, 4)} m is "
+              f"{deviation * 100:.1f} cm from reference "
+              f"{np.round(xy_ref, 4)} m — exceeds "
+              f"{threshold_m * 100:.0f} cm threshold.")
+        print(f"  [FALLBACK] Using precalculated reference pose "
+              f"{np.round(reference_pose.translation, 4)} m.")
+        return reference_pose, True
+
+    print(f"  [OK] {label} XY within fallback threshold "
+          f"({deviation * 100:.1f} cm < {threshold_m * 100:.0f} cm) — "
+          f"using perception pose.")
+    return detected_pose, False
+
+
+def _rim_azimuth_rad_toward_tcp(
+    bowl_xy_task: np.ndarray,
+    tcp_xy_task: np.ndarray,
+) -> float:
+    b = np.asarray(bowl_xy_task, dtype=float).reshape(2)
+    t = np.asarray(tcp_xy_task, dtype=float).reshape(2)
+    v = t - b
+    if np.linalg.norm(v) < 1e-9:
+        return GRASP_ANGLE_RAD
+    ang = float(np.arctan2(v[1], v[0]))
+    return float(np.arctan2(np.sin(ang), np.cos(ang)))
+
+
+def _apply_grasp_radial_inset(grasp, bowl_xyz_task: np.ndarray, inset_m: float):
+    if inset_m <= 0.0:
+        return grasp
+    g = np.asarray(grasp.grasp_pose.translation, dtype=float).copy()
+    c = np.asarray(bowl_xyz_task, dtype=float).reshape(3)
+    v_xy = g[:2] - c[:2]
+    dist = float(np.linalg.norm(v_xy))
+    if dist < 1e-9:
+        return grasp
+    step = min(float(inset_m), dist - 1e-6)
+    u = v_xy / dist
+    g[0] -= u[0] * step
+    g[1] -= u[1] * step
+    grasp.grasp_pose = Pose(translation=g, rotation=grasp.grasp_pose.rotation)
+    return grasp
+
+
+def _print_plan(
+    bowl_base_pose: Pose,
+    grasp,
+    place_pose: Pose,
+    *,
+    grasp_angle_rad: float,
+    grasp_angle_source: str,
+) -> None:
     print("=" * 62)
     print("  Arm                :", ARM, "(hook gripper)")
     print("  Detected bowl base :", np.round(bowl_base_pose.translation, 4), "m (task)")
-    print("  Grasp angle        :", f"{np.degrees(GRASP_ANGLE_RAD):+.0f}°  (hook on −X rim)")
+    print(
+        "  Grasp angle        :",
+        f"{np.degrees(grasp_angle_rad):+.1f}°  ({grasp_angle_source})",
+    )
     print("  Approach tilt      :", f"{np.degrees(APPROACH_TILT_RAD):+.1f}°")
     print("  Grasp pose (task)  :", np.round(grasp.grasp_pose.translation, 4), "m")
     print("  Pregrasp offset    :", f"{grasp.pregrasp_offset*100:.1f} cm")
@@ -408,7 +492,13 @@ def _dry_run() -> int:
                                  angle_rad=PLACE_ANGLE_RAD,
                                  approach_tilt_rad=APPROACH_TILT_RAD).grasp_pose
     print("\n[dry run] Static bowl pose — no camera / RTDE.")
-    _print_plan(static_bowl, grasp, place_pose)
+    _print_plan(
+        static_bowl,
+        grasp,
+        place_pose,
+        grasp_angle_rad=GRASP_ANGLE_RAD,
+        grasp_angle_source="fixed default",
+    )
     print("[dry run] No motion commanded.")
     return 0
 
@@ -430,6 +520,7 @@ def run(
     no_sam: bool = False,
     sam_encoder: Path = _SAM2_ENCODER_DEFAULT,
     sam_decoder: Path = _SAM2_DECODER_DEFAULT,
+    grasp_radial_inset_m: float = GRASP_RADIAL_INSET_M,
 ) -> int:
     if not motion_planning:
         _bowl_exec.USE_MOTION_PLANNING = False
@@ -531,13 +622,31 @@ def run(
         bowl_base_pose = Pose(translation=bowl_base)
         print(f"  offset-corrected bowl base xy = {np.round(bowl_base[:2], 4)} m")
         print(f"  table-anchored bowl base z = {TABLE_Z_TASK_M:.3f} m")
+        _bowl_reference_pose = Pose(translation=[
+            BOWL_EXPECTED_TASK[0], BOWL_EXPECTED_TASK[1], TABLE_Z_TASK_M,
+        ])
+        bowl_base_pose, _used_ref = _apply_fallback_if_needed(
+            bowl_base_pose, _bowl_reference_pose,
+            GRASP_DEVIATION_FALLBACK_M, "bowl",
+        )
+        tcp_task = arm.to_task(rtde_to_pose(arm.receive.getActualTCPPose()))
+        grasp_angle_rad = _rim_azimuth_rad_toward_tcp(
+            bowl_base_pose.translation[:2], tcp_task.translation[:2]
+        )
         grasp = bowl_hook_grasp(bowl_base_pose,
-                                angle_rad=GRASP_ANGLE_RAD,
+                                angle_rad=grasp_angle_rad,
                                 approach_tilt_rad=APPROACH_TILT_RAD)
+        grasp = _apply_grasp_radial_inset(grasp, bowl_base_pose.translation, grasp_radial_inset_m)
         place_pose = bowl_hook_grasp(BOWL_PLACE_POSE_TASK,
                                      angle_rad=PLACE_ANGLE_RAD,
                                      approach_tilt_rad=APPROACH_TILT_RAD).grasp_pose
-        _print_plan(bowl_base_pose, grasp, place_pose)
+        _print_plan(
+            bowl_base_pose,
+            grasp,
+            place_pose,
+            grasp_angle_rad=grasp_angle_rad,
+            grasp_angle_source="rim toward current TCP in task XY",
+        )
         _confirm("Grasp plan looks correct? Execute PICK?", auto)
 
         # ── Phase 5: pick + place (optional Drake-planned transits) ───────
@@ -579,6 +688,15 @@ def main() -> None:
                     help="C++ RealSense warmup frames (default 1 for mac stability).")
     ap.add_argument("--detect-frames", type=int, default=CXX_DETECT_FRAMES,
                     help="C++ frames to aggregate per detection run (default 1 for mac stability).")
+    ap.add_argument(
+        "--grasp-radial-inset-m",
+        type=float,
+        default=GRASP_RADIAL_INSET_M,
+        help=(
+            "Pull grasp contact inward toward bowl center in XY [m] after planning "
+            f"(default {GRASP_RADIAL_INSET_M:.3f} m)."
+        ),
+    )
     ap.add_argument("--zero-camera", action="store_true",
                     help="Calibrate and save XY perception offset from a known reference center.")
     ap.add_argument("--ref-center", type=float, nargs=3, default=[0.0, 0.0, 0.0],
@@ -627,6 +745,7 @@ def main() -> None:
             no_sam=args.no_sam,
             sam_encoder=args.sam_encoder,
             sam_decoder=args.sam_decoder,
+            grasp_radial_inset_m=float(args.grasp_radial_inset_m),
         )
     )
 

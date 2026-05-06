@@ -32,9 +32,11 @@ import numpy as np
 from ...arm import ArmHandle
 from ...config import PickPlaceConfig
 from ...grasps.cup import cup_rim_grasp
+from ...lab_landmarks import CUP_POUR_STATION_XY_TASK
 from ...moves import transit_xy
 from ...pick import pick
 from ...place import place
+from ...planning.scene.objects import CUP_DEFAULT_TASK_XYZ
 from ...session import Session, default_session
 from ...util.poses import Pose, pose_at_altitude
 from ...util.rtde_convert import rtde_to_pose
@@ -42,15 +44,21 @@ from ...world import World
 
 
 # --- Tunables (edit to match your physical layout) ------------------------
-CUP_PICK_POSE_TASK = Pose(translation=[0, 0, 0.0])
-"""Cup base at PICK location, expressed in task frame. Edit to match the
-table layout. Z is the resting surface; the rim is at z + CUP_HEIGHT_M."""
+CUP_PICK_POSE_TASK = Pose(translation=CUP_DEFAULT_TASK_XYZ)
+"""Cup base at PICK location, expressed in task frame. Sourced from
+``CUP_DEFAULT_TASK_XYZ`` (planning/scene/objects.py) — the canonical
+lab cup position. Z is the resting surface; the rim is at z + CUP_HEIGHT_M."""
 
-CUP_PLACE_POSE_TASK = Pose(translation=[0.2, 0.2, 0.0])
-"""Cup base at PLACE location, task frame. Defaults to the same as the
-pick pose (set it back down) — set to a different translation to relocate."""
+CUP_PLACE_POSE_TASK = Pose(translation=[
+    CUP_POUR_STATION_XY_TASK[0],
+    CUP_POUR_STATION_XY_TASK[1],
+    0.0,
+])
+"""Cup base at PLACE location, task frame. Sourced from
+``CUP_POUR_STATION_XY_TASK`` (lab_landmarks.py) so this stays in sync
+with where ``pour_bottle_hook`` expects the cup."""
 
-FINAL_XY = np.array([0.35, 0.0])
+FINAL_XY = np.array([0.4, 0.0])
 """Task-frame XY to move the arm to after placing, at ``CONFIG.transit_z``."""
 
 GRASP_ANGLE_RAD = 0.0

@@ -38,7 +38,7 @@ from ._hook_rim import HOOK_RIM_PREGRASP_OFFSET, hook_rim_rotation
 from .base import Grasp
 
 
-BOWL_RIM_OUTER_RADIUS_M = 0.037
+BOWL_RIM_OUTER_RADIUS_M = 0.034
 """Radial distance from bowl center to the OUTER edge of the rim. Measured
 at the lab — outer rim diameter 7.4 cm."""
 

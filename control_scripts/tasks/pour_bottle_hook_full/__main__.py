@@ -86,6 +86,12 @@ CXX_DETECT_FRAMES = 1
 # Tune XY if detection has a residual systematic offset after calibration.
 PERCEPTION_OFFSET_M = np.array([0.0, 0.0, -0.01])
 
+# If the perception-detected XY deviates more than this from the reference
+# landmark (BOTTLE_PICK_POSE_TASK), fall back to the precalculated pose.
+# 3 cm: a correctly placed bottle + calibrated camera should agree to ~1-2 cm;
+# anything beyond 3 cm likely means a bad detection or wrong object.
+GRASP_DEVIATION_FALLBACK_M = 0.02
+
 
 # ---------------------------------------------------------------------------
 # Camera configuration
@@ -213,6 +219,7 @@ def _run_perception_best(
     detect_frames: int = CXX_DETECT_FRAMES,
 ) -> tuple[dict, np.ndarray]:
     best = None
+    best_dist = float("inf")
     for i in range(attempts):
         T_task_cam = _compute_T_task_camera_stable(arm, T_ee_cam, samples=pose_samples)
         print(f"  [attempt {i+1}/{attempts}] camera origin = {np.round(T_task_cam[:3,3], 4)} m")
@@ -225,11 +232,16 @@ def _run_perception_best(
         )
         if not result.get("detected", False):
             continue
-        conf = float(result.get("confidence", 0.0))
-        if best is None or conf > float(best[0].get("confidence", 0.0)):
+        detected_xy = np.array(result["bottle_base_task_m"][:2], dtype=float)
+        dist = float(np.linalg.norm(detected_xy - BOTTLE_EXPECTED_TASK))
+        print(f"  [attempt {i+1}/{attempts}] bottle XY {np.round(detected_xy, 4)} m  "
+              f"conf={result.get('confidence', 0.0):.2f}  dist_to_ref={dist*100:.1f} cm")
+        if dist < best_dist:
             best = (result, T_task_cam)
+            best_dist = dist
     if best is None:
         raise RuntimeError(f"Bottle not detected after {attempts} attempt(s).")
+    print(f"  [best] selected attempt closest to reference: dist={best_dist*100:.1f} cm")
     return best
 
 
@@ -311,6 +323,38 @@ def _sanity_check(bottle_base_task_m: list[float]) -> None:
     else:
         print(f"  [OK]   Bottle XY {np.round(xy, 3)} m - "
               f"{dist*100:.1f} cm from expected.")
+
+
+def _apply_fallback_if_needed(
+    detected_pose: Pose,
+    reference_pose: Pose,
+    threshold_m: float,
+    label: str,
+) -> tuple[Pose, bool]:
+    """Return (pose_to_use, used_fallback).
+
+    When the detected XY is within ``threshold_m`` of the reference landmark,
+    the perception result is returned.  When it exceeds the threshold the
+    reference pose is returned instead and a fallback notice is printed.
+    Callers should recompute the grasp plan from the returned pose.
+    """
+    xy_det = np.array(detected_pose.translation[:2], dtype=float)
+    xy_ref = np.array(reference_pose.translation[:2], dtype=float)
+    deviation = float(np.linalg.norm(xy_det - xy_ref))
+
+    if deviation > threshold_m:
+        print(f"  [FALLBACK] {label} XY {np.round(xy_det, 4)} m is "
+              f"{deviation * 100:.1f} cm from reference "
+              f"{np.round(xy_ref, 4)} m — exceeds "
+              f"{threshold_m * 100:.0f} cm threshold.")
+        print(f"  [FALLBACK] Using precalculated reference pose "
+              f"{np.round(reference_pose.translation, 4)} m.")
+        return reference_pose, True
+
+    print(f"  [OK] {label} XY within fallback threshold "
+          f"({deviation * 100:.1f} cm < {threshold_m * 100:.0f} cm) — "
+          f"using perception pose.")
+    return detected_pose, False
 
 
 def _build_plan(bottle_base_pose: Pose):
@@ -487,6 +531,10 @@ def run(
         print(f"  table-anchored bottle base z = {TABLE_Z_TASK_M:.3f} m")
         print(f"  Corrected base   : {np.round(bottle_base_pose.translation, 4)} m"
               f"  (offset {PERCEPTION_OFFSET_M})")
+        bottle_base_pose, _used_ref = _apply_fallback_if_needed(
+            bottle_base_pose, BOTTLE_PICK_POSE_TASK,
+            GRASP_DEVIATION_FALLBACK_M, "bottle",
+        )
         grasp, upright_at_pour, pour_pose, place_pose = _build_plan(bottle_base_pose)
         _print_plan(bottle_base_pose, grasp, upright_at_pour, pour_pose, place_pose)
         _confirm("Plan looks correct? Execute PICK?", auto)

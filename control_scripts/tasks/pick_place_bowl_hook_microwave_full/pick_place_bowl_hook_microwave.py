@@ -60,6 +60,13 @@ from ...place import place, place_into_box
 from ...session import Session, default_session
 from ...util.poses import Pose, offset_along_tool_z, pose_at_altitude
 from ...util.rtde_convert import rtde_to_pose
+from ...util.tray_layout import (
+    TRAY_DEFAULT_POSE_TASK,
+    TrayPose,
+    place_pose_on_tray,
+)
+from ...lab_landmarks import CUP_MICROWAVE_TOP_XYZ_TASK
+from ...planning.scene.objects import BOWL_DEFAULT_TASK_XYZ
 from ...world import World
 
 
@@ -69,8 +76,10 @@ PICK_FROM: Literal["outside", "microwave"] = "outside"
 PLACE_TO: Literal["outside", "microwave"] = "microwave"
 
 # Free-standing bowl poses (used when the corresponding side is "outside").
-BOWL_PICK_POSE_TASK = Pose(translation=[0.1, 0.0, 0.01])
-BOWL_PLACE_POSE_TASK = Pose(translation=[0.05, -0.125, -0.01])
+BOWL_PICK_POSE_TASK = Pose(translation=BOWL_DEFAULT_TASK_XYZ)
+TRAY_POSE_TASK = TRAY_DEFAULT_POSE_TASK
+BOWL_PLACE_POSE_TASK = place_pose_on_tray("bowl", tray=TRAY_POSE_TASK)
+CUP_ON_TRAY_POSE_TASK = place_pose_on_tray("cup", tray=TRAY_POSE_TASK)
 
 # Intermediate waypoint between pick and place. The transit_z is what
 # actually sets the carry altitude; the Z below is ignored. Picked at a
@@ -192,6 +201,10 @@ known-safe path."""
 MOTION_PLAN_RRT_FALLBACK = True
 """Try RRT after KTO when the optimizer cannot find a planned transit."""
 
+MOTION_PLAN_RRT_MAX_ITERS = 5000
+MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS = 50
+"""RRT fallback budget. Lower these to cap worst-case fallback time."""
+
 MOTION_PLAN_AUTO_FALLBACK = True
 """When the motion planner fails (``plan_transit`` raises, or
 ``execute_plan`` reports a failure), fall back to the sequential moveL
@@ -226,18 +239,6 @@ CARRY_MIN_CLEARANCE_M = 0.005
 margin in places — keep this positive so penetration still fails, but allow a
 tighter corridor."""
 
-INCLUDE_CUP_OBSTACLE = True
-"""When True, the **plain cup** (no stick) is treated as a static obstacle on
-the table during planning so the bowl carry routes around it. Other tabletop
-objects are still skipped because the bowl itself is welded to the gripper
-for planning.
-
-Was previously ``INCLUDE_CUP_WITH_STICK_OBSTACLE`` keyed to ``cup_with_stick``,
-but the stick body extends up into the workspace and triggered IK-branch
-rejections on far branches (``forearm_link↔stick``, ``wrist_1_link↔stick``).
-Plain ``cup`` is short and stays under the typical wrist altitude — same
-table-footprint obstacle for the carry without the spurious stick collisions."""
-
 MOTION_PLAN_N_WAYPOINTS = 30
 MOTION_PLAN_BLEND_R_M = 0.005
 MOTION_PLAN_EXECUTION_METHOD = "servoJ"
@@ -253,32 +254,27 @@ MOTION_PLAN_SERVO_TIME_SCALE = 2.0
 
 WORLD = World(
     include_microwave=True,
-    include_objects=INCLUDE_CUP_OBSTACLE,
-    skip_static_objects=(
-        # Skip everything except plain ``cup`` — that's the single static
-        # obstacle the bowl carry must route around. The bowl itself is
-        # welded to the gripper per-leg via ``in_hand``.
-        ("plate", "cup_with_stick", "bowl", "bottle", "tray")
-        if INCLUDE_CUP_OBSTACLE else ()
-    ),
-    object_xyz_overrides=(
-        # Place plain ``cup`` at the cup-with-stick rig location so the
-        # planning obstacle sits where the actual cup-with-stick is on
-        # the table. ``CUP_WITH_STICK_DEFAULT_TASK_XYZ = (-0.20, -0.125,
-        # 0.0)`` from ``planning/scene/objects.py``; hardcoded here so
-        # the bowl task is self-contained and doesn't import from
-        # private scene constants.
-        {"cup": (-0.20, -0.125, 0.0)}
-        if INCLUDE_CUP_OBSTACLE else {}
-    ),
+    include_objects=True,
+    # The bowl is welded via in_hand during the carry leg, so drop the
+    # static bowl. plate / bottle are out of scene at this point in the
+    # demo. Keep cup (on the tray), cup_with_stick (placed on the
+    # microwave roof earlier), and tray — all three overridden below to
+    # their measured task-frame positions.
+    skip_static_objects=("bowl", "plate", "bottle"),
+    object_xyz_overrides={
+        "cup": tuple(float(v) for v in CUP_ON_TRAY_POSE_TASK.translation),
+        "cup_with_stick": tuple(float(v) for v in CUP_MICROWAVE_TOP_XYZ_TASK),
+        "tray": (TRAY_POSE_TASK.x, TRAY_POSE_TASK.y, TRAY_POSE_TASK.z),
+    },
     robotiq_mode="closed",
     microwave_door_open_rad=MICROWAVE_DOOR_OPEN_ANGLE_RAD,
 )
-"""Single source of env truth. ``include_objects=True`` keeps the
-plain cup as an obstacle on the table at the cup-with-stick location
-(the actual physical placement on the rig). The rest are skipped
-because the bowl itself is welded to the gripper during the carry leg
-via ``in_hand`` per-leg overrides."""
+"""Single source of env truth for this task's planning + sim scenes.
+``in_hand`` is overridden per-leg via ``dataclasses.replace`` (bowl welded
+to the gripper for the post-pick carry, empty for the post-place return).
+The cup sits at its tray-slot position; the cup-with-stick sits on the
+microwave roof (placed earlier by ``pick_place_cup_hook_microwave``);
+both are obstacles the bowl carry plans around."""
 
 
 # --- Pose / grasp planning -------------------------------------------------
@@ -478,6 +474,8 @@ def _plan_sim_legs(grasp, place_pose: Pose, config: PickPlaceConfig):
                 plant_context=approach_plant_ctx,
                 use_rrt_fallback=MOTION_PLAN_RRT_FALLBACK,
                 rrt_diagram=approach_diagram,
+                rrt_max_iters=MOTION_PLAN_RRT_MAX_ITERS,
+                rrt_shortcut_attempts=MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS,
                 min_clearance_m=0.01,
             )
             legs.append(("pre-pick approach to grasp hover", approach_plan))
@@ -563,6 +561,8 @@ def _plan_sim_legs(grasp, place_pose: Pose, config: PickPlaceConfig):
                 current_q=cur_q,
                 use_rrt_fallback=MOTION_PLAN_RRT_FALLBACK,
                 rrt_diagram=carry_diagram,
+                rrt_max_iters=MOTION_PLAN_RRT_MAX_ITERS,
+                rrt_shortcut_attempts=MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS,
                 align_tcp_axis=bowl_up_tcp,
                 align_tcp_axis_world=np.array([0.0, 0.0, 1.0]),
                 align_tcp_axis_tolerance_rad=CARRY_BOWL_LEVEL_TOLERANCE_RAD,
@@ -644,6 +644,8 @@ def _plan_sim_legs(grasp, place_pose: Pose, config: PickPlaceConfig):
                     current_q=cur_q,
                     use_rrt_fallback=MOTION_PLAN_RRT_FALLBACK,
                     rrt_diagram=return_diagram,
+                    rrt_max_iters=MOTION_PLAN_RRT_MAX_ITERS,
+                    rrt_shortcut_attempts=MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS,
                     min_clearance_m=0.01,
                 )
                 break
@@ -775,6 +777,8 @@ def _planned_or_linear_transit(
             current_q=_current_q(session),
             use_rrt_fallback=MOTION_PLAN_RRT_FALLBACK,
             rrt_diagram=diagram,
+            rrt_max_iters=MOTION_PLAN_RRT_MAX_ITERS,
+            rrt_shortcut_attempts=MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS,
             align_tcp_axis=bowl_up_tcp,
             align_tcp_axis_world=np.array([0.0, 0.0, 1.0]),
             align_tcp_axis_tolerance_rad=CARRY_BOWL_LEVEL_TOLERANCE_RAD,

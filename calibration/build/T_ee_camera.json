@@ -1,14 +1,14 @@
 {
-  "description": "T_ee_camera: pose of the camera in the robot TCP (EE) frame. Produced by hand-eye calibration (eye-in-hand, AX=XB). Method: Park, rot_residual_deg: 0.4956.",
+  "description": "T_ee_camera: pose of the camera in the robot TCP (EE) frame. Produced by hand-eye calibration (eye-in-hand, AX=XB). Method: Horaud, rot_residual_deg: 0.4456.",
   "arm": "left",
-  "method": "Park",
-  "rot_residual_deg": 0.4956,
+  "method": "Horaud",
+  "rot_residual_deg": 0.4456,
   "R_ee_camera": [
-    [0.0074740634, -0.0159571611, -0.9998447416],
-    [-0.9999558253, -0.0058183259, -0.0073820354],
-    [-0.0056996262, 0.9998557476, -0.0159999427]
+    [0.0117479275, -0.0206049324, -0.9997186719],
+    [-0.0157487453, -0.9996674693, 0.0204188099],
+    [-0.9998069630, 0.0155044360, -0.0120685228]
   ],
-  "t_ee_camera_m": [0.0198679514, 0.0328355666, 0.0430450554],
-  "rotvec_ee_camera": [1.2287105445, -1.2127390441, -1.2003615779],
+  "t_ee_camera_m": [0.0224248182, -0.0436783357, 0.0309987680],
+  "rotvec_ee_camera": [-2.2319915875, 0.0400997023, 2.2055645477],
   "n_samples": 12
 }

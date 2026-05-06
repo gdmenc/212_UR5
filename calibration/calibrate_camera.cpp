@@ -45,11 +45,15 @@ extern "C" {
 }
 
 // =========================================================================
-//  AprilTag Configuration - ADJUST THESE TO MATCH YOUR TAG
+//  AprilTag Board Configuration — 3x3 tag36h11 board
 // =========================================================================
-static constexpr double TAG_SIZE_M = 0.093; // Tag size in meters (e.g., 93mm)
-static constexpr int TARGET_TAG_ID =
-    -1; // -1 = auto-lock to first seen tag for session consistency.
+static constexpr double TAG_SIZE_M    = 0.040;                       // 40 mm black square
+static constexpr double TAG_SPACING_M = 0.020;                       // 20 mm white gap
+static constexpr double TAG_PITCH_M   = TAG_SIZE_M + TAG_SPACING_M; // 60 mm center-to-center
+
+static constexpr int BOARD_ROWS       = 3;
+static constexpr int BOARD_COLS       = 3;
+static constexpr int MIN_VISIBLE_TAGS = 2;  // need at least this many to solve PnP
 
 static constexpr double MIN_ROTATION_SPREAD_DEG = 10.0;
 
@@ -101,122 +105,128 @@ static cv::Mat inv_T44(const cv::Mat &M) {
 
 struct DetectResult {
   bool ok = false;
-  int tag_id = -1;
+  int n_tags = 0;  // number of board tags visible
   cv::Vec3d rvec = {0, 0, 0};
   cv::Vec3d tvec = {0, 0, 0};
   cv::Mat vis; // annotated BGR frame
 };
 
+// Returns the center of tag `id` in the board frame (origin = center of tag 4).
+static bool tag_center_on_board(int id, double &x, double &y) {
+  if (id < 0 || id >= BOARD_ROWS * BOARD_COLS)
+    return false;
+  int row = id / BOARD_COLS;
+  int col = id % BOARD_COLS;
+  x = (col - (BOARD_COLS - 1) / 2.0) * TAG_PITCH_M;
+  y = (row - (BOARD_ROWS - 1) / 2.0) * TAG_PITCH_M;
+  return true;
+}
+
+// Uses AprilTag's own per-tag pose estimator, converts each to a board pose,
+// and averages — avoids fragile corner-order assumptions of solvePnP.
 static DetectResult detect_apriltag(const cv::Mat &gray, const cv::Mat &K,
-                                    double tag_size, int target_id) {
+                                    const cv::Mat &D) {
   DetectResult res;
   cv::cvtColor(gray, res.vis, cv::COLOR_GRAY2BGR);
 
-  // Create AprilTag detector
   apriltag_family_t *tf = tag36h11_create();
   apriltag_detector_t *td = apriltag_detector_create();
   apriltag_detector_add_family(td, tf);
-
-  // Configure detector
   td->quad_decimate = 1.0;
   td->quad_sigma = 0.0;
   td->nthreads = 1;
   td->refine_edges = 1;
 
-  // Convert to apriltag image format
-  image_u8_t im = {.width = gray.cols,
-                   .height = gray.rows,
-                   .stride = gray.cols,
-                   .buf = gray.data};
-
-  // Detect tags
+  image_u8_t im = {.width = gray.cols, .height = gray.rows,
+                   .stride = gray.cols, .buf = gray.data};
   zarray_t *detections = apriltag_detector_detect(td, &im);
 
-  if (zarray_size(detections) == 0) {
-    // No tags detected
-    apriltag_detections_destroy(detections);
-    apriltag_detector_destroy(td);
-    tag36h11_destroy(tf);
-    return res;
-  }
+  std::vector<cv::Mat> R_cam_board_list;
+  std::vector<cv::Mat> t_cam_board_list;
 
-  // Find target tag (or first tag if target_id == -1)
-  apriltag_detection_t *det = nullptr;
   for (int i = 0; i < zarray_size(detections); ++i) {
-    apriltag_detection_t *d;
-    zarray_get(detections, i, &d);
+    apriltag_detection_t *det;
+    zarray_get(detections, i, &det);
 
-    if (target_id == -1 || d->id == target_id) {
-      det = d;
-      break;
+    double tag_x_board, tag_y_board;
+    if (!tag_center_on_board(det->id, tag_x_board, tag_y_board))
+      continue;
+
+    for (int j = 0; j < 4; ++j) {
+      cv::Point p1(det->p[j][0], det->p[j][1]);
+      cv::Point p2(det->p[(j + 1) % 4][0], det->p[(j + 1) % 4][1]);
+      cv::line(res.vis, p1, p2, cv::Scalar(0, 255, 0), 2);
     }
+    cv::putText(res.vis, "ID " + std::to_string(det->id),
+                cv::Point(det->c[0], det->c[1]),
+                cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(0, 0, 255), 2);
+
+    apriltag_detection_info_t info;
+    info.det = det;
+    info.tagsize = TAG_SIZE_M;
+    info.fx = K.at<double>(0, 0);
+    info.fy = K.at<double>(1, 1);
+    info.cx = K.at<double>(0, 2);
+    info.cy = K.at<double>(1, 2);
+
+    apriltag_pose_t pose;
+    estimate_tag_pose(&info, &pose);
+
+    cv::Mat R_cam_tag(3, 3, CV_64F);
+    cv::Mat t_cam_tag(3, 1, CV_64F);
+    for (int r = 0; r < 3; ++r)
+      for (int c = 0; c < 3; ++c)
+        R_cam_tag.at<double>(r, c) = pose.R->data[r * 3 + c];
+    t_cam_tag.at<double>(0) = pose.t->data[0];
+    t_cam_tag.at<double>(1) = pose.t->data[1];
+    t_cam_tag.at<double>(2) = pose.t->data[2];
+
+    matd_destroy(pose.R);
+    matd_destroy(pose.t);
+
+    cv::Mat T_cam_tag = make_T44(R_cam_tag, t_cam_tag);
+
+    cv::Mat R_board_tag = cv::Mat::eye(3, 3, CV_64F);
+    cv::Mat t_board_tag =
+        (cv::Mat_<double>(3, 1) << tag_x_board, tag_y_board, 0.0);
+    cv::Mat T_board_tag = make_T44(R_board_tag, t_board_tag);
+
+    // T_cam_board = T_cam_tag * inv(T_board_tag)
+    cv::Mat T_cam_board = T_cam_tag * inv_T44(T_board_tag);
+
+    R_cam_board_list.push_back(T_cam_board(cv::Rect(0, 0, 3, 3)).clone());
+    t_cam_board_list.push_back(T_cam_board(cv::Rect(3, 0, 1, 3)).clone());
+    ++res.n_tags;
   }
 
-  if (!det) {
-    // Target tag not found
-    apriltag_detections_destroy(detections);
-    apriltag_detector_destroy(td);
-    tag36h11_destroy(tf);
-    return res;
-  }
-
-  // Draw detection
-  for (int j = 0; j < 4; ++j) {
-    cv::Point p1(det->p[j][0], det->p[j][1]);
-    cv::Point p2(det->p[(j + 1) % 4][0], det->p[(j + 1) % 4][1]);
-    cv::line(res.vis, p1, p2, cv::Scalar(0, 255, 0), 2);
-  }
-
-  // Draw tag ID
-  cv::Point center(det->c[0], det->c[1]);
-  cv::putText(res.vis, "ID: " + std::to_string(det->id), center,
-              cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0, 0, 255), 2);
-
-  // Estimate pose
-  apriltag_detection_info_t info;
-  info.det = det;
-  info.tagsize = tag_size;
-  info.fx = K.at<double>(0, 0);
-  info.fy = K.at<double>(1, 1);
-  info.cx = K.at<double>(0, 2);
-  info.cy = K.at<double>(1, 2);
-
-  apriltag_pose_t pose;
-  estimate_tag_pose(&info, &pose);
-
-  // Convert pose to OpenCV format
-  // AprilTag pose: R is 3x3 rotation matrix, t is 3x1 translation
-  cv::Mat R_mat(3, 3, CV_64F);
-  for (int i = 0; i < 3; ++i) {
-    for (int j = 0; j < 3; ++j) {
-      R_mat.at<double>(i, j) = pose.R->data[i * 3 + j];
-    }
-  }
-
-  cv::Vec3d t_vec(pose.t->data[0], pose.t->data[1], pose.t->data[2]);
-
-  // Convert rotation matrix to rotation vector
-  cv::Mat rvec_mat;
-  cv::Rodrigues(R_mat, rvec_mat);
-  cv::Vec3d r_vec(rvec_mat.at<double>(0), rvec_mat.at<double>(1),
-                  rvec_mat.at<double>(2));
-
-  res.ok = true;
-  res.tag_id = det->id;
-  res.rvec = r_vec;
-  res.tvec = t_vec;
-
-  // Draw coordinate axes
-  cv::Mat distCoeffs =
-      cv::Mat::zeros(5, 1, CV_64F); // No distortion for RealSense
-  cv::drawFrameAxes(res.vis, K, distCoeffs, rvec_mat, cv::Mat(t_vec),
-                    tag_size * 0.5);
-
-  // Cleanup
   apriltag_detections_destroy(detections);
   apriltag_detector_destroy(td);
   tag36h11_destroy(tf);
 
+  if (res.n_tags < MIN_VISIBLE_TAGS)
+    return res;
+
+  cv::Mat t_avg = cv::Mat::zeros(3, 1, CV_64F);
+  for (const auto &t : t_cam_board_list)
+    t_avg += t;
+  t_avg /= static_cast<double>(t_cam_board_list.size());
+
+  cv::Mat rvec_avg = cv::Mat::zeros(3, 1, CV_64F);
+  for (const auto &R : R_cam_board_list) {
+    cv::Mat rv;
+    cv::Rodrigues(R, rv);
+    rvec_avg += rv;
+  }
+  rvec_avg /= static_cast<double>(R_cam_board_list.size());
+
+  res.ok = true;
+  res.rvec = cv::Vec3d(rvec_avg.at<double>(0), rvec_avg.at<double>(1),
+                       rvec_avg.at<double>(2));
+  res.tvec = cv::Vec3d(t_avg.at<double>(0), t_avg.at<double>(1),
+                       t_avg.at<double>(2));
+
+  cv::drawFrameAxes(res.vis, K, cv::Mat::zeros(5, 1, CV_64F),
+                    rvec_avg, t_avg, TAG_PITCH_M);
   return res;
 }
 
@@ -397,16 +407,14 @@ static void run_live(const std::string &arm, int min_samples,
   std::vector<cv::Mat> R_tgt_list, t_tgt_list;
 
   std::cout << "\n" << std::string(60, '=') << "\n";
-  std::cout << "  HAND-EYE CALIBRATION (AprilTag)\n";
+  std::cout << "  HAND-EYE CALIBRATION (3x3 AprilTag board)\n";
   std::cout << std::string(60, '=') << "\n";
-  std::cout << "  Tag size: " << TAG_SIZE_M << " meters\n";
-  if (TARGET_TAG_ID >= 0) {
-    std::cout << "  Target tag ID: " << TARGET_TAG_ID << "\n";
-  } else {
-    std::cout << "  Target: auto-lock first seen tag ID\n";
-  }
+  std::printf("  Tag size: %.0f mm  spacing: %.0f mm  pitch: %.0f mm\n",
+              TAG_SIZE_M*1000, TAG_SPACING_M*1000, TAG_PITCH_M*1000);
+  std::printf("  Board: %dx%d (IDs 0-%d)  min visible: %d\n",
+              BOARD_ROWS, BOARD_COLS, BOARD_ROWS*BOARD_COLS-1, MIN_VISIBLE_TAGS);
   std::cout << std::string(60, '=') << "\n";
-  std::cout << "  SPACE : capture sample (tag must be detected)\n";
+  std::cout << "  SPACE : capture sample (board must be detected)\n";
   std::cout << "  Q     : finish and run calibration\n";
   std::cout << "  ESC   : abort\n";
   std::cout << std::string(60, '=') << "\n\n";
@@ -414,7 +422,6 @@ static void run_live(const std::string &arm, int min_samples,
   const std::string window = "Hand-Eye Calibration";
   cv::namedWindow(window, cv::WINDOW_NORMAL);
   cv::resizeWindow(window, 960, 540);
-  int active_target_id = TARGET_TAG_ID;
 
   while (true) {
     rs2::frameset frameset = pipe.wait_for_frames();
@@ -428,14 +435,7 @@ static void run_live(const std::string &arm, int min_samples,
     cv::Mat gray;
     cv::cvtColor(bgr, gray, cv::COLOR_BGR2GRAY);
 
-    auto det = detect_apriltag(gray, K, TAG_SIZE_M, active_target_id);
-    if (active_target_id == -1 && det.ok) {
-      active_target_id = det.tag_id;
-      std::cout << "[INFO] Locked target tag ID to " << active_target_id
-                << " for this calibration session.\n";
-      // Re-run detection with locked ID so overlay/status are consistent.
-      det = detect_apriltag(gray, K, TAG_SIZE_M, active_target_id);
-    }
+    auto det = detect_apriltag(gray, K, D);
 
     int n_samp = static_cast<int>(R_ee_list.size());
     double diversity = rotation_spread(R_ee_list);
@@ -451,16 +451,12 @@ static void run_live(const std::string &arm, int min_samples,
                  std::to_string(min_samples) + ")",
              0);
 
-    std::string tag_str =
-        det.ok ? "FOUND (ID " + std::to_string(det.tag_id) + ")" : "NOT FOUND";
-    put_text("Tag     : " + tag_str, 1,
+    char board_buf[64];
+    std::snprintf(board_buf, sizeof(board_buf), "Board   : %d/%d tags%s",
+                  det.n_tags, BOARD_ROWS * BOARD_COLS,
+                  det.ok ? " — LOCKED" : "");
+    put_text(board_buf, 1,
              det.ok ? cv::Scalar(0, 255, 0) : cv::Scalar(0, 0, 255));
-    if (active_target_id >= 0) {
-      put_text("Target  : ID " + std::to_string(active_target_id), 2,
-               cv::Scalar(120, 220, 255));
-    } else {
-      put_text("Target  : waiting to lock first tag", 2, cv::Scalar(0, 200, 255));
-    }
 
     char div_buf[64];
     std::snprintf(div_buf, sizeof(div_buf), "Diversity: %.2f  (aim > 0.5)",
@@ -492,7 +488,8 @@ static void run_live(const std::string &arm, int min_samples,
 
     if (key == ' ') {
       if (!det.ok) {
-        std::cout << "[SKIP] Tag not detected — reposition.\n";
+        std::printf("[SKIP] Board not detected (%d/%d tags) — reposition.\n",
+                    det.n_tags, MIN_VISIBLE_TAGS);
         continue;
       }
 
@@ -530,9 +527,9 @@ static void run_live(const std::string &arm, int min_samples,
 
       double dist = cv::norm(cv::Mat(det.tvec));
       std::printf("[CAPTURE #%d] EE xyz=(%.3f, %.3f, %.3f) m  "
-                  "tag dist=%.3f m  diversity=%.2f\n",
+                  "board dist=%.3f m  tags=%d  diversity=%.2f\n",
                   n_samp + 1, ee_tvec[0], ee_tvec[1], ee_tvec[2], dist,
-                  rotation_spread(R_ee_list));
+                  det.n_tags, rotation_spread(R_ee_list));
     }
   }
 
@@ -621,15 +618,17 @@ static void print_usage(const char *prog) {
       "  --output PATH       Output JSON path (default: T_ee_camera.json)\n"
       "  --help              Show this help\n"
       "\n"
-      "AprilTag configuration (edit source to change):\n"
-      "  Tag size:      %.3f m\n"
-      "  Target tag ID: %d (-1 = any tag)\n"
+      "AprilTag board configuration (edit source to change):\n"
+      "  Tag size:    %.0f mm  spacing: %.0f mm  pitch: %.0f mm\n"
+      "  Board:       %dx%d (IDs 0-%d)  min visible tags: %d\n"
       "\n"
       "EE pose format (prompted after each SPACE capture):\n"
       "  x y z rx ry rz  — translation in metres, rotation as axis-angle in "
       "RADIANS\n"
       "  Use the 'base_pose' rotvec field from record_waypoints snapshots.\n",
-      prog, TAG_SIZE_M, TARGET_TAG_ID);
+      prog,
+      TAG_SIZE_M*1000, TAG_SPACING_M*1000, TAG_PITCH_M*1000,
+      BOARD_ROWS, BOARD_COLS, BOARD_ROWS*BOARD_COLS-1, MIN_VISIBLE_TAGS);
 }
 
 int main(int argc, char **argv) {

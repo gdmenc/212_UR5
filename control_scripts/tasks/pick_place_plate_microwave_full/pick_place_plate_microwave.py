@@ -84,6 +84,13 @@ from ...place import place, place_into_box
 from ...session import Session, default_session
 from ...util.poses import Pose, offset_along_tool_z, pose_at_altitude
 from ...util.rtde_convert import rtde_to_pose
+from ...util.tray_layout import (
+    TRAY_DEFAULT_POSE_TASK,
+    TrayPose,
+    place_pose_on_tray,
+)
+from ...lab_landmarks import CUP_MICROWAVE_TOP_XYZ_TASK
+from ...planning.scene.objects import PLATE_DEFAULT_TASK_XYZ
 from ...world import World
 
 
@@ -94,12 +101,10 @@ PLACE_TO: Literal["outside", "microwave"] = "microwave"
 # PLACE_TO: Literal["outside", "microwave"] = "outside"
 
 # Free-standing plate poses (used when the corresponding side is "outside").
-# 0.025 m is the height of the plate rim that is reasonable for pickup /
-# setdown — same convention as ``pick_place_plate.py``.
-
-# These are the same given these are the outside poses to set these plates down
-PLATE_PICK_POSE_TASK = Pose(translation=[0.295521, -0.1, 0.01])
-PLATE_PLACE_POSE_TASK = Pose(translation=[0.295521, -0.1, 0.01])
+PLATE_PICK_POSE_TASK = Pose(translation=PLATE_DEFAULT_TASK_XYZ)
+TRAY_POSE_TASK = TRAY_DEFAULT_POSE_TASK
+PLATE_PLACE_POSE_TASK = place_pose_on_tray("plate", tray=TRAY_POSE_TASK)
+CUP_ON_TRAY_POSE_TASK = place_pose_on_tray("cup", tray=TRAY_POSE_TASK)
 
 # Intermediate waypoint between pick and place. Z is ignored —
 # transit_z sets the carry altitude. Picked at a Cartesian location
@@ -120,7 +125,7 @@ pick→entry swing."""
 # ``plate_rim_grasp_edge`` the TCP yaw = angle_rad + π.
 
 GRASP_ANGLE_RAD = 0.0
-PLACE_ANGLE_RAD = -np.radians(60)
+PLACE_ANGLE_RAD = -np.radians(55)
 # GRASP_ANGLE_RAD = -np.radians(51)
 # PLACE_ANGLE_RAD = 0 # ~-50.6° — same as the non-microwave plate task
 
@@ -149,7 +154,7 @@ RELEASE_APPROACH_ANGLE_RAD = np.radians(90)
 # 14 + 18.4 = 32.4 cm — ABOVE the 23 cm ceiling. See top-of-file
 # warning; this constant is correct for an enlarged real cavity but
 # does not magically fit a 23 cm one.
-MICROWAVE_ENTRY_Z = 0.13
+MICROWAVE_ENTRY_Z = 0.12
 
 PLATE_ENTRY_CLEARANCE = 0.2
 """Distance outside the microwave door before lowering to ``MICROWAVE_ENTRY_Z``.
@@ -164,7 +169,7 @@ treated as a closed obstacle during the carry-to-entry plan.
 """
 
 # Plate center at task z when sitting on tray = tray + plate rim height.
-MICROWAVE_PLATE_Z = MICROWAVE_FLOOR_Z + PLATE_RIM_HEIGHT - 0.03  # 0.10 m
+MICROWAVE_PLATE_Z = MICROWAVE_FLOOR_Z + PLATE_RIM_HEIGHT - 0.02  # 0.10 m
 
 ARM = "ur_right"
 
@@ -176,13 +181,27 @@ them. Set False on tasks that have no planner-driven segments."""
 
 WORLD = World(
     include_microwave=True,
-    include_objects=False,                         # task uses live grasp pose, not the demo plate
+    include_objects=True,
+    # The plate is welded via in_hand during the carry leg, so drop the
+    # static plate to avoid double-loading. bowl / bottle are out of
+    # scene at this point in the demo. Keep cup (on the tray),
+    # cup_with_stick (placed on the microwave roof earlier), and tray —
+    # all three overridden below to their measured task-frame positions.
+    skip_static_objects=("plate", "bowl", "bottle"),
+    object_xyz_overrides={
+        "cup": tuple(float(v) for v in CUP_ON_TRAY_POSE_TASK.translation),
+        "cup_with_stick": tuple(float(v) for v in CUP_MICROWAVE_TOP_XYZ_TASK),
+        "tray": (TRAY_POSE_TASK.x, TRAY_POSE_TASK.y, TRAY_POSE_TASK.z),
+    },
     robotiq_mode="closed",
     microwave_door_open_rad=MICROWAVE_DOOR_OPEN_ANGLE_RAD,
 )
 """Single source of env truth for this task's planning + sim scenes.
 ``in_hand`` is overridden per-leg via ``dataclasses.replace`` (plate welded
-to the gripper for the post-pick carry, empty for the post-place return)."""
+to the gripper for the post-pick carry, empty for the post-place return).
+The cup sits at its tray-slot position; the cup-with-stick sits on the
+microwave roof (placed earlier by ``pick_place_cup_hook_microwave``);
+both are obstacles the plate carry plans around."""
 
 CONFIG = PickPlaceConfig(
     transit_z=0.22,
@@ -218,6 +237,10 @@ before the planner was added. Useful when the planner can't be trusted
 
 MOTION_PLAN_RRT_FALLBACK = True
 """Try RRT after KTO when the optimizer cannot find a planned transit."""
+
+MOTION_PLAN_RRT_MAX_ITERS = 5000
+MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS = 50
+"""RRT fallback budget. Lower these to cap worst-case fallback time."""
 
 MOTION_PLAN_AUTO_FALLBACK = True
 """When the motion planner fails (``plan_transit`` raises, or
@@ -456,6 +479,8 @@ def _plan_sim_legs(grasp, place_pose: Pose, config: PickPlaceConfig):
                 plant_context=approach_plant_ctx,
                 use_rrt_fallback=MOTION_PLAN_RRT_FALLBACK,
                 rrt_diagram=approach_diagram,
+                rrt_max_iters=MOTION_PLAN_RRT_MAX_ITERS,
+                rrt_shortcut_attempts=MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS,
                 min_clearance_m=0.01,
             )
             legs.append(("pre-pick approach to grasp hover", approach_plan))
@@ -504,6 +529,8 @@ def _plan_sim_legs(grasp, place_pose: Pose, config: PickPlaceConfig):
             current_q={ARM: chained_arm_q} if chained_arm_q is not None else None,
             use_rrt_fallback=MOTION_PLAN_RRT_FALLBACK,
             rrt_diagram=carry_diagram,
+            rrt_max_iters=MOTION_PLAN_RRT_MAX_ITERS,
+            rrt_shortcut_attempts=MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS,
             align_tcp_axis=plate_normal_tcp,
             align_tcp_axis_world=np.array([0.0, 0.0, 1.0]),
             align_tcp_axis_tolerance_rad=CARRY_PLATE_LEVEL_TOLERANCE_RAD,
@@ -558,6 +585,8 @@ def _plan_sim_legs(grasp, place_pose: Pose, config: PickPlaceConfig):
             current_q={ARM: chained_arm_q} if chained_arm_q is not None else None,
             use_rrt_fallback=MOTION_PLAN_RRT_FALLBACK,
             rrt_diagram=return_diagram,
+            rrt_max_iters=MOTION_PLAN_RRT_MAX_ITERS,
+            rrt_shortcut_attempts=MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS,
             min_clearance_m=0.01,
         )
     except InfeasiblePlanError as exc:
@@ -690,6 +719,8 @@ def _planned_or_linear_transit(
             current_q=_current_q(session),
             use_rrt_fallback=MOTION_PLAN_RRT_FALLBACK,
             rrt_diagram=diagram,
+            rrt_max_iters=MOTION_PLAN_RRT_MAX_ITERS,
+            rrt_shortcut_attempts=MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS,
             align_tcp_axis=plate_normal_tcp,
             align_tcp_axis_world=np.array([0.0, 0.0, 1.0]),
             align_tcp_axis_tolerance_rad=CARRY_PLATE_LEVEL_TOLERANCE_RAD,
