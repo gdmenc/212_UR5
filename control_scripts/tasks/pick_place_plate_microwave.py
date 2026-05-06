@@ -204,6 +204,8 @@ treated as a closed obstacle during the carry-to-entry plan.
 
 # Plate center at task z when sitting on tray = tray + plate rim height.
 MICROWAVE_PLATE_Z = MICROWAVE_FLOOR_Z + PLATE_RIM_HEIGHT - 0.02  # 0.10 m
+MICROWAVE_PLATE_XY_NUDGE_M = np.array([0.02, 0.01])
+"""Task-frame nudge for microwave plate setdown: +2 cm x, +1 cm y."""
 
 ARM = "ur_right"
 
@@ -298,9 +300,10 @@ MOTION_PLAN_BLEND_R_M = 0.005
 
 def _plate_pose_for(side: str, default: Pose) -> Pose:
     if side == "microwave":
+        xy = np.asarray(MICROWAVE_CENTER_XY_TASK, dtype=float) + MICROWAVE_PLATE_XY_NUDGE_M
         return Pose(translation=[
-            MICROWAVE_CENTER_XY_TASK[0],
-            MICROWAVE_CENTER_XY_TASK[1],
+            xy[0],
+            xy[1],
             MICROWAVE_PLATE_Z,
         ])
     return default
