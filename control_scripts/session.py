@@ -40,7 +40,7 @@ from .util.poses import Pose
 
 # --- Default network config for the 212 rig --------------------------------
 # DEFAULT_LEFT_IP = "192.168.137.2"
-DEFAULT_LEFT_IP = "192.168.1.101"
+DEFAULT_LEFT_IP = "192.168.137.2"
 DEFAULT_RIGHT_IP = "192.168.1.102"
 DEFAULT_CONNECT_TRIES = 3
 DEFAULT_CONNECT_RETRY_DELAY = 0.1   # seconds between reconnect attempts

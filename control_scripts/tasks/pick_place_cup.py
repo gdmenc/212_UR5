@@ -42,17 +42,17 @@ from ..world import World
 
 
 # --- Tunables (edit to match your physical layout) ------------------------
-CUP_PICK_POSE_TASK = Pose(translation=[-0.08, -0.125, 0.0])
+CUP_PICK_POSE_TASK = Pose(translation=[-0.07, -0.11, 0.0])
 # CUP_PICK_POSE_TASK = Pose(translation=[0.3, 0.075, 0.0])
 """Cup base at PICK location, expressed in task frame. Edit to match the
 table layout. Z is the resting surface; the rim is at z + CUP_HEIGHT_M."""
 
-CUP_PLACE_POSE_TASK = Pose(translation=[0, 0, 0.0])
+CUP_PLACE_POSE_TASK = Pose(translation=[-0.1, 0, 0.0])
 # CUP_PLACE_POSE_TASK = Pose(translation=[0.33, 0.075, 0.0])
 """Cup base at PLACE location, task frame. Defaults to the same as the
 pick pose (set it back down) — set to a different translation to relocate."""
 
-FINAL_XY = np.array([0.35, 0.0])
+FINAL_XY = np.array([0.4, 0.0])
 """Task-frame XY to move the arm to after placing, at ``CONFIG.transit_z``."""
 
 GRASP_ANGLE_RAD = 0.0
@@ -91,6 +91,10 @@ Pick's own lift+transit_xy then become near-no-ops."""
 
 MOTION_PLAN_RRT_FALLBACK = True
 """Try RRT after KTO when the optimizer cannot find a planned transit."""
+
+MOTION_PLAN_RRT_MAX_ITERS = 2000
+MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS = 20
+"""RRT fallback budget. Lower these to cap worst-case fallback time."""
 
 MOTION_PLAN_AUTO_FALLBACK = True
 """On planner failure (``plan_transit`` raises or ``execute_plan`` reports
@@ -251,6 +255,8 @@ def _planned_or_linear_transit(
             current_q=_current_q(session),
             use_rrt_fallback=MOTION_PLAN_RRT_FALLBACK,
             rrt_diagram=diagram,
+            rrt_max_iters=MOTION_PLAN_RRT_MAX_ITERS,
+            rrt_shortcut_attempts=MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS,
             min_clearance_m=CARRY_MIN_CLEARANCE_M if attached_cup else 0.01,
             rtde_ik=make_rtde_ik(arm),
         )
@@ -333,6 +339,8 @@ def _plan_sim_legs(grasp, place_pose: Pose, config: PickPlaceConfig):
                 plant_context=approach_plant_ctx,
                 use_rrt_fallback=MOTION_PLAN_RRT_FALLBACK,
                 rrt_diagram=approach_diagram,
+                rrt_max_iters=MOTION_PLAN_RRT_MAX_ITERS,
+                rrt_shortcut_attempts=MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS,
                 min_clearance_m=0.01,
             )
             legs.append(("pre-pick approach to grasp hover", approach_plan))
@@ -371,6 +379,8 @@ def _plan_sim_legs(grasp, place_pose: Pose, config: PickPlaceConfig):
             current_q={ARM: chained_arm_q} if chained_arm_q is not None else None,
             use_rrt_fallback=MOTION_PLAN_RRT_FALLBACK,
             rrt_diagram=carry_diagram,
+            rrt_max_iters=MOTION_PLAN_RRT_MAX_ITERS,
+            rrt_shortcut_attempts=MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS,
             min_clearance_m=CARRY_MIN_CLEARANCE_M,
         )
     except InfeasiblePlanError as exc:
@@ -407,6 +417,8 @@ def _plan_sim_legs(grasp, place_pose: Pose, config: PickPlaceConfig):
             current_q={ARM: chained_arm_q} if chained_arm_q is not None else None,
             use_rrt_fallback=MOTION_PLAN_RRT_FALLBACK,
             rrt_diagram=return_diagram,
+            rrt_max_iters=MOTION_PLAN_RRT_MAX_ITERS,
+            rrt_shortcut_attempts=MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS,
             min_clearance_m=0.01,
         )
     except InfeasiblePlanError as exc:

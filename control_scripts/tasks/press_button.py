@@ -63,7 +63,6 @@ import argparse
 import json
 import os
 import time
-from dataclasses import replace
 from typing import Tuple
 
 import numpy as np
@@ -78,7 +77,7 @@ from ..microwave import (
     WHITE_TABLE_TOP_Z,
     door_plane_y,
 )
-from ..moves import approach_to, lift_to_transit, move_until_contact, retract_to, transit_xy
+from ..moves import approach_to, lift_to_transit, move_until_contact, retract_to
 from ..session import Session, default_session
 from ..util.poses import Pose, pose_at_altitude
 from ..util.rotations import Rotation
@@ -200,6 +199,10 @@ hover. The existing ``moveJ(q_start)`` is kept as a final joint-precision
 settle so the arm finishes at exactly its task-entry joint config."""
 
 MOTION_PLAN_RRT_FALLBACK = True
+MOTION_PLAN_RRT_MAX_ITERS = 2000
+MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS = 20
+"""RRT fallback budget. Lower these to cap worst-case fallback time."""
+
 MOTION_PLAN_AUTO_FALLBACK = True
 """On planner failure, fall back to the original lift + approach_to
 sequence with a loud warning rather than failing the task."""
@@ -516,6 +519,8 @@ def _planned_or_linear_press_transit(
             current_q=_current_q(session),
             use_rrt_fallback=MOTION_PLAN_RRT_FALLBACK,
             rrt_diagram=diagram,
+            rrt_max_iters=MOTION_PLAN_RRT_MAX_ITERS,
+            rrt_shortcut_attempts=MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS,
             min_clearance_m=0.01,
             rtde_ik=make_rtde_ik(arm),
         )
@@ -583,6 +588,8 @@ def _plan_sim_legs(standoff: Pose, config: PickPlaceConfig):
             plant_context=plant_ctx,
             use_rrt_fallback=MOTION_PLAN_RRT_FALLBACK,
             rrt_diagram=diagram,
+            rrt_max_iters=MOTION_PLAN_RRT_MAX_ITERS,
+            rrt_shortcut_attempts=MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS,
             min_clearance_m=0.01,
         )
         legs.append(("pre-press approach to standoff hover", plan))
@@ -606,6 +613,8 @@ def _plan_sim_legs(standoff: Pose, config: PickPlaceConfig):
                 current_q={ARM: chained_arm_q},
                 use_rrt_fallback=MOTION_PLAN_RRT_FALLBACK,
                 rrt_diagram=diagram,
+                rrt_max_iters=MOTION_PLAN_RRT_MAX_ITERS,
+                rrt_shortcut_attempts=MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS,
                 min_clearance_m=0.01,
             )
             legs.append(("post-press return to HOME hover", plan2))

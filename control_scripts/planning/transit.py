@@ -51,7 +51,7 @@ from pydrake.multibody.inverse_kinematics import (
     PositionConstraint,
 )
 from pydrake.multibody.plant import MultibodyPlant
-from pydrake.multibody.tree import ModelInstanceIndex
+from pydrake.multibody.tree import BodyIndex, ModelInstanceIndex
 from pydrake.planning import KinematicTrajectoryOptimization
 from pydrake.solvers import Solve
 from pydrake.systems.framework import Context
@@ -62,6 +62,13 @@ from pydrake.trajectories import (
 )
 
 from ..util.poses import Pose
+from . import warmstart
+
+
+WARMSTART_ENABLED = True
+"""When True, ``_plan_constrained_kto`` consults ``warmstart`` for a
+cached B-spline before falling back to the from-scratch cubic-spline
+seed. Cache is in-memory only (process-local). Set False to bypass."""
 
 
 # ---------------------------------------------------------------------------
@@ -1686,12 +1693,47 @@ def _plan_constrained_kto(
         for s in s_samples:
             trajopt.AddPathPositionConstraint(coll_constraint, float(s))
 
-    # ----- Initial guess: cubic spline through the IK'd waypoints -----
-    # We hand KTO a dense BsplineTrajectory built on its own basis so
-    # the initial control points line up exactly with KTO's parameterisation.
-    initial_traj = _initial_guess_for_kto(
-        waypoints_q_full, duration_s, trajopt.basis(),
+    # ----- Initial guess: warmstart cache → cubic spline fallback -----
+    # KTO is gradient-descent NLP; a near-feasible seed (from a prior solve
+    # of a similar problem) typically converges in <10 iterations vs. 100s
+    # from a constraint-violating cubic spline.
+    problem_signature = _kto_problem_signature(
+        plant=plant,
+        plant_context=plant_context,
+        arm=arm,
+        duration_s=duration_s,
+        n_ctrl=n_ctrl,
+        spline_order=spline_order,
+        waypoints_q_full=waypoints_q_full,
+        fix_orientation=fix_orientation,
+        fix_orientation_tolerance_rad=fix_orientation_tolerance_rad,
+        align_tcp_axis=align_tcp_axis,
+        align_tcp_axis_world=align_tcp_axis_world,
+        align_tcp_axis_tolerance_rad=align_tcp_axis_tolerance_rad,
+        fix_z_task=fix_z_task,
+        z_tolerance_m=z_tolerance_m,
+        avoid_collisions=avoid_collisions,
+        min_clearance_m=min_clearance_m,
+        avoid_arm_singularity=avoid_arm_singularity,
+        self_collision=self_collision,
+        min_z_task=min_z_task,
+        max_tcp_linear_speed_m_per_s=max_tcp_linear_speed_m_per_s,
+        extra_clearance_to=extra_clearance_to,
+        stay_in_workspace_box=stay_in_workspace_box,
     )
+    cached_cps = (
+        warmstart.lookup(q_start, q_end, problem_signature)
+        if WARMSTART_ENABLED else None
+    )
+    warmstart_hit = cached_cps is not None
+    if warmstart_hit and cached_cps.shape == (num_q, n_ctrl):
+        cps_list = [cached_cps[:, k:k + 1] for k in range(n_ctrl)]
+        initial_traj = BsplineTrajectory(trajopt.basis(), cps_list)
+    else:
+        warmstart_hit = False  # shape mismatch counts as a miss
+        initial_traj = _initial_guess_for_kto(
+            waypoints_q_full, duration_s, trajopt.basis(),
+        )
     trajopt.SetInitialGuess(initial_traj)
 
     # ----- Solve -----
@@ -1704,6 +1746,12 @@ def _plan_constrained_kto(
         )
 
     traj = trajopt.ReconstructTrajectory(result)
+
+    if WARMSTART_ENABLED:
+        solved_cps = np.asarray(
+            result.GetSolution(trajopt.control_points()), dtype=float,
+        )
+        warmstart.store(q_start, q_end, problem_signature, solved_cps)
 
     # Post-solve clearance: sample and report worst.
     min_clearance = float("inf")
@@ -1726,7 +1774,142 @@ def _plan_constrained_kto(
             "n_control_points": n_ctrl,
             "spline_order": spline_order,
             "n_waypoints": len(waypoints_q_full),
+            "warmstart_hit": warmstart_hit,
         },
+    )
+
+
+def _round_seq(x, decimals: int = 3):
+    """Hashable, rounded representation of an array-like, or None."""
+    if x is None:
+        return None
+    arr = np.asarray(x, dtype=float).flatten()
+    return tuple(np.round(arr, decimals).tolist())
+
+
+_ARM_INSTANCE_NAMES = frozenset({
+    "ur_left", "ur_right",
+    "ur_left::ur5e", "ur_right::ur5e",
+})
+
+
+def _scene_fingerprint(plant: MultibodyPlant, plant_context: Context) -> str:
+    """Stable, content-derived hash of the planning scene.
+
+    Replaces ``id(plant)`` in the warmstart signature so caches persist
+    across processes and machines — two runs that build the same scene
+    compute the same fingerprint, so a cache loaded from disk hits.
+
+    Hashes every NON-arm body's (model_instance_name, body_name,
+    world_pose_at_plant_context). Excluding the arms keeps the
+    fingerprint independent of arm joint state — which is already keyed
+    separately via q_start/q_goal. What's left captures: welded
+    geometry (microwave, table, attached objects) and any non-arm joint
+    angles (e.g. microwave door open angle).
+
+    Determinism caveat: Drake doesn't formally guarantee body insertion
+    order or renaming behaviour. It's empirically stable for this
+    codebase + Drake version. If a Drake upgrade shifts names, every
+    existing cache entry quietly stops hitting (no false hits possible)
+    — call ``warmstart.clear()`` and rebuild.
+    """
+    import hashlib
+    rows = []
+    for i in range(plant.num_bodies()):
+        body = plant.get_body(BodyIndex(i))
+        inst_name = plant.GetModelInstanceName(body.model_instance())
+        if inst_name in _ARM_INSTANCE_NAMES:
+            continue
+        X = plant.EvalBodyPoseInWorld(plant_context, body)
+        rows.append((
+            inst_name,
+            body.name(),
+            tuple(np.round(X.translation(), 3).tolist()),
+            tuple(np.round(X.rotation().matrix().flatten(), 2).tolist()),
+        ))
+    rows.sort()
+    return hashlib.sha256(repr(rows).encode()).hexdigest()[:16]
+
+
+def _kto_problem_signature(
+    *,
+    plant: MultibodyPlant,
+    plant_context: Context,
+    arm: str,
+    duration_s: float,
+    n_ctrl: int,
+    spline_order: int,
+    waypoints_q_full: List[np.ndarray],
+    fix_orientation,
+    fix_orientation_tolerance_rad: float,
+    align_tcp_axis,
+    align_tcp_axis_world,
+    align_tcp_axis_tolerance_rad: float,
+    fix_z_task,
+    z_tolerance_m: float,
+    avoid_collisions: bool,
+    min_clearance_m: float,
+    avoid_arm_singularity: bool,
+    self_collision: bool,
+    min_z_task,
+    max_tcp_linear_speed_m_per_s,
+    extra_clearance_to,
+    stay_in_workspace_box,
+) -> tuple:
+    """Hashable summary of every input that changes the KTO problem.
+
+    ``warmstart`` keys on (q_start, q_goal, problem_signature). Two calls
+    with the same signature but different (q_start, q_goal) are different
+    cache entries. Two calls with different signatures (e.g. one with
+    ``fix_z_task`` set, one without) never share a warmstart even if
+    endpoints match — they're different NLPs.
+
+    Uses ``_scene_fingerprint`` (content-derived) so signatures are
+    stable across process restarts and machines that build the same
+    scene with the same Drake version.
+    """
+    intermediates = tuple(
+        _round_seq(wp, 3) for wp in waypoints_q_full[1:-1]
+    )
+    fix_orient_key = (
+        _round_seq(np.asarray(fix_orientation.as_matrix()), 2)
+        if fix_orientation is not None else None
+    )
+    extras_key = (
+        tuple(sorted(
+            (str(k), round(float(v), 3))
+            for k, v in extra_clearance_to.items()
+        ))
+        if extra_clearance_to else None
+    )
+    workspace_key = (
+        (_round_seq(stay_in_workspace_box[0], 3),
+         _round_seq(stay_in_workspace_box[1], 3))
+        if stay_in_workspace_box is not None else None
+    )
+    return (
+        _scene_fingerprint(plant, plant_context),
+        arm,
+        round(float(duration_s), 3),
+        int(n_ctrl),
+        int(spline_order),
+        intermediates,
+        fix_orient_key,
+        round(float(fix_orientation_tolerance_rad), 3),
+        _round_seq(align_tcp_axis, 2),
+        _round_seq(align_tcp_axis_world, 2),
+        round(float(align_tcp_axis_tolerance_rad), 3),
+        round(float(fix_z_task), 3) if fix_z_task is not None else None,
+        round(float(z_tolerance_m), 3),
+        bool(avoid_collisions),
+        round(float(min_clearance_m), 3),
+        bool(avoid_arm_singularity),
+        bool(self_collision),
+        round(float(min_z_task), 3) if min_z_task is not None else None,
+        round(float(max_tcp_linear_speed_m_per_s), 3)
+            if max_tcp_linear_speed_m_per_s is not None else None,
+        extras_key,
+        workspace_key,
     )
 
 

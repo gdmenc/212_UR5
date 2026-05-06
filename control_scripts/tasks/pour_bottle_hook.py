@@ -64,7 +64,7 @@ from ..world import World
 
 # --- Tunables (edit to match your physical layout) ------------------------
 # Note: descend 1 cm below the nominal rim target for a more secure hook grasp.
-BOTTLE_PICK_POSE_TASK = Pose(translation=[-0.32, -0.125, -0.01])
+BOTTLE_PICK_POSE_TASK = Pose(translation=[-0.32, -0.120, -0.01])
 """Bottle base in task frame at PICK location. Identity rotation is
 correct for any free-standing bottle on the table."""
 
@@ -80,7 +80,7 @@ Bottle xy footprint = ``[-0.34, -0.26] × [0.38, 0.46]`` (radius ~4 cm).
 Microwave top footprint = ``[-0.43, +0.01] × [0.36, 0.645]``. Bottle is
 fully on top with ~9 cm side margin and ~6 cm front margin."""
 
-POUR_TARGET_XY_TASK = np.array([0.0, 0.0])
+POUR_TARGET_XY_TASK = np.array([-0.1, 0.1])
 """xy of the receiver opening / pour target in task frame. The default +X
 direction matches a GRASP_ANGLE_RAD of π (gripper on -X side, bottle tips
 toward +X)."""
@@ -151,6 +151,10 @@ a motion-planned transit from current TCP to the grasp hover."""
 
 MOTION_PLAN_RRT_FALLBACK = True
 """Try RRT after KTO when the optimizer cannot find a planned transit."""
+
+MOTION_PLAN_RRT_MAX_ITERS = 2000
+MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS = 20
+"""RRT fallback budget. Lower these to cap worst-case fallback time."""
 
 MOTION_PLAN_AUTO_FALLBACK = True
 """On planner failure, fall back to the original ``transit_xy`` moveL
@@ -560,6 +564,8 @@ def _planned_or_linear_transit(
             current_q=_current_q(session),
             use_rrt_fallback=MOTION_PLAN_RRT_FALLBACK,
             rrt_diagram=diagram,
+            rrt_max_iters=MOTION_PLAN_RRT_MAX_ITERS,
+            rrt_shortcut_attempts=MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS,
             align_tcp_axis=bottle_up_tcp,
             align_tcp_axis_world=np.array([0.0, 0.0, 1.0]),
             align_tcp_axis_tolerance_rad=CARRY_BOTTLE_UPRIGHT_TOLERANCE_RAD,
@@ -637,6 +643,8 @@ def _plan_sim_legs(grasp, place_pose: Pose, config: PickPlaceConfig):
                 plant_context=approach_plant_ctx,
                 use_rrt_fallback=MOTION_PLAN_RRT_FALLBACK,
                 rrt_diagram=approach_diagram,
+                rrt_max_iters=MOTION_PLAN_RRT_MAX_ITERS,
+                rrt_shortcut_attempts=MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS,
                 min_clearance_m=0.01,
             )
             legs.append(("pre-pick approach to grasp hover", approach_plan))
@@ -676,6 +684,8 @@ def _plan_sim_legs(grasp, place_pose: Pose, config: PickPlaceConfig):
             current_q={ARM: chained_arm_q} if chained_arm_q is not None else None,
             use_rrt_fallback=MOTION_PLAN_RRT_FALLBACK,
             rrt_diagram=carry1_diagram,
+            rrt_max_iters=MOTION_PLAN_RRT_MAX_ITERS,
+            rrt_shortcut_attempts=MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS,
             align_tcp_axis=bottle_up_tcp_pre,
             align_tcp_axis_world=np.array([0.0, 0.0, 1.0]),
             align_tcp_axis_tolerance_rad=CARRY_BOTTLE_UPRIGHT_TOLERANCE_RAD,
@@ -745,6 +755,8 @@ def _plan_sim_legs(grasp, place_pose: Pose, config: PickPlaceConfig):
                 current_q=cur_q,
                 use_rrt_fallback=MOTION_PLAN_RRT_FALLBACK,
                 rrt_diagram=carry2_diagram,
+                rrt_max_iters=MOTION_PLAN_RRT_MAX_ITERS,
+                rrt_shortcut_attempts=MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS,
                 align_tcp_axis=bottle_up_tcp_post,
                 align_tcp_axis_world=np.array([0.0, 0.0, 1.0]),
                 align_tcp_axis_tolerance_rad=CARRY_BOTTLE_UPRIGHT_TOLERANCE_RAD,
@@ -808,6 +820,8 @@ def _plan_sim_legs(grasp, place_pose: Pose, config: PickPlaceConfig):
                     current_q=cur_q,
                     use_rrt_fallback=MOTION_PLAN_RRT_FALLBACK,
                     rrt_diagram=return_diagram,
+                    rrt_max_iters=MOTION_PLAN_RRT_MAX_ITERS,
+                    rrt_shortcut_attempts=MOTION_PLAN_RRT_SHORTCUT_ATTEMPTS,
                     min_clearance_m=0.01,
                 )
                 break

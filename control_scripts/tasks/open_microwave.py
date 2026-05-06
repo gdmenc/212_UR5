@@ -187,6 +187,12 @@ class MicrowaveDoorSpec:
     blended path close to the planned curve at the door arc's
     high-curvature midsection."""
 
+    motion_plan_rrt_max_iters: int = 2000
+    """RRT fallback iteration budget for Phase 3 door-arc planning."""
+
+    motion_plan_rrt_shortcut_attempts: int = 20
+    """RRT fallback shortcut budget for Phase 3 door-arc post-processing."""
+
     motion_plan_tcp_speed: float = 0.05
     """TCP speed cap (m/s) on the door-arc leg. Hard-shape constraint
     that forces ``plan_transit`` to run KTO instead of falling back
@@ -232,6 +238,7 @@ class OpenMicrowaveResult:
 # Microwave is welded with the door CLOSED (matches the real state at the
 # start of the open sequence).
 
+_PLANNING_DIAGRAM = None
 _PLANNING_PLANT = None
 _PLANNING_PLANT_CONTEXT = None
 
@@ -242,17 +249,20 @@ def _get_planning_plant():
     instant. Disable workspace demo objects since they clutter the
     cell with bodies the open-microwave task doesn't interact with.
 
-    Routes through ``WORLD.build_sim_scene()`` so this task's planning
-    plant matches the env values declared in ``WORLD``. Effective
-    kwargs to ``build_scene`` are unchanged from the previous direct
-    call (include_objects=False, everything else default)."""
-    global _PLANNING_PLANT, _PLANNING_PLANT_CONTEXT
+    Routes through ``WORLD.build_planning_scene()`` so this task's
+    planning plant matches the env values declared in ``WORLD`` AND the
+    returned diagram is a ``RobotDiagram`` — required for the RRT
+    fallback's ``SceneGraphCollisionChecker``. Effective kwargs are
+    unchanged from the previous direct call (include_objects=False,
+    everything else default)."""
+    global _PLANNING_DIAGRAM, _PLANNING_PLANT, _PLANNING_PLANT_CONTEXT
     if _PLANNING_PLANT is None:
-        scene = WORLD.build_sim_scene()
-        diagram_ctx = scene.diagram.CreateDefaultContext()
-        _PLANNING_PLANT = scene.plant
-        _PLANNING_PLANT_CONTEXT = scene.plant.GetMyContextFromRoot(diagram_ctx)
-    return _PLANNING_PLANT, _PLANNING_PLANT_CONTEXT
+        diagram, plant, _, _ = WORLD.build_planning_scene()
+        diagram_ctx = diagram.CreateDefaultContext()
+        _PLANNING_DIAGRAM = diagram
+        _PLANNING_PLANT = plant
+        _PLANNING_PLANT_CONTEXT = plant.GetMyContextFromRoot(diagram_ctx)
+    return _PLANNING_DIAGRAM, _PLANNING_PLANT, _PLANNING_PLANT_CONTEXT
 
 
 def _build_movej_path_rows(
@@ -351,7 +361,7 @@ def dry_run_motion_planning(door: "MicrowaveDoorSpec") -> int:
               "planning needs it. Aborting.")
         return 1
 
-    plant, plant_ctx = _get_planning_plant()
+    _, plant, plant_ctx = _get_planning_plant()
 
     # Seed plant at the task-specific approach config (same IK branch as
     # PRE_ENGAGE_JOINTS_RAD) so Phase 1 IK doesn't jump branches the
@@ -384,9 +394,14 @@ def dry_run_motion_planning(door: "MicrowaveDoorSpec") -> int:
     plans: list = []
     failures: list = []
 
-    # --- Phase 1: HOME -> pre_engage (collision-aware) ---
-    # Build a RobotDiagram for RRT fallback so Phase 1 can route around
-    # the microwave when the spline path collides with it.
+    # --- Phase 1: HOME -> pre_engage ---
+    # Object collision is OFF; the simplified door box has no handle
+    # relief and the hook gripper's AABB always clips into it at the
+    # recorded pre-engage pose. Instead of relying on collision, we cap
+    # TCP y at the pre-engage y (task frame) so the planner physically
+    # can't drive the gripper past the closed-door volume.
+    # Phase 3 still wants RRT fallback wiring, so build the RobotDiagram
+    # here and reuse it below.
     from ..planning.build_scene import _compose_scene_fragments
     from pydrake.planning import RobotDiagramBuilder
     rdb = RobotDiagramBuilder(time_step=0.0)
@@ -401,18 +416,20 @@ def dry_run_motion_planning(door: "MicrowaveDoorSpec") -> int:
     rdb_plant.Finalize()
     rrt_diagram_dry = rdb.Build()
 
+    pre_engage_y = float(door.pre_engage_pose_task.translation[1])
+    phase1_workspace_box = (
+        (-1e3, -1e3, -1e3),
+        (+1e3, pre_engage_y, +1e3),
+    )
+
     try:
-        # ``avoid_collisions=False`` for sim viz only — the recorded
-        # pregrasp pose puts the hook gripper ~30 mm inside the sim
-        # microwave's collision body (sim-vs-real calibration drift).
-        # On the live path Phase 1 already routes via getActualQ +
-        # the cushion of the actual rig clearance.
         plan1 = plan_transit(
             plant=plant, arm="ur_left",
             waypoints=[home_pose, door.pre_engage_pose_task],
             plant_context=plant_ctx,
             current_q=cur_q,
             avoid_collisions=False, self_collision=False,
+            stay_in_workspace_box=phase1_workspace_box,
         )
         print(f"\nPhase 1: HOME -> pre_engage  "
               f"planner={plan1.metadata.get('planner')}  "
@@ -431,9 +448,9 @@ def dry_run_motion_planning(door: "MicrowaveDoorSpec") -> int:
         # independent of Phase 1's outcome.
 
     # --- Phase 3: arc through the hinge (collision off) ---
-    # Speed cap is dropped here vs. the live path so plan_transit can
-    # use the simple-spline path; the recorded waypoints already define
-    # the arc shape and we just want to visualize them.
+    # Same plan_transit shape as the live path: explicit duration_s
+    # (path length / target TCP speed) routes through
+    # simple_spline → KTO → RRT.
     arc_intermediate = _arc_waypoints(door, start_pose_task=door.handle_engage_pose_task)
     arc_waypoints = [door.handle_engage_pose_task, *arc_intermediate]
     try:
@@ -443,6 +460,11 @@ def dry_run_motion_planning(door: "MicrowaveDoorSpec") -> int:
             plant_context=plant_ctx,
             current_q=cur_q,
             avoid_collisions=False, self_collision=False,
+            duration_s=_phase3_duration_s(arc_waypoints, door.motion_plan_tcp_speed),
+            use_rrt_fallback=True,
+            rrt_diagram=rrt_diagram_dry,
+            rrt_max_iters=door.motion_plan_rrt_max_iters,
+            rrt_shortcut_attempts=door.motion_plan_rrt_shortcut_attempts,
         )
         print(f"\nPhase 3: door arc  "
               f"planner={plan3.metadata.get('planner')}  "
@@ -506,7 +528,6 @@ def run_sim(door: "MicrowaveDoorSpec") -> int:
         _arm_model_instance,
         _arm_position_indices,
         plan_transit,
-        plan_transit_chained,
     )
 
     if door.pre_engage_pose_task is None:
@@ -571,42 +592,20 @@ def run_sim(door: "MicrowaveDoorSpec") -> int:
 
     legs: list = []
 
-    # Workspace bound on Phase 1: cap TCP y at the pre_engage y so
-    # the gripper physically can't approach the closed door volume.
-    # Cleaner than relying on URDF door collision (which has a known
-    # 5 cm calibration mismatch — FK of recorded PRE_ENGAGE_JOINTS_RAD
-    # lands 5 cm below where the rig measures the same pose). Same
-    # intent ("don't drive into the door") expressed as a behavioral
-    # constraint that doesn't depend on the door geometry being right.
     pre_engage_y = float(door.pre_engage_pose_task.translation[1])
     phase1_workspace_box = (
         (-1e3, -1e3, -1e3),
         (+1e3, pre_engage_y, +1e3),
     )
 
-    print("\n[sim] planning Phase 1 (HOME → pre_engage)  "
-          f"with TCP y ≤ {pre_engage_y:.3f} m...")
+    print("\n[sim] planning Phase 1 (HOME → pre_engage) — TCP y ≤ "
+          f"{pre_engage_y:.3f} m, no env/self collision...")
     try:
-        # avoid_collisions=False because the URDF/TCP calibration
-        # mismatch makes door-collision checking unreliable; the
-        # y-bound above is the behavioral substitute. Live execution
-        # uses getActualQ() + the actual rig clearance.
-        #
-        # seed_q = PRE_ENGAGE_JOINTS_RAD: chained IK starts the
-        # plan-arm slot from the recorded pre-engage joints, so the
-        # IK at the home_pose waypoint converges from there. Without
-        # this, IK from SIM_HOME's wrist orientation gets stuck at a
-        # ~19° local minimum and Phase 1 fails before KTO ever runs.
-        seed_q_phase1 = (
-            np.asarray(door.pre_engage_joints_rad, dtype=float)
-            if door.pre_engage_joints_rad is not None else None
-        )
         plan1 = plan_transit(
             plant=plan_plant, arm="ur_left",
             waypoints=[home_pose, door.pre_engage_pose_task],
             plant_context=plan_plant_ctx,
             current_q=cur_q,
-            seed_q=seed_q_phase1,
             avoid_collisions=False, self_collision=False,
             stay_in_workspace_box=phase1_workspace_box,
         )
@@ -617,19 +616,21 @@ def run_sim(door: "MicrowaveDoorSpec") -> int:
     except InfeasiblePlanError as exc:
         print(f"  ✗ Phase 1 plan infeasible: {exc}")
 
+    print("\n[sim] planning Phase 3 (door arc)...")
     arc_intermediate = _arc_waypoints(door, start_pose_task=door.handle_engage_pose_task)
     arc_waypoints = [door.handle_engage_pose_task, *arc_intermediate]
     try:
-        plan3 = plan_transit_chained(
-            arm="ur_left",
-            log_label="Phase 3: door arc",
-            prev_terminal_pose=door.handle_engage_pose_task,
-            chained_arm_q=cur_q["ur_left"],
-            plant=plan_plant,
+        plan3 = plan_transit(
+            plant=plan_plant, arm="ur_left",
             waypoints=arc_waypoints,
             plant_context=plan_plant_ctx,
             current_q=cur_q,
             avoid_collisions=False, self_collision=False,
+            duration_s=_phase3_duration_s(arc_waypoints, door.motion_plan_tcp_speed),
+            use_rrt_fallback=True,
+            rrt_diagram=plan_diagram,
+            rrt_max_iters=door.motion_plan_rrt_max_iters,
+            rrt_shortcut_attempts=door.motion_plan_rrt_shortcut_attempts,
         )
         legs.append(("Phase 3: door arc", plan3))
     except InfeasiblePlanError as exc:
@@ -666,10 +667,16 @@ def _phase1_motion_planned(
 ) -> None:
     """Phase 1 (motion-planned approach): Drake KTO from the rig's
     actual current joints to ``door.pre_engage_pose_task``, executed
-    as a single blended ``moveJ(path)``. Collision-aware so the path
-    routes around the closed microwave instead of through it."""
-    from ..planning.transit import make_rtde_ik, plan_transit
-    plant, plant_ctx = _get_planning_plant()
+    as a single blended ``moveJ(path)``.
+
+    Object/self collision avoidance is OFF — the simplified door box
+    has no handle relief and the hook gripper's AABB always clips into
+    it at the recorded pre-engage pose. We instead cap TCP y at the
+    pre-engage y (task frame) so the planner physically cannot drive
+    the gripper past the closed-door volume. This is a behavioural
+    constraint that doesn't depend on URDF/TCP calibration drift."""
+    from ..planning.transit import plan_transit
+    _, plant, plant_ctx = _get_planning_plant()
 
     actual_q = np.array(arm.receive.getActualQ(), dtype=float)
     start_pose_task = arm.to_task(rtde_to_pose(arm.receive.getActualTCPPose()))
@@ -680,14 +687,20 @@ def _phase1_motion_planned(
             "(the planner targets a Cartesian pose, not raw joints)."
         )
 
+    pre_engage_y = float(door.pre_engage_pose_task.translation[1])
+    phase1_workspace_box = (
+        (-1e3, -1e3, -1e3),
+        (+1e3, pre_engage_y, +1e3),
+    )
+
     plan = plan_transit(
         plant=plant, arm=arm.name,
         waypoints=[start_pose_task, door.pre_engage_pose_task],
         plant_context=plant_ctx,
         current_q={arm.name: actual_q},
-        avoid_collisions=True,
-        self_collision=True,
-        rtde_ik=make_rtde_ik(arm),
+        avoid_collisions=False,
+        self_collision=False,
+        stay_in_workspace_box=phase1_workspace_box,
     )
     _execute_plan_as_movej_path(arm, plant, plan, door.motion_plan_n_waypoints)
 
@@ -696,18 +709,23 @@ def _phase3_motion_planned(
     arm: ArmHandle,
     door: "MicrowaveDoorSpec",
 ) -> float:
-    """Phase 3 (motion-planned arc): KTO through the same TCP arc
-    waypoints as ``_phase3_arc``, but executed as one blended
-    ``moveJ(path)``. Collision avoidance disabled — the hook is in
-    intentional contact with the door body throughout the swing.
-    Returns the arc length traveled (m)."""
-    from ..planning.transit import make_rtde_ik, plan_transit
+    """Phase 3 (motion-planned arc): plan_transit through the same TCP
+    arc waypoints as ``_phase3_arc``, executed as one blended
+    ``moveJ(path)``.
+
+    Collision avoidance is OFF — the hook is in intentional contact
+    with the door throughout the swing. TCP speed is shaped via an
+    explicit ``duration_s`` (path length / target speed) rather than
+    ``max_tcp_linear_speed_m_per_s`` so the planner can take the
+    simple_spline → KTO → RRT chain (the speed cap would force KTO
+    immediately and skip the spline path)."""
+    from ..planning.transit import plan_transit
     if door.hinge_position_task is None:
         raise ValueError(
             "use_motion_planning=True for phase 3 requires "
             "hinge_position_task (the arc waypoint generator needs it)."
         )
-    plant, plant_ctx = _get_planning_plant()
+    diagram, plant, plant_ctx = _get_planning_plant()
 
     actual_q = np.array(arm.receive.getActualQ(), dtype=float)
     start_pose_task = arm.to_task(rtde_to_pose(arm.receive.getActualTCPPose()))
@@ -720,10 +738,13 @@ def _phase3_motion_planned(
         waypoints=waypoints,
         plant_context=plant_ctx,
         current_q={arm.name: actual_q},
-        avoid_collisions=False,    # hook intentionally contacts door
+        avoid_collisions=False,
         self_collision=False,
-        max_tcp_linear_speed_m_per_s=door.motion_plan_tcp_speed,
-        rtde_ik=make_rtde_ik(arm),
+        duration_s=_phase3_duration_s(waypoints, door.motion_plan_tcp_speed),
+        use_rrt_fallback=True,
+        rrt_diagram=diagram,
+        rrt_max_iters=door.motion_plan_rrt_max_iters,
+        rrt_shortcut_attempts=door.motion_plan_rrt_shortcut_attempts,
     )
     _execute_plan_as_movej_path(arm, plant, plan, door.motion_plan_n_waypoints)
 
@@ -734,6 +755,21 @@ def _phase3_motion_planned(
 # -----------------------------------------------------------------------
 #  Arc-mode helpers
 # -----------------------------------------------------------------------
+
+def _phase3_duration_s(waypoints: List[Pose], target_tcp_speed: float) -> float:
+    """Total trajectory time so the average TCP speed ≈ ``target_tcp_speed``.
+
+    Sum of consecutive-waypoint translation distances divided by the
+    target speed. Used in place of ``max_tcp_linear_speed_m_per_s`` so
+    Phase 3 doesn't trip ``plan_transit``'s hard-shape constraint and
+    can take the simple_spline → KTO → RRT chain like Phase 1. The
+    speed isn't enforced pointwise — it's an average over the whole
+    arc — but for the door pull that's close enough."""
+    total = 0.0
+    for a, b in zip(waypoints[:-1], waypoints[1:]):
+        total += float(np.linalg.norm(a.translation - b.translation))
+    return max(1.0, total / max(target_tcp_speed, 1e-3))
+
 
 def _arc_waypoints(
     door: MicrowaveDoorSpec,
@@ -946,7 +982,6 @@ def open_microwave_door(
             door_opened_distance=arc_length,
         )
     else:
-        distance_moved = 0.0
         opened_ok = distance_moved >= 0.8 * door.pull_distance_task
         return OpenMicrowaveResult(
             success=opened_ok,
