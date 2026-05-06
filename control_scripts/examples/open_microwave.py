@@ -26,6 +26,7 @@ import argparse
 
 import numpy as np
 
+from ..moves import retract_to
 from ..session import default_session
 from ..tasks.go_home import (
     DEFAULT_ACCEL_RAD_S2 as HOME_ACCEL_RAD_S2,
@@ -34,6 +35,16 @@ from ..tasks.go_home import (
     _moveJ_to_home,
     _planned_to_home,
 )
+from ..util.poses import Pose
+from ..util.rtde_convert import rtde_to_pose
+
+
+# Small task-frame nudge applied after the door is open and the hook is
+# released, before the return-to-home transit. Pulls the empty hook 1 cm
+# in task -x (toward the hinge) to put extra clearance between the hook
+# and the door's swung edge before the planner takes over for the home
+# swing. Set to 0 to disable.
+POST_OPEN_NUDGE_TASK_X_M = -0.02
 from ..tasks.open_microwave import (
     ARM,
     CONFIG,
@@ -119,6 +130,26 @@ def run(dry: bool, motion_planning: bool, mode: str = "real") -> int:
 
         if result.success:
             print(f"  ✓ door opened — arc length {result.door_opened_distance:.3f} m")
+
+            if POST_OPEN_NUDGE_TASK_X_M != 0.0:
+                current_pose = arm.to_task(rtde_to_pose(arm.receive.getActualTCPPose()))
+                nudge_pose = Pose(
+                    translation=current_pose.translation + np.array(
+                        [POST_OPEN_NUDGE_TASK_X_M, 0.0, 0.0],
+                    ),
+                    rotation=current_pose.rotation,
+                )
+                print(
+                    f"\n→ post-open nudge: shift TCP by "
+                    f"{POST_OPEN_NUDGE_TASK_X_M*100:+.1f} cm in task x "
+                    f"(from {np.round(current_pose.translation, 4)} → "
+                    f"{np.round(nudge_pose.translation, 4)})"
+                )
+                retract_to(
+                    arm, nudge_pose,
+                    CONFIG.retract_speed, CONFIG.retract_accel,
+                )
+
             print("\n→ return left arm home (planning with door open)")
             ok, reason = _planned_to_home(
                 session,
