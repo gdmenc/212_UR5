@@ -187,12 +187,6 @@ class MicrowaveDoorSpec:
     blended path close to the planned curve at the door arc's
     high-curvature midsection."""
 
-    motion_plan_rrt_max_iters: int = 2000
-    """RRT fallback iteration budget for Phase 3 door-arc planning."""
-
-    motion_plan_rrt_shortcut_attempts: int = 20
-    """RRT fallback shortcut budget for Phase 3 door-arc post-processing."""
-
     motion_plan_tcp_speed: float = 0.05
     """TCP speed cap (m/s) on the door-arc leg. Hard-shape constraint
     that forces ``plan_transit`` to run KTO instead of falling back
@@ -400,22 +394,6 @@ def dry_run_motion_planning(door: "MicrowaveDoorSpec") -> int:
     # recorded pre-engage pose. Instead of relying on collision, we cap
     # TCP y at the pre-engage y (task frame) so the planner physically
     # can't drive the gripper past the closed-door volume.
-    # Phase 3 still wants RRT fallback wiring, so build the RobotDiagram
-    # here and reuse it below.
-    from ..planning.build_scene import _compose_scene_fragments
-    from pydrake.planning import RobotDiagramBuilder
-    rdb = RobotDiagramBuilder(time_step=0.0)
-    rdb_plant = rdb.plant()
-    _compose_scene_fragments(
-        rdb_plant,
-        include_microwave=True,
-        include_grippers=True,
-        include_objects=False,
-        robotiq_mode="closed",
-    )
-    rdb_plant.Finalize()
-    rrt_diagram_dry = rdb.Build()
-
     pre_engage_y = float(door.pre_engage_pose_task.translation[1])
     phase1_workspace_box = (
         (-1e3, -1e3, -1e3),
@@ -448,9 +426,10 @@ def dry_run_motion_planning(door: "MicrowaveDoorSpec") -> int:
         # independent of Phase 1's outcome.
 
     # --- Phase 3: arc through the hinge (collision off) ---
-    # Same plan_transit shape as the live path: explicit duration_s
-    # (path length / target TCP speed) routes through
-    # simple_spline → KTO → RRT.
+    # Same plan_transit shape as the live path: TCP speed cap forces
+    # KTO to plan an arc-shaped trajectory through the recorded
+    # waypoints; collisions are off because the hook is in intentional
+    # contact with the door throughout the swing.
     arc_intermediate = _arc_waypoints(door, start_pose_task=door.handle_engage_pose_task)
     arc_waypoints = [door.handle_engage_pose_task, *arc_intermediate]
     try:
@@ -460,11 +439,8 @@ def dry_run_motion_planning(door: "MicrowaveDoorSpec") -> int:
             plant_context=plant_ctx,
             current_q=cur_q,
             avoid_collisions=False, self_collision=False,
-            duration_s=_phase3_duration_s(arc_waypoints, door.motion_plan_tcp_speed),
-            use_rrt_fallback=True,
-            rrt_diagram=rrt_diagram_dry,
-            rrt_max_iters=door.motion_plan_rrt_max_iters,
-            rrt_shortcut_attempts=door.motion_plan_rrt_shortcut_attempts,
+            max_tcp_linear_speed_m_per_s=door.motion_plan_tcp_speed,
+            use_warmstart=False,
         )
         print(f"\nPhase 3: door arc  "
               f"planner={plan3.metadata.get('planner')}  "
@@ -528,6 +504,7 @@ def run_sim(door: "MicrowaveDoorSpec") -> int:
         _arm_model_instance,
         _arm_position_indices,
         plan_transit,
+        plan_transit_chained,
     )
 
     if door.pre_engage_pose_task is None:
@@ -616,21 +593,20 @@ def run_sim(door: "MicrowaveDoorSpec") -> int:
     except InfeasiblePlanError as exc:
         print(f"  ✗ Phase 1 plan infeasible: {exc}")
 
-    print("\n[sim] planning Phase 3 (door arc)...")
     arc_intermediate = _arc_waypoints(door, start_pose_task=door.handle_engage_pose_task)
     arc_waypoints = [door.handle_engage_pose_task, *arc_intermediate]
     try:
-        plan3 = plan_transit(
-            plant=plan_plant, arm="ur_left",
+        plan3 = plan_transit_chained(
+            arm="ur_left",
+            log_label="Phase 3: door arc",
+            prev_terminal_pose=door.handle_engage_pose_task,
+            chained_arm_q=cur_q["ur_left"],
+            plant=plan_plant,
             waypoints=arc_waypoints,
             plant_context=plan_plant_ctx,
             current_q=cur_q,
             avoid_collisions=False, self_collision=False,
-            duration_s=_phase3_duration_s(arc_waypoints, door.motion_plan_tcp_speed),
-            use_rrt_fallback=True,
-            rrt_diagram=plan_diagram,
-            rrt_max_iters=door.motion_plan_rrt_max_iters,
-            rrt_shortcut_attempts=door.motion_plan_rrt_shortcut_attempts,
+            use_warmstart=False,
         )
         legs.append(("Phase 3: door arc", plan3))
     except InfeasiblePlanError as exc:
@@ -709,23 +685,18 @@ def _phase3_motion_planned(
     arm: ArmHandle,
     door: "MicrowaveDoorSpec",
 ) -> float:
-    """Phase 3 (motion-planned arc): plan_transit through the same TCP
-    arc waypoints as ``_phase3_arc``, executed as one blended
-    ``moveJ(path)``.
-
-    Collision avoidance is OFF — the hook is in intentional contact
-    with the door throughout the swing. TCP speed is shaped via an
-    explicit ``duration_s`` (path length / target speed) rather than
-    ``max_tcp_linear_speed_m_per_s`` so the planner can take the
-    simple_spline → KTO → RRT chain (the speed cap would force KTO
-    immediately and skip the spline path)."""
-    from ..planning.transit import plan_transit
+    """Phase 3 (motion-planned arc): KTO through the same TCP arc
+    waypoints as ``_phase3_arc``, but executed as one blended
+    ``moveJ(path)``. Collision avoidance disabled — the hook is in
+    intentional contact with the door body throughout the swing.
+    Returns the arc length traveled (m)."""
+    from ..planning.transit import make_rtde_ik, plan_transit
     if door.hinge_position_task is None:
         raise ValueError(
             "use_motion_planning=True for phase 3 requires "
             "hinge_position_task (the arc waypoint generator needs it)."
         )
-    diagram, plant, plant_ctx = _get_planning_plant()
+    _, plant, plant_ctx = _get_planning_plant()
 
     actual_q = np.array(arm.receive.getActualQ(), dtype=float)
     start_pose_task = arm.to_task(rtde_to_pose(arm.receive.getActualTCPPose()))
@@ -738,13 +709,11 @@ def _phase3_motion_planned(
         waypoints=waypoints,
         plant_context=plant_ctx,
         current_q={arm.name: actual_q},
-        avoid_collisions=False,
+        avoid_collisions=False,    # hook intentionally contacts door
         self_collision=False,
-        duration_s=_phase3_duration_s(waypoints, door.motion_plan_tcp_speed),
-        use_rrt_fallback=True,
-        rrt_diagram=diagram,
-        rrt_max_iters=door.motion_plan_rrt_max_iters,
-        rrt_shortcut_attempts=door.motion_plan_rrt_shortcut_attempts,
+        max_tcp_linear_speed_m_per_s=door.motion_plan_tcp_speed,
+        rtde_ik=make_rtde_ik(arm),
+        use_warmstart=False,       # door arc has contact-mode dynamics — don't cache
     )
     _execute_plan_as_movej_path(arm, plant, plan, door.motion_plan_n_waypoints)
 
@@ -755,21 +724,6 @@ def _phase3_motion_planned(
 # -----------------------------------------------------------------------
 #  Arc-mode helpers
 # -----------------------------------------------------------------------
-
-def _phase3_duration_s(waypoints: List[Pose], target_tcp_speed: float) -> float:
-    """Total trajectory time so the average TCP speed ≈ ``target_tcp_speed``.
-
-    Sum of consecutive-waypoint translation distances divided by the
-    target speed. Used in place of ``max_tcp_linear_speed_m_per_s`` so
-    Phase 3 doesn't trip ``plan_transit``'s hard-shape constraint and
-    can take the simple_spline → KTO → RRT chain like Phase 1. The
-    speed isn't enforced pointwise — it's an average over the whole
-    arc — but for the door pull that's close enough."""
-    total = 0.0
-    for a, b in zip(waypoints[:-1], waypoints[1:]):
-        total += float(np.linalg.norm(a.translation - b.translation))
-    return max(1.0, total / max(target_tcp_speed, 1e-3))
-
 
 def _arc_waypoints(
     door: MicrowaveDoorSpec,
@@ -1266,12 +1220,15 @@ DOOR_SPEC = MicrowaveDoorSpec(
     pre_engage_joints_rad=PRE_ENGAGE_JOINTS_RAD,
     pre_engage_pose_task=PRE_ENGAGE_POSE_TASK,
 
-    # Phase-3 path: prefer the recorded waypoints from May 5 — they
-    # round-trip cleanly through both Drake and ikfast IK. Math-generated
-    # arc params (``hinge_position_task`` + ``arc_open_angle_rad`` + ``n_arc_steps``)
-    # are kept as a fallback for hinge geometries we don't have a recording
-    # for; ``recorded_arc_waypoints_task`` overrides them when set.
-    recorded_arc_waypoints_task=RECORDED_ARC_WAYPOINTS_TASK,
+    # Phase-3 path: math-generated arc rotated around
+    # ``hinge_position_task`` by ``arc_open_angle_rad`` in
+    # ``n_arc_steps`` increments. Recorded waypoints
+    # (``RECORDED_ARC_WAYPOINTS_TASK``) are kept defined above as a
+    # quick override — assign them to ``recorded_arc_waypoints_task``
+    # below to swap back. Default = math arc (mandatory for the open-
+    # microwave task; the recorded waypoints don't capture hinge
+    # geometry the planner can introspect).
+    recorded_arc_waypoints_task=None,
     hinge_position_task=HINGE_POSITION_TASK,
     arc_open_angle_rad=1.8,    # ≈ 103° — tune until door is visually fully open
     n_arc_steps=14,             # moveL waypoints along the arc

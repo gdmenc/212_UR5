@@ -44,6 +44,8 @@ from pydrake.math import RigidTransform, RotationMatrix
 from pydrake.multibody.plant import CoulombFriction, MultibodyPlant
 from pydrake.multibody.tree import ModelInstanceIndex
 
+from ...util.tray_layout import TRAY_DEFAULT_POSE_TASK
+
 
 # ---------------------------------------------------------------------------
 #  Object dimensions — copied from control_scripts/grasps/*.py.
@@ -81,29 +83,33 @@ TRAY_HEIGHT = 0.025
 #  for cylinder-resting-on-table objects, that's z = 0 (table top), with
 #  small per-object offsets matching what the task scripts use.
 # ---------------------------------------------------------------------------
-PLATE_DEFAULT_TASK_XYZ = (0.295521, -0.20, 0.01)
-"""Copied from tasks/pick_place_plate.py::PLATE_PICK_POSE_TASK."""
+PLATE_DEFAULT_TASK_XYZ = (0.295521, -0.12, 0.01)
+"""Authoritative: tasks/pick_place_plate_microwave.py::PLATE_PICK_POSE_TASK."""
 
-CUP_DEFAULT_TASK_XYZ = (-0.08, -0.125, 0.0)
-"""Copied from tasks/pick_place_cup.py::CUP_PICK_POSE_TASK."""
+CUP_DEFAULT_TASK_XYZ = (-0.07, -0.11, 0.0)
+"""Authoritative: tasks/pick_place_cup.py::CUP_PICK_POSE_TASK."""
 
 CUP_WITH_STICK_DEFAULT_TASK_XYZ = (-0.20, -0.125, 0.0)
 """Placeholder — left of the plain cup. TODO: measure at lab."""
 
 BOWL_DEFAULT_TASK_XYZ = (0.05, -0.125, -0.01)
-"""Copied from tasks/pick_place_bowl_hook_microwave.py::BOWL_PICK_POSE_TASK.
-The bowl pose used by other variants ([0.1, 0, 0.01]) differs; pick whichever
-matches the scene you're planning for via the X_task argument."""
+"""Authoritative: tasks/pick_place_bowl_hook_microwave.py::BOWL_PICK_POSE_TASK.
+The non-microwave bowl variant uses a different pose ([0.1, 0, 0.01]) for a
+different scene; pick a different ``xyz_task`` argument when planning for it."""
 
-BOTTLE_DEFAULT_TASK_XYZ = (-0.32, -0.125, -0.01)
-"""Copied from tasks/pour_bottle_hook.py::BOTTLE_PICK_POSE_TASK."""
+BOTTLE_DEFAULT_TASK_XYZ = (-0.32, -0.120, -0.01)
+"""Authoritative: tasks/pour_bottle_hook.py::BOTTLE_PICK_POSE_TASK."""
 
-# Tray sits forward of the plate by 20 cm in +y (toward the microwave),
-# long side along the table's left-right (object +x already aligned with
-# task +x). Bottom on the table top.
-TRAY_DEFAULT_TASK_XYZ = (PLATE_DEFAULT_TASK_XYZ[0],
-                         PLATE_DEFAULT_TASK_XYZ[1] + 0.30,
-                         0.0)
+# Derived from the lab-measured ``TRAY_DEFAULT_POSE_TASK`` in
+# ``util/tray_layout.py`` — single source of truth. Bottom on the table
+# top; long side along task +x (the planning-scene tray welds at yaw=0,
+# so ``TrayPose.yaw`` is currently ignored here — extend ``add_tray`` if
+# you ever need a yawed planner-scene tray).
+TRAY_DEFAULT_TASK_XYZ = (
+    TRAY_DEFAULT_POSE_TASK.x,
+    TRAY_DEFAULT_POSE_TASK.y,
+    TRAY_DEFAULT_POSE_TASK.z,
+)
 
 
 _PLATE_COLOR = np.array([0.95, 0.95, 0.92, 1.0])

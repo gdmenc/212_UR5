@@ -60,30 +60,33 @@ from ..session import Session, default_session
 from ..util.poses import Pose, pose_at_altitude
 from ..util.rtde_convert import rtde_to_pose
 from ..world import World
+from ..lab_landmarks import (
+    BOTTLE_MICROWAVE_TOP_XYZ_TASK,
+    CUP_POUR_STATION_XY_TASK,
+)
+from ..planning.scene.objects import BOTTLE_DEFAULT_TASK_XYZ
 
 
 # --- Tunables (edit to match your physical layout) ------------------------
 # Note: descend 1 cm below the nominal rim target for a more secure hook grasp.
-BOTTLE_PICK_POSE_TASK = Pose(translation=[-0.32, -0.120, -0.01])
-"""Bottle base in task frame at PICK location. Identity rotation is
-correct for any free-standing bottle on the table."""
+BOTTLE_PICK_POSE_TASK = Pose(translation=BOTTLE_DEFAULT_TASK_XYZ)
+"""Bottle base at PICK location. Sourced from ``BOTTLE_DEFAULT_TASK_XYZ``
+(planning/scene/objects.py) — the lab default position on the table.
+Identity rotation is correct for any free-standing bottle."""
 
-BOTTLE_PLACE_POSE_TASK = Pose(translation=[-0.30, 0.42, 0.28])
-"""Bottle base in task frame at PLACE location.
+BOTTLE_PLACE_POSE_TASK = Pose(translation=BOTTLE_MICROWAVE_TOP_XYZ_TASK)
+"""Bottle base at PLACE location: on top of the microwave. Sourced from
+``BOTTLE_MICROWAVE_TOP_XYZ_TASK`` (lab_landmarks.py) so future
+bottle-pickup tasks land on the same coordinate. With a hook bottle
+grasp at the rim, the TCP at place ends up at task z = 0.28 +
+bottle_grasp_z, well within reach."""
 
-Default: on top of the microwave (microwave outer top is at task z=0.28),
-in the front-left portion of the top so the LEFT arm can reach it
-without overextending. With a hook bottle grasp at the rim, the TCP at
-place ends up at task z = 0.28 + bottle_grasp_z, well within reach.
-
-Bottle xy footprint = ``[-0.34, -0.26] × [0.38, 0.46]`` (radius ~4 cm).
-Microwave top footprint = ``[-0.43, +0.01] × [0.36, 0.645]``. Bottle is
-fully on top with ~9 cm side margin and ~6 cm front margin."""
-
-POUR_TARGET_XY_TASK = np.array([-0.1, 0.1])
-"""xy of the receiver opening / pour target in task frame. The default +X
-direction matches a GRASP_ANGLE_RAD of π (gripper on -X side, bottle tips
-toward +X)."""
+POUR_TARGET_XY_TASK = CUP_POUR_STATION_XY_TASK
+"""xy of the receiver opening / pour target in task frame. Sourced from
+``CUP_POUR_STATION_XY_TASK`` (lab_landmarks.py) so this stays in sync
+with where ``pick_place_cup`` puts the cup. The default +X direction
+matches a GRASP_ANGLE_RAD of π (gripper on -X side, bottle tips toward
++X)."""
 
 POUR_RECEIVER_RIM_Z_TASK = 0.154
 """Receiver rim height in task z (m). Measure this from the same task-frame

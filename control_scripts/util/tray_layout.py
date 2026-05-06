@@ -15,9 +15,10 @@ Slot convention (top-down view of the tray, +x right, +y up):
     bowl   .    .          cup   at top left
                            bowl  at bottom left
 
-Run-time integration: replace ``TRAY_DEFAULT_POSE_TASK`` with the
-visually-estimated pose; the slot table and ``place_pose_on_tray`` stay
-the same.
+Run-time integration: ``TRAY_DEFAULT_POSE_TASK`` is the lab-measured
+fallback. Replace at call time with a visually-estimated pose by
+passing it as ``place_pose_on_tray(..., tray=perceived_pose)``; the
+slot table stays the same.
 """
 
 from __future__ import annotations
@@ -72,10 +73,13 @@ class TrayPose:
 
 
 TRAY_DEFAULT_POSE_TASK = TrayPose(
-    x=0.295521, y=0.10, z=0.0, yaw=0.0,
+    x=0.22, y=0.165, z=0.0, yaw=0.0,
 )
-"""Placeholder until vision provides one. Mirrors the task-frame xy used
-by planning/scene/objects.py::TRAY_DEFAULT_TASK_XYZ."""
+"""Lab-measured tray pose (task xy = +22 cm / +16.5 cm from task origin,
+yaw=0, on table top). **Single source of truth** — both
+``planning/scene/objects.py::TRAY_DEFAULT_TASK_XYZ`` and the tray pose
+used in microwave tasks are derived from this. Replace at run-time with
+a perceived pose if vision is available."""
 
 
 # --- Per-object slots (tray-local XY). --------------------------------------
@@ -96,8 +100,8 @@ TRAY_SLOT_LOCAL_XY: Dict[str, Tuple[float, float]] = {
 # per object if the tray floor isn't paper-thin or if a specific object
 # needs a small lift.
 TRAY_OBJECT_REST_DZ: Dict[str, float] = {
-    "plate": 0.01,
-    "bowl":  0.0,
+    "plate": 0.05,   # 5 cm lift so the 2F-85 fingers clear the tray rim
+    "bowl":  0.05,   # 5 cm lift so the hook clears the tray rim
     "cup":   0.0,
 }
 

@@ -76,6 +76,20 @@ def lookup(
     return None
 
 
+def peek(
+    q_start: np.ndarray,
+    q_goal: np.ndarray,
+    problem_signature: Hashable,
+) -> Optional[np.ndarray]:
+    """Like ``lookup`` but read-only: doesn't bump hit/miss counters
+    and doesn't move the entry to the LRU front. Use this when probing
+    the cache for ranking/heuristic decisions (e.g. seed reordering)
+    so the stats reflect actual planner consumption rather than peeks.
+    """
+    key = _make_key(q_start, q_goal, problem_signature)
+    return _CACHE.get(key)
+
+
 def store(
     q_start: np.ndarray,
     q_goal: np.ndarray,

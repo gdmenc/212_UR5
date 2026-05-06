@@ -60,7 +60,12 @@ from ..place import place, place_into_box
 from ..session import Session, default_session
 from ..util.poses import Pose, offset_along_tool_z, pose_at_altitude
 from ..util.rtde_convert import rtde_to_pose
-from ..util.tray_layout import TrayPose, place_pose_on_tray
+from ..util.tray_layout import (
+    TRAY_DEFAULT_POSE_TASK,
+    TrayPose,
+    place_pose_on_tray,
+)
+from ..planning.scene.objects import BOWL_DEFAULT_TASK_XYZ
 from ..world import World
 
 
@@ -72,22 +77,21 @@ PICK_FROM: Literal["outside", "microwave"] = "outside"
 PLACE_TO: Literal["outside", "microwave"] = "microwave"
 
 # Free-standing bowl pick pose (used when PICK_FROM == "outside").
-BOWL_PICK_POSE_TASK = Pose(translation=[0.05, -0.125, -0.01])
+BOWL_PICK_POSE_TASK = Pose(translation=BOWL_DEFAULT_TASK_XYZ)
+"""Sourced from ``BOWL_DEFAULT_TASK_XYZ`` (planning/scene/objects.py)
+— the canonical lab bowl position. Override here with a literal
+``Pose(translation=[...])`` if a one-off setup needs a different start."""
 
-# Tray pose for the outside-side place leg. Same lab-measured tray pose
-# as the plate-microwave task. Bowl slot xy comes from
-# ``TRAY_SLOT_LOCAL_XY`` (currently bottom-left, ``(-_DX, -_DY)``) so
-# layout edits there auto-propagate; we only override the rest-z to
-# lift the bowl 3 cm above the tray bottom face so the hook clears the
-# tray rim during release. Mirrors the plate task's setup exactly.
-TRAY_POSE_TASK = TrayPose(x=0.22, y=0.165, z=0.0, yaw=0.0)
-BOWL_PLACE_TRAY_LIFT_M = 0.03
+# Tray pose for the outside-side place leg. Sourced from
+# ``TRAY_DEFAULT_POSE_TASK`` (lab-measured, in util/tray_layout.py).
+# Override here with a literal ``TrayPose(...)`` if a one-off layout is
+# needed for this task without touching the canonical value. Bowl slot
+# xy and rest-z come from ``TRAY_SLOT_LOCAL_XY`` /
+# ``TRAY_OBJECT_REST_DZ`` (canonical 3 cm lift so the hook clears the
+# tray rim during release) — edits there auto-propagate.
+TRAY_POSE_TASK = TRAY_DEFAULT_POSE_TASK
 
-BOWL_PLACE_POSE_TASK = place_pose_on_tray(
-    "bowl",
-    tray=TRAY_POSE_TASK,
-    rest_dz=BOWL_PLACE_TRAY_LIFT_M,
-)
+BOWL_PLACE_POSE_TASK = place_pose_on_tray("bowl", tray=TRAY_POSE_TASK)
 
 # Intermediate waypoint between pick and place. The transit_z is what
 # actually sets the carry altitude; the Z below is ignored. Picked at a
@@ -119,7 +123,7 @@ PLACE_ANGLE_AT_MICROWAVE_RAD = PICK_ANGLE_AT_MICROWAVE_RAD
 # clearance does not constrain. Pick and place poses are usually at
 # different table locations, so different angles are typical.
 PICK_ANGLE_AT_OUTSIDE_RAD    = float(np.radians(180 - 30))
-PLACE_ANGLE_AT_OUTSIDE_RAD   = float(np.radians(180 + 45))
+PLACE_ANGLE_AT_OUTSIDE_RAD   = float(np.radians(180 + 35))
 
 # Default forward run uses (PICK_ANGLE_AT_OUTSIDE_RAD, PLACE_ANGLE_AT_MICROWAVE_RAD);
 # ``--reverse`` uses (PICK_ANGLE_AT_MICROWAVE_RAD, PLACE_ANGLE_AT_OUTSIDE_RAD).

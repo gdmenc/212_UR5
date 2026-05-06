@@ -84,7 +84,12 @@ from ..place import place, place_into_box
 from ..session import Session, default_session
 from ..util.poses import Pose, offset_along_tool_z, pose_at_altitude
 from ..util.rtde_convert import rtde_to_pose
-from ..util.tray_layout import TrayPose, place_pose_on_tray
+from ..util.tray_layout import (
+    TRAY_DEFAULT_POSE_TASK,
+    TrayPose,
+    place_pose_on_tray,
+)
+from ..planning.scene.objects import PLATE_DEFAULT_TASK_XYZ
 from ..world import World
 
 
@@ -98,21 +103,21 @@ PLACE_TO: Literal["outside", "microwave"] = "microwave"
 # 0.025 m is the height of the plate rim that is reasonable for pickup /
 # setdown — same convention as ``pick_place_plate.py``.
 
-PLATE_PICK_POSE_TASK = Pose(translation=[0.295521, -0.12, 0.01])
+PLATE_PICK_POSE_TASK = Pose(translation=PLATE_DEFAULT_TASK_XYZ)
+"""Sourced from ``PLATE_DEFAULT_TASK_XYZ`` (planning/scene/objects.py)
+— the canonical lab plate position. Override here with a literal
+``Pose(translation=[...])`` if a one-off setup needs a different start."""
 
-# Tray pose for the outside-side place leg. Lab-measured (yaw=0, task xy
-# at +22 cm / +16.5 cm from task origin). Plate slot xy comes from
-# ``TRAY_SLOT_LOCAL_XY`` so layout edits there auto-propagate; we only
-# override the rest-z to lift the plate 3 cm above the tray bottom face
-# so the 2F-85 fingers clear the tray rim during release.
-TRAY_POSE_TASK = TrayPose(x=0.22, y=0.165, z=0.0, yaw=0.0)
-PLATE_PLACE_TRAY_LIFT_M = 0.03
+# Tray pose for the outside-side place leg. Sourced from
+# ``TRAY_DEFAULT_POSE_TASK`` (lab-measured, in util/tray_layout.py).
+# Override here with a literal ``TrayPose(...)`` if a one-off layout is
+# needed for this task without touching the canonical value. Plate slot
+# xy and rest-z come from ``TRAY_SLOT_LOCAL_XY`` /
+# ``TRAY_OBJECT_REST_DZ`` (canonical 5 cm lift so the 2F-85 fingers
+# clear the tray rim during release) — edits there auto-propagate.
+TRAY_POSE_TASK = TRAY_DEFAULT_POSE_TASK
 
-PLATE_PLACE_POSE_TASK = place_pose_on_tray(
-    "plate",
-    tray=TRAY_POSE_TASK,
-    rest_dz=PLATE_PLACE_TRAY_LIFT_M,
-)
+PLATE_PLACE_POSE_TASK = place_pose_on_tray("plate", tray=TRAY_POSE_TASK)
 
 # Intermediate waypoint between pick and place. Z is ignored —
 # transit_z sets the carry altitude. Picked at a Cartesian location

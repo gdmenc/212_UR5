@@ -19,6 +19,8 @@ without the RTDE wheels (e.g. CI). The RTDE imports happen inside
 
 from __future__ import annotations
 
+import atexit
+import signal
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -40,7 +42,7 @@ from .util.poses import Pose
 
 # --- Default network config for the 212 rig --------------------------------
 # DEFAULT_LEFT_IP = "192.168.137.2"
-DEFAULT_LEFT_IP = "192.168.137.2"
+DEFAULT_LEFT_IP = "192.168.1.101"
 DEFAULT_RIGHT_IP = "192.168.1.102"
 DEFAULT_CONNECT_TRIES = 3
 DEFAULT_CONNECT_RETRY_DELAY = 0.1   # seconds between reconnect attempts
@@ -108,6 +110,8 @@ class Session:
         self._rtde_control_cls = rtde_control_cls
         self._rtde_receive_cls = rtde_receive_cls
         self._rtde_io_cls = rtde_io_cls
+        self._closed = False
+        self._previous_signal_handlers: Dict[int, Any] = {}
 
     # --- public accessors -------------------------------------------------
     @property
@@ -124,54 +128,75 @@ class Session:
 
     # --- lifecycle --------------------------------------------------------
     def __enter__(self) -> "Session":
+        self._install_shutdown_hooks()
         needs_io = any(spec.needs_rtde_io for spec in self._specs.values())
         ControlCls, ReceiveCls, IOCls = self._resolve_rtde_classes(needs_io)
 
-        for name, spec in self._specs.items():
-            rtde_c = ControlCls(spec.ip)
-            rtde_r = ReceiveCls(spec.ip)
+        try:
+            for name, spec in self._specs.items():
+                rtde_c = ControlCls(spec.ip)
+                rtde_r = ReceiveCls(spec.ip)
 
-            self._ensure_connected(rtde_c, spec.ip)
+                self._ensure_connected(rtde_c, spec.ip)
 
-            rtde_io = None
-            if spec.needs_rtde_io:
-                if IOCls is None:
-                    raise RuntimeError("RTDEIOInterface was requested but not resolved.")
-                rtde_io = IOCls(spec.ip)
-                self._ensure_connected(rtde_io, spec.ip)
+                rtde_io = None
+                if spec.needs_rtde_io:
+                    if IOCls is None:
+                        raise RuntimeError(
+                            "RTDEIOInterface was requested but not resolved."
+                        )
+                    rtde_io = IOCls(spec.ip)
+                    self._ensure_connected(rtde_io, spec.ip)
 
-            gripper: Optional[Gripper] = None
-            if spec.gripper_factory is not None:
-                gripper = spec.gripper_factory(rtde_c, rtde_r, rtde_io)
-                gripper.activate()
+                gripper: Optional[Gripper] = None
+                if spec.gripper_factory is not None:
+                    gripper = spec.gripper_factory(rtde_c, rtde_r, rtde_io)
+                    gripper.activate()
 
-            arm = ArmHandle(
-                name=name,
-                control=rtde_c,
-                receive=rtde_r,
-                gripper=gripper,
-                X_base_task=spec.X_base_task,
-                tcp_offset=spec.tcp_offset,
-            )
-            arm.setup()  # applies TCP offset via rtde_c.setTcp
-            self._arms[name] = arm
+                arm = ArmHandle(
+                    name=name,
+                    control=rtde_c,
+                    receive=rtde_r,
+                    gripper=gripper,
+                    X_base_task=spec.X_base_task,
+                    tcp_offset=spec.tcp_offset,
+                )
+                arm.setup()  # applies TCP offset via rtde_c.setTcp
+                self._arms[name] = arm
+        except BaseException:
+            self.close(reason="session setup failed")
+            raise
 
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        # Best-effort cleanup: try each step per-arm, swallow exceptions,
-        # so one failed teardown doesn't skip the others.
-        for name, arm in self._arms.items():
+        self.close(reason="session exit")
+
+    def close(self, *, reason: str = "manual close") -> None:
+        """Best-effort emergency teardown for all connected arms.
+
+        This is intentionally idempotent so it can be called from normal
+        ``with`` teardown, failed setup, atexit, or a signal handler.  It does
+        not open/release grippers; it only stops controller-side motion/script
+        state and closes RTDE resources so the Python process gives control
+        back cleanly.
+        """
+        if self._closed:
+            return
+        self._closed = True
+
+        if self._arms:
+            print(f"[session] cleanup: {reason}")
+
+        for name, arm in list(self._arms.items()):
+            self._stop_arm_control(name, arm)
             if arm.gripper is not None:
-                try:
-                    arm.gripper.disconnect()
-                except Exception as e:
-                    print(f"[{name}] gripper disconnect failed: {e}")
-            try:
-                arm.control.stopScript()
-            except Exception as e:
-                print(f"[{name}] stopScript failed: {e}")
+                self._try_call(name, "gripper.disconnect", arm.gripper.disconnect)
+            self._disconnect_interface(name, "receive", arm.receive)
+            self._disconnect_interface(name, "control", arm.control)
+
         self._arms.clear()
+        self._restore_shutdown_hooks()
 
     # --- helpers ----------------------------------------------------------
     def move_to_home(self) -> None:
@@ -186,6 +211,67 @@ class Session:
             arm.control.moveJ(list(home))
 
     # --- internals --------------------------------------------------------
+    def _install_shutdown_hooks(self) -> None:
+        atexit.register(self.close)
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            self._previous_signal_handlers[signum] = signal.getsignal(signum)
+            signal.signal(signum, self._signal_handler)
+
+    def _restore_shutdown_hooks(self) -> None:
+        try:
+            atexit.unregister(self.close)
+        except Exception:
+            pass
+        for signum, handler in self._previous_signal_handlers.items():
+            try:
+                signal.signal(signum, handler)
+            except Exception:
+                pass
+        self._previous_signal_handlers.clear()
+
+    def _signal_handler(self, signum: int, _frame: Any) -> None:
+        signame = signal.Signals(signum).name
+        self.close(reason=f"received {signame}")
+        if signum == signal.SIGINT:
+            raise KeyboardInterrupt
+        raise SystemExit(128 + signum)
+
+    def _stop_arm_control(self, name: str, arm: ArmHandle) -> None:
+        control = arm.control
+        # Stop the controller modes that can outlive the Python call path.
+        for label, args_variants in (
+            ("forceModeStop", ((),)),
+            ("servoStop", ((),)),
+            ("speedStop", ((0.5,), ())),
+            ("stopL", ((0.5,), ())),
+            ("stopJ", ((0.5,), ())),
+            ("stopScript", ((),)),
+        ):
+            fn = getattr(control, label, None)
+            if fn is None:
+                continue
+            for args in args_variants:
+                try:
+                    fn(*args)
+                    break
+                except TypeError:
+                    continue
+                except Exception as exc:
+                    print(f"[{name}] {label} failed: {exc}")
+                    break
+
+    def _disconnect_interface(self, name: str, label: str, interface: Any) -> None:
+        disconnect = getattr(interface, "disconnect", None)
+        if disconnect is not None:
+            self._try_call(name, f"{label}.disconnect", disconnect)
+
+    @staticmethod
+    def _try_call(name: str, label: str, fn: Callable[[], Any]) -> None:
+        try:
+            fn()
+        except Exception as exc:
+            print(f"[{name}] {label} failed: {exc}")
+
     def _resolve_rtde_classes(self, needs_io: bool) -> Tuple[type, type, Optional[type]]:
         if self._rtde_control_cls is not None and self._rtde_receive_cls is not None:
             ctl, rcv = self._rtde_control_cls, self._rtde_receive_cls

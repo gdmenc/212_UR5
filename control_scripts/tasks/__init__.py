@@ -9,7 +9,7 @@ Two flavours live here:
     sensible defaults, so they're meant to be CALLED FROM ROUTINES, not
     invoked from the CLI.
 
-  - **End-to-end single-arm tasks** (``pick_place_plate``) wrap a
+  - **End-to-end single-arm tasks** (``pick_place_cup``) wrap a
     self-contained operation behind ``main(dry=False) -> int`` so they
     can run standalone OR be dispatched from ``run.py task <name>``.
     Module-level constants pin the workspace coordinates; edit the
@@ -22,11 +22,17 @@ Parameters that need physical measurement are marked TODO in each file
 and will raise a clear error until set.
 """
 
-from . import pick_place_cup, pick_place_plate, press_button
+from . import (
+    pick_place_cup,
+    pick_place_cup_microwave,
+    pick_place_cup_tray,
+    press_button,
+)
 
 # Maps CLI task name → main(dry: bool = False) -> int.
 TASKS = {
-    "pick_place_plate": pick_place_plate.main,
     "pick_place_cup": pick_place_cup.main,
+    "pick_place_cup_tray": pick_place_cup_tray.main,
+    "pick_place_cup_microwave": pick_place_cup_microwave.main,
     "press_button": press_button.main,
 }

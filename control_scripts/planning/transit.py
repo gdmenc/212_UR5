@@ -70,6 +70,14 @@ WARMSTART_ENABLED = True
 cached B-spline before falling back to the from-scratch cubic-spline
 seed. Cache is in-memory only (process-local). Set False to bypass."""
 
+WARMSTART_REORDER_SEEDS = True
+"""When True, ``plan_transit_multi_seed`` ranks each candidate IK seed
+against the warmstart cache before iterating: seeds whose predicted
+(q_start, q_goal, problem_signature) is already cached are tried first.
+On warm cache, this lets a multi-seed call hit the previously-successful
+seed immediately instead of paying a cold KTO solve on doomed seeds.
+Set False to fall back to plain distance-sorted iteration."""
+
 
 # ---------------------------------------------------------------------------
 #  Output type
@@ -739,6 +747,151 @@ def plan_transit_chained(
     )
 
 
+def _predict_kto_cache_key(
+    seed: np.ndarray,
+    arm: str,
+    plan_transit_kwargs: dict,
+) -> Optional[Tuple[np.ndarray, np.ndarray, tuple]]:
+    """Best-effort prediction of (q_start, q_end, problem_signature) for
+    the cache key ``_plan_constrained_kto`` would use if planning ran
+    with ``seed`` as the planning arm's IK seed.
+
+    Returns ``None`` on any prediction failure (missing kwargs, IK
+    failure, etc.); callers treat that as "cold" (cache miss expected)
+    and skip the peek. Cheap: one ikfast-fast-path IK chain (~1 ms per
+    waypoint) plus the signature build.
+
+    Mirrors the relevant prep logic in :func:`plan_transit` and
+    :func:`_plan_constrained_kto`. If those drift, predictions will go
+    stale (false misses) — never false hits, since the cache lookup
+    requires exact key match.
+    """
+    plant: Optional[MultibodyPlant] = plan_transit_kwargs.get("plant")
+    waypoints: Optional[List[Pose]] = plan_transit_kwargs.get("waypoints")
+    plant_context: Optional[Context] = plan_transit_kwargs.get("plant_context")
+    if plant is None or waypoints is None or plant_context is None:
+        return None
+    if len(waypoints) < 2:
+        return None
+
+    try:
+        arm_instance = _arm_model_instance(plant, arm)
+    except KeyError:
+        return None
+
+    other_arm_instance: Optional[ModelInstanceIndex] = None
+    other_arm_name = "ur_right" if arm == "ur_left" else "ur_left"
+    for cand in (other_arm_name, f"{other_arm_name}::ur5e"):
+        if plant.HasModelInstanceNamed(cand):
+            try:
+                other_arm_instance = _arm_model_instance(plant, other_arm_name)
+            except KeyError:
+                pass
+            break
+
+    arm_idx = _arm_position_indices(plant, arm_instance)
+    other_idx = (
+        _arm_position_indices(plant, other_arm_instance)
+        if other_arm_instance is not None else np.array([], dtype=int)
+    )
+
+    # Layer the starting state same way plan_transit does, but only as
+    # far as we need to seed the IK chain.
+    seed_q_full = plant.GetPositions(plant_context).copy()
+    current_q = plan_transit_kwargs.get("current_q")
+    if current_q is not None:
+        if isinstance(current_q, dict):
+            for arm_name, q_vec in current_q.items():
+                if q_vec is None:
+                    continue
+                try:
+                    inst = _arm_model_instance(plant, arm_name)
+                except KeyError:
+                    continue
+                idx = _arm_position_indices(plant, inst)
+                q_arr = np.asarray(q_vec, dtype=float)
+                if q_arr.shape == (len(idx),):
+                    seed_q_full[idx] = q_arr
+        else:
+            q_arr = np.asarray(current_q, dtype=float)
+            if q_arr.shape == seed_q_full.shape:
+                seed_q_full = q_arr.copy()
+    # Apply the candidate seed for the planning arm (overrides current_q).
+    seed_arr = np.asarray(seed, dtype=float)
+    if seed_arr.shape != (len(arm_idx),):
+        return None
+    seed_q_full[arm_idx] = seed_arr
+
+    other_arm_q = plan_transit_kwargs.get("other_arm_q")
+    if other_arm_q is None and other_arm_instance is not None:
+        other_arm_q = seed_q_full[other_idx]
+
+    # Predicted IK chain — ikfast fast path via arm_name.
+    try:
+        waypoints_q_full = _pose_chain_to_joints(
+            plant=plant,
+            plant_context=plant_context,
+            arm_instance=arm_instance,
+            waypoints=waypoints,
+            seed_q_full=seed_q_full,
+            other_arm_instance=other_arm_instance,
+            other_arm_q=other_arm_q,
+            pos_tolerance_m=plan_transit_kwargs.get("ik_pos_tolerance_m", 0.005),
+            rot_tolerance_rad=plan_transit_kwargs.get("ik_rot_tolerance_rad", 0.05),
+            arm_name=arm,
+            rtde_ik=plan_transit_kwargs.get("rtde_ik"),
+        )
+    except Exception:
+        return None  # IK failed — treat seed as cold
+
+    # Predict duration_s same way plan_transit does on the auto path.
+    duration_s = plan_transit_kwargs.get("duration_s")
+    if duration_s is None:
+        max_joint_delta = 0.0
+        for a, b in zip(waypoints_q_full[:-1], waypoints_q_full[1:]):
+            max_joint_delta = max(max_joint_delta, float(np.max(np.abs(b - a))))
+        duration_s = max(1.0, max_joint_delta / 0.5 * len(waypoints_q_full))
+
+    # Build the same signature ``_plan_constrained_kto`` would build.
+    try:
+        signature = _kto_problem_signature(
+            plant=plant,
+            plant_context=plant_context,
+            arm=arm,
+            duration_s=duration_s,
+            n_ctrl=10,
+            spline_order=4,
+            waypoints_q_full=waypoints_q_full,
+            fix_orientation=plan_transit_kwargs.get("fix_orientation"),
+            fix_orientation_tolerance_rad=plan_transit_kwargs.get(
+                "fix_orientation_tolerance_rad", 0.04,
+            ),
+            align_tcp_axis=plan_transit_kwargs.get("align_tcp_axis"),
+            align_tcp_axis_world=plan_transit_kwargs.get("align_tcp_axis_world"),
+            align_tcp_axis_tolerance_rad=plan_transit_kwargs.get(
+                "align_tcp_axis_tolerance_rad", 0.05,
+            ),
+            fix_z_task=plan_transit_kwargs.get("fix_z_task"),
+            z_tolerance_m=plan_transit_kwargs.get("z_tolerance_m", 0.01),
+            avoid_collisions=plan_transit_kwargs.get("avoid_collisions", True),
+            min_clearance_m=plan_transit_kwargs.get("min_clearance_m", 0.01),
+            avoid_arm_singularity=plan_transit_kwargs.get(
+                "avoid_arm_singularity", True,
+            ),
+            self_collision=plan_transit_kwargs.get("self_collision", True),
+            min_z_task=plan_transit_kwargs.get("min_z_task", 0.02),
+            max_tcp_linear_speed_m_per_s=plan_transit_kwargs.get(
+                "max_tcp_linear_speed_m_per_s",
+            ),
+            extra_clearance_to=plan_transit_kwargs.get("extra_clearance_to"),
+            stay_in_workspace_box=plan_transit_kwargs.get("stay_in_workspace_box"),
+        )
+    except Exception:
+        return None
+
+    return waypoints_q_full[0], waypoints_q_full[-1], signature
+
+
 def plan_transit_multi_seed(
     arm: str,
     *,
@@ -765,6 +918,33 @@ def plan_transit_multi_seed(
     """
     if not seed_candidates:
         return plan_transit(arm=arm, **plan_transit_kwargs)
+
+    # Cache-aware seed reordering: probe warmstart for each candidate
+    # (cheap — one ikfast chain + signature build per seed) and try
+    # cache-hit seeds first. On warm cache, this collapses what would
+    # be N cold KTO solves into one immediate hit. Skipped if the
+    # caller passed ``use_warmstart=False`` since the lookup/store
+    # inside _plan_constrained_kto won't run anyway.
+    use_warmstart_for_reorder = plan_transit_kwargs.get("use_warmstart", True)
+    if (WARMSTART_ENABLED and WARMSTART_REORDER_SEEDS
+            and use_warmstart_for_reorder and len(seed_candidates) > 1):
+        warm: List[np.ndarray] = []
+        cold: List[np.ndarray] = []
+        for seed in seed_candidates:
+            predicted = _predict_kto_cache_key(seed, arm, plan_transit_kwargs)
+            if predicted is None:
+                cold.append(seed)
+                continue
+            q_start_p, q_end_p, sig_p = predicted
+            if warmstart.peek(q_start_p, q_end_p, sig_p) is not None:
+                warm.append(seed)
+            else:
+                cold.append(seed)
+        if warm:
+            print(f"[plan] {log_label} warmstart-aware reorder: "
+                  f"{len(warm)}/{len(seed_candidates)} seeds have a cached "
+                  f"solution; trying those first")
+            seed_candidates = warm + cold
 
     last_exc: Optional[InfeasiblePlanError] = None
     for i, seed in enumerate(seed_candidates):
@@ -857,6 +1037,13 @@ def plan_transit(
     # 2 in waypoint IK (between ikfast and Drake numerical). Build via
     # ``make_rtde_ik(arm)`` in real-path code.
     rtde_ik: Optional[RtdeIkFn] = None,
+
+    # Per-call warmstart cache disable. Combines with the global
+    # ``WARMSTART_ENABLED`` flag — warmstart only runs when BOTH are
+    # True. Pass False to skip cache lookup/store on this call (e.g.
+    # for tasks that don't want their KTO solutions cached or that
+    # don't trust cache hits, like force-contact arcs).
+    use_warmstart: bool = True,
 ) -> TransitPlan:
     """Plan a transit between task-frame TCP poses.
 
@@ -1062,6 +1249,7 @@ def plan_transit(
             max_tcp_linear_speed_m_per_s=max_tcp_linear_speed_m_per_s,
             extra_clearance_to=extra_clearance_to,
             stay_in_workspace_box=stay_in_workspace_box,
+            use_warmstart=use_warmstart,
         )
         if spline_fallback_reason is not None:
             plan.metadata["spline_fallback_reason"] = spline_fallback_reason
@@ -1486,6 +1674,7 @@ def _plan_constrained_kto(
     max_tcp_linear_speed_m_per_s: Optional[float],
     extra_clearance_to: Optional[Dict[str, float]],
     stay_in_workspace_box: Optional[Tuple],
+    use_warmstart: bool = True,
 ) -> TransitPlan:
     """KinematicTrajectoryOptimization solve with the requested constraints.
 
@@ -1723,7 +1912,7 @@ def _plan_constrained_kto(
     )
     cached_cps = (
         warmstart.lookup(q_start, q_end, problem_signature)
-        if WARMSTART_ENABLED else None
+        if (WARMSTART_ENABLED and use_warmstart) else None
     )
     warmstart_hit = cached_cps is not None
     if warmstart_hit and cached_cps.shape == (num_q, n_ctrl):
@@ -1747,7 +1936,7 @@ def _plan_constrained_kto(
 
     traj = trajopt.ReconstructTrajectory(result)
 
-    if WARMSTART_ENABLED:
+    if WARMSTART_ENABLED and use_warmstart:
         solved_cps = np.asarray(
             result.GetSolution(trajopt.control_points()), dtype=float,
         )
@@ -1800,12 +1989,14 @@ def _scene_fingerprint(plant: MultibodyPlant, plant_context: Context) -> str:
     across processes and machines — two runs that build the same scene
     compute the same fingerprint, so a cache loaded from disk hits.
 
-    Hashes every NON-arm body's (model_instance_name, body_name,
-    world_pose_at_plant_context). Excluding the arms keeps the
-    fingerprint independent of arm joint state — which is already keyed
-    separately via q_start/q_goal. What's left captures: welded
-    geometry (microwave, table, attached objects) and any non-arm joint
-    angles (e.g. microwave door open angle).
+    Hashes every NON-arm body's world pose. Bodies in arm model
+    instances are filtered by name; bodies welded to the arm (e.g. a
+    gripper attached as its own model instance) would otherwise
+    contaminate the fingerprint with the current arm config — so we
+    temporarily zero both arms in plant_context before evaluating poses,
+    then restore. Net effect: fingerprint depends only on
+    (static geometry, non-arm joint positions like microwave door
+    angle, free-floating object poses), invariant to arm q.
 
     Determinism caveat: Drake doesn't formally guarantee body insertion
     order or renaming behaviour. It's empirically stable for this
@@ -1814,21 +2005,37 @@ def _scene_fingerprint(plant: MultibodyPlant, plant_context: Context) -> str:
     — call ``warmstart.clear()`` and rebuild.
     """
     import hashlib
-    rows = []
-    for i in range(plant.num_bodies()):
-        body = plant.get_body(BodyIndex(i))
-        inst_name = plant.GetModelInstanceName(body.model_instance())
-        if inst_name in _ARM_INSTANCE_NAMES:
-            continue
-        X = plant.EvalBodyPoseInWorld(plant_context, body)
-        rows.append((
-            inst_name,
-            body.name(),
-            tuple(np.round(X.translation(), 3).tolist()),
-            tuple(np.round(X.rotation().matrix().flatten(), 2).tolist()),
-        ))
-    rows.sort()
-    return hashlib.sha256(repr(rows).encode()).hexdigest()[:16]
+    saved_positions = plant.GetPositions(plant_context).copy()
+    try:
+        # Zero both arms so their welded-descendant bodies (gripper etc.)
+        # land at a canonical, arm-q-independent pose during the hash.
+        zeroed = saved_positions.copy()
+        for arm_name in ("ur_left", "ur_right"):
+            try:
+                inst = _arm_model_instance(plant, arm_name)
+            except KeyError:
+                continue
+            idx = _arm_position_indices(plant, inst)
+            zeroed[idx] = 0.0
+        plant.SetPositions(plant_context, zeroed)
+
+        rows = []
+        for i in range(plant.num_bodies()):
+            body = plant.get_body(BodyIndex(i))
+            inst_name = plant.GetModelInstanceName(body.model_instance())
+            if inst_name in _ARM_INSTANCE_NAMES:
+                continue
+            X = plant.EvalBodyPoseInWorld(plant_context, body)
+            rows.append((
+                inst_name,
+                body.name(),
+                tuple(np.round(X.translation(), 3).tolist()),
+                tuple(np.round(X.rotation().matrix().flatten(), 2).tolist()),
+            ))
+        rows.sort()
+        return hashlib.sha256(repr(rows).encode()).hexdigest()[:16]
+    finally:
+        plant.SetPositions(plant_context, saved_positions)
 
 
 def _kto_problem_signature(
