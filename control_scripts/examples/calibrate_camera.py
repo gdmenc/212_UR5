@@ -50,7 +50,12 @@ Procedure
       diversity score — aim to keep it green (> 0.6) for all samples.
     - Press Q when done.
 
-5.  The result is saved to ``control_scripts/T_ee_camera.json``.
+5.  The result is saved to ``calibration/build/T_ee_camera.json`` by default
+    (same path vision tasks load).  **Before capturing samples**, set the
+    controller TCP to the same tool frame used in production (e.g. run
+    ``Session`` / ``ArmHandle.setup()`` once, or set TCP on the pendant to
+    match ``TCP_OFFSET_*`` in ``control_scripts/calibration.py``) — this script
+    only reads ``getActualTCPPose()`` and does not call ``setTcp`` itself.
 
 Usage
 -----
@@ -546,7 +551,7 @@ def main() -> None:
     )
     ap.add_argument(
         "--output", default=None,
-        help="Output JSON path (default: control_scripts/T_ee_camera.json).",
+        help="Output JSON path (default: calibration/build/T_ee_camera.json).",
     )
     args = ap.parse_args()
 
@@ -561,7 +566,9 @@ def main() -> None:
     if args.output:
         output_path = Path(args.output)
     else:
-        output_path = Path(__file__).parent.parent / "T_ee_camera.json"
+        repo_root = Path(__file__).resolve().parent.parent.parent
+        output_path = repo_root / "calibration" / "build" / "T_ee_camera.json"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
 
     _run_live(
         arm_name=args.arm,

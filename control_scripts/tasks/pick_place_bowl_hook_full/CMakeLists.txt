@@ -10,6 +10,23 @@ find_package(Eigen3       REQUIRED NO_MODULE)
 
 add_executable(perception_bowl perception.cpp)
 
+set(ONNXRUNTIME_ROOT "" CACHE PATH "Path to ONNX Runtime install root")
+if(ONNXRUNTIME_ROOT)
+    set(ORT_INCLUDE_DIR "${ONNXRUNTIME_ROOT}/include")
+    set(ORT_LIB_DIR "${ONNXRUNTIME_ROOT}/lib")
+    find_library(ONNXRUNTIME_LIB
+        NAMES onnxruntime libonnxruntime
+        PATHS "${ORT_LIB_DIR}"
+        NO_DEFAULT_PATH
+    )
+    if(NOT ONNXRUNTIME_LIB)
+        message(FATAL_ERROR "ONNXRUNTIME_ROOT set but onnxruntime library not found in ${ORT_LIB_DIR}")
+    endif()
+    target_include_directories(perception_bowl PRIVATE "${ORT_INCLUDE_DIR}")
+    target_link_libraries(perception_bowl PRIVATE "${ONNXRUNTIME_LIB}")
+    target_compile_definitions(perception_bowl PRIVATE HAVE_ONNXRUNTIME=1)
+endif()
+
 target_link_libraries(perception_bowl PRIVATE
     realsense2::realsense2
     ${OpenCV_LIBS}

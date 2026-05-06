@@ -49,7 +49,7 @@ extern "C" {
 // =========================================================================
 static constexpr double TAG_SIZE_M = 0.093; // Tag size in meters (e.g., 93mm)
 static constexpr int TARGET_TAG_ID =
-    -1; // -1 = any tag, or specify ID (e.g., 0, 1, 2...)
+    -1; // -1 = auto-lock to first seen tag for session consistency.
 
 static constexpr double MIN_ROTATION_SPREAD_DEG = 10.0;
 
@@ -403,7 +403,7 @@ static void run_live(const std::string &arm, int min_samples,
   if (TARGET_TAG_ID >= 0) {
     std::cout << "  Target tag ID: " << TARGET_TAG_ID << "\n";
   } else {
-    std::cout << "  Target: any tag\n";
+    std::cout << "  Target: auto-lock first seen tag ID\n";
   }
   std::cout << std::string(60, '=') << "\n";
   std::cout << "  SPACE : capture sample (tag must be detected)\n";
@@ -414,6 +414,7 @@ static void run_live(const std::string &arm, int min_samples,
   const std::string window = "Hand-Eye Calibration";
   cv::namedWindow(window, cv::WINDOW_NORMAL);
   cv::resizeWindow(window, 960, 540);
+  int active_target_id = TARGET_TAG_ID;
 
   while (true) {
     rs2::frameset frameset = pipe.wait_for_frames();
@@ -427,7 +428,14 @@ static void run_live(const std::string &arm, int min_samples,
     cv::Mat gray;
     cv::cvtColor(bgr, gray, cv::COLOR_BGR2GRAY);
 
-    auto det = detect_apriltag(gray, K, TAG_SIZE_M, TARGET_TAG_ID);
+    auto det = detect_apriltag(gray, K, TAG_SIZE_M, active_target_id);
+    if (active_target_id == -1 && det.ok) {
+      active_target_id = det.tag_id;
+      std::cout << "[INFO] Locked target tag ID to " << active_target_id
+                << " for this calibration session.\n";
+      // Re-run detection with locked ID so overlay/status are consistent.
+      det = detect_apriltag(gray, K, TAG_SIZE_M, active_target_id);
+    }
 
     int n_samp = static_cast<int>(R_ee_list.size());
     double diversity = rotation_spread(R_ee_list);
@@ -447,15 +455,21 @@ static void run_live(const std::string &arm, int min_samples,
         det.ok ? "FOUND (ID " + std::to_string(det.tag_id) + ")" : "NOT FOUND";
     put_text("Tag     : " + tag_str, 1,
              det.ok ? cv::Scalar(0, 255, 0) : cv::Scalar(0, 0, 255));
+    if (active_target_id >= 0) {
+      put_text("Target  : ID " + std::to_string(active_target_id), 2,
+               cv::Scalar(120, 220, 255));
+    } else {
+      put_text("Target  : waiting to lock first tag", 2, cv::Scalar(0, 200, 255));
+    }
 
     char div_buf[64];
     std::snprintf(div_buf, sizeof(div_buf), "Diversity: %.2f  (aim > 0.5)",
                   diversity);
-    put_text(div_buf, 2,
+    put_text(div_buf, 3,
              diversity >= 0.5 ? cv::Scalar(0, 255, 0)
                               : cv::Scalar(0, 200, 255));
 
-    put_text("SPACE=capture  Q=finish  ESC=abort", 4, {180, 180, 180});
+    put_text("SPACE=capture  Q=finish  ESC=abort", 5, {180, 180, 180});
 
     cv::imshow(window, det.vis);
     int key = cv::waitKey(1) & 0xFF;

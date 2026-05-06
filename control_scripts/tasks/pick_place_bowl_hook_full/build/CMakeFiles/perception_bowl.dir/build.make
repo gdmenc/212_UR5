@@ -95,6 +95,7 @@ perception_bowl_EXTERNAL_OBJECTS =
 
 perception_bowl: CMakeFiles/perception_bowl.dir/perception.cpp.o
 perception_bowl: CMakeFiles/perception_bowl.dir/build.make
+perception_bowl: /Users/gdmen/Downloads/onnxruntime-osx-universal2-1.23.2/lib/libonnxruntime.dylib
 perception_bowl: /opt/homebrew/lib/librealsense2.2.57.7.dylib
 perception_bowl: /opt/homebrew/lib/libopencv_dnn.4.13.0.dylib
 perception_bowl: /opt/homebrew/lib/libopencv_imgcodecs.4.13.0.dylib

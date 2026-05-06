@@ -84,6 +84,11 @@ def _print_capture(snap: dict) -> None:
     print(f"    joints_deg : [{', '.join(f'{v:+7.2f}' for v in j)}]")
     print(f"    base xyz   : [{t[0]:+.4f}, {t[1]:+.4f}, {t[2]:+.4f}]")
     print(f"    base rvec  : [{r[0]:+.4f}, {r[1]:+.4f}, {r[2]:+.4f}]")
+    print(
+        "    calib pose : "
+        f"{t[0]:+.6f} {t[1]:+.6f} {t[2]:+.6f} {r[0]:+.6f} {r[1]:+.6f} {r[2]:+.6f}  "
+        "(paste into calibration/calibrate_camera.cpp prompt; metres + radians)"
+    )
 
 
 def _save(snapshots: List[dict], out_path: str, arm_name: str) -> None:
@@ -113,10 +118,10 @@ def _print_paste_snippets(snapshots: List[dict]) -> None:
         joints = ", ".join(f"{v:+.4f}" for v in j)
         print(f'    "{s["name"]}": JointTarget("{s["name"]}", joints_deg=[{joints}]),')
 
-    print("\n# TaskWaypoint(...) entries — for move_l steps")
+    print("\n# TaskWaypoint(...) entries — for move_l steps (task frame, not base)")
     for s in snapshots:
-        t = s["base_pose"]["translation"]
-        r = s["base_pose"]["rotvec"]
+        t = s["task_pose"]["translation"]
+        r = s["task_pose"]["rotvec"]
         xyz = " ".join(f"{v:+.4f}" for v in t)
         rvec = " ".join(f"{v:+.4f}" for v in r)
         print(f'    "{s["name"]}": TaskWaypoint("{s["name"]}", '

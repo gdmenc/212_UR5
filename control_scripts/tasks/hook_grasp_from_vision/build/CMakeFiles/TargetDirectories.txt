@@ -1,0 +1,3 @@
+/Users/gdmen/MIT/sp26/2.12/212_UR5/control_scripts/tasks/hook_grasp_from_vision/build/CMakeFiles/perception_hook_testing.dir
+/Users/gdmen/MIT/sp26/2.12/212_UR5/control_scripts/tasks/hook_grasp_from_vision/build/CMakeFiles/edit_cache.dir
+/Users/gdmen/MIT/sp26/2.12/212_UR5/control_scripts/tasks/hook_grasp_from_vision/build/CMakeFiles/rebuild_cache.dir

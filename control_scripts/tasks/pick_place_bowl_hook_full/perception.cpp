@@ -19,6 +19,12 @@
  *   --T-task-camera "f0…f15"  row-major 4×4 float string from Python
  *   --save-image <path>       where to write the annotated JPEG (preview mode)
  *   --headless                skip image save and terminal pause
+ *   --sam-encoder <path>      SAM2 encoder ONNX (optional but recommended)
+ *   --sam-decoder <path>      SAM2 decoder ONNX
+ *   --no-sam                  disable SAM2 even if paths are passed (YOLO-only XY)
+ *
+ * Pipeline (when built with ONNX Runtime and both SAM paths are passed):
+ *   YOLO → bowl bbox (prompt) → SAM2 mask + centroid → depth at SAM xy (fallback: bbox).
  *
  * stdout — JSON:
  *   { "detected": bool, "confidence": float,
@@ -27,13 +33,22 @@
  *
  * Build:
  *   cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build
+ *
+ * Camera / segmentation note
+ * ----------------------------
+ * Capture and depth are librealsense2 (C++) only — not pyrealsense — for
+ * consistent behaviour on macOS and the lab machines.  Finer masks (e.g.
+ * SAM2) belong in this binary too once exported to ONNX (OpenCV dnn /
+ * ONNX Runtime); do not route live RGB-D through Python.
  */
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <fstream>
 #include <iostream>
 #include <numeric>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -45,6 +60,9 @@
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/opencv.hpp>
+#if defined(HAVE_ONNXRUNTIME)
+#include <onnxruntime_cxx_api.h>
+#endif
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -65,6 +83,131 @@ static constexpr double BOWL_RIM_Z_OFFSET_M     = 0.075;  // measured 2026-05-03
 static constexpr double HOOK_RIM_PREGRASP_OFFSET = 0.050;
 static constexpr double BOWL_GRASP_FORCE         = 15.0;
 static constexpr int    N_ANGLES                 = 8;
+static constexpr int    SAM_INPUT_SIZE           = 1024;
+static constexpr int    SAM_MASK_SIZE            = 256;
+
+#if defined(HAVE_ONNXRUNTIME)
+class Sam2Segmenter {
+public:
+    bool load(const std::string& encoder_path, const std::string& decoder_path) {
+        Ort::SessionOptions opts;
+        opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+        encoder_ = std::make_unique<Ort::Session>(env_, encoder_path.c_str(), opts);
+        decoder_ = std::make_unique<Ort::Session>(env_, decoder_path.c_str(), opts);
+        return true;
+    }
+
+    bool refineByBox(
+        const cv::Mat& bgr,
+        const cv::Rect& box,
+        cv::Mat& out_mask_u8,
+        cv::Point2f& out_centroid)
+    {
+        if (!encoder_ || !decoder_ || bgr.empty()) return false;
+
+        cv::Mat rgb;
+        cv::cvtColor(bgr, rgb, cv::COLOR_BGR2RGB);
+        cv::Mat resized;
+        cv::resize(rgb, resized, cv::Size(SAM_INPUT_SIZE, SAM_INPUT_SIZE), 0, 0, cv::INTER_LINEAR);
+
+        std::vector<float> img(1 * 3 * SAM_INPUT_SIZE * SAM_INPUT_SIZE);
+        static constexpr float mean[3] = {123.675f, 116.28f, 103.53f};
+        static constexpr float stdv[3] = {58.395f, 57.12f, 57.375f};
+        for (int y = 0; y < SAM_INPUT_SIZE; ++y) {
+            const cv::Vec3b* row = resized.ptr<cv::Vec3b>(y);
+            for (int x = 0; x < SAM_INPUT_SIZE; ++x) {
+                for (int c = 0; c < 3; ++c) {
+                    const float v = (float)row[x][c];
+                    img[c * SAM_INPUT_SIZE * SAM_INPUT_SIZE + y * SAM_INPUT_SIZE + x] = (v - mean[c]) / stdv[c];
+                }
+            }
+        }
+
+        std::array<int64_t, 4> img_shape{1, 3, SAM_INPUT_SIZE, SAM_INPUT_SIZE};
+        auto mem = Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+        Ort::Value image_tensor = Ort::Value::CreateTensor<float>(
+            mem, img.data(), img.size(), img_shape.data(), img_shape.size());
+
+        const char* enc_in_names[] = {"image"};
+        const char* enc_out_names[] = {"high_res_feats_0", "high_res_feats_1", "image_embed"};
+        auto enc_out = encoder_->Run(
+            Ort::RunOptions{nullptr},
+            enc_in_names, &image_tensor, 1,
+            enc_out_names, 3);
+
+        const float sx = (float)SAM_INPUT_SIZE / (float)bgr.cols;
+        const float sy = (float)SAM_INPUT_SIZE / (float)bgr.rows;
+        const float x1 = (float)box.x * sx;
+        const float y1 = (float)box.y * sy;
+        const float x2 = (float)(box.x + box.width) * sx;
+        const float y2 = (float)(box.y + box.height) * sy;
+        std::array<float, 4> point_coords_buf{x1, y1, x2, y2};
+        std::array<float, 2> point_labels_buf{2.0f, 3.0f};
+        std::vector<float> mask_input(1 * 1 * SAM_MASK_SIZE * SAM_MASK_SIZE, 0.0f);
+        std::array<float, 1> has_mask_input{0.0f};
+
+        std::array<int64_t, 3> point_coords_shape{1, 2, 2};
+        std::array<int64_t, 2> point_labels_shape{1, 2};
+        std::array<int64_t, 4> mask_input_shape{1, 1, SAM_MASK_SIZE, SAM_MASK_SIZE};
+        std::array<int64_t, 1> has_mask_shape{1};
+
+        Ort::Value point_coords = Ort::Value::CreateTensor<float>(
+            mem, point_coords_buf.data(), point_coords_buf.size(),
+            point_coords_shape.data(), point_coords_shape.size());
+        Ort::Value point_labels = Ort::Value::CreateTensor<float>(
+            mem, point_labels_buf.data(), point_labels_buf.size(),
+            point_labels_shape.data(), point_labels_shape.size());
+        Ort::Value mask_in = Ort::Value::CreateTensor<float>(
+            mem, mask_input.data(), mask_input.size(),
+            mask_input_shape.data(), mask_input_shape.size());
+        Ort::Value has_mask = Ort::Value::CreateTensor<float>(
+            mem, has_mask_input.data(), has_mask_input.size(),
+            has_mask_shape.data(), has_mask_shape.size());
+
+        std::array<const char*, 7> dec_in_names{
+            "image_embed", "high_res_feats_0", "high_res_feats_1",
+            "point_coords", "point_labels", "mask_input", "has_mask_input"};
+        std::array<Ort::Value, 7> dec_inputs{
+            std::move(enc_out[2]), std::move(enc_out[0]), std::move(enc_out[1]),
+            std::move(point_coords), std::move(point_labels), std::move(mask_in), std::move(has_mask)};
+        std::array<const char*, 2> dec_out_names{"masks", "iou_predictions"};
+        auto dec_out = decoder_->Run(
+            Ort::RunOptions{nullptr},
+            dec_in_names.data(), dec_inputs.data(), dec_inputs.size(),
+            dec_out_names.data(), dec_out_names.size());
+
+        const float* iou = dec_out[1].GetTensorData<float>();
+        int best_idx = 0;
+        if (iou[1] > iou[best_idx]) best_idx = 1;
+        if (iou[2] > iou[best_idx]) best_idx = 2;
+
+        const float* masks = dec_out[0].GetTensorData<float>();
+        const int plane_stride = SAM_MASK_SIZE * SAM_MASK_SIZE;
+        const float* logits = masks + best_idx * plane_stride;
+
+        cv::Mat mask_small(SAM_MASK_SIZE, SAM_MASK_SIZE, CV_8UC1, cv::Scalar(0));
+        for (int y = 0; y < SAM_MASK_SIZE; ++y) {
+            uint8_t* row = mask_small.ptr<uint8_t>(y);
+            for (int x = 0; x < SAM_MASK_SIZE; ++x) {
+                const float logit = logits[y * SAM_MASK_SIZE + x];
+                row[x] = (logit > 0.0f) ? 255 : 0;
+            }
+        }
+
+        cv::resize(mask_small, out_mask_u8, bgr.size(), 0, 0, cv::INTER_LINEAR);
+        cv::threshold(out_mask_u8, out_mask_u8, 127, 255, cv::THRESH_BINARY);
+        const cv::Moments m = cv::moments(out_mask_u8, true);
+        if (m.m00 <= 1.0) return false;
+        out_centroid = cv::Point2f((float)(m.m10 / m.m00), (float)(m.m01 / m.m00));
+        return true;
+    }
+
+private:
+    Ort::Env env_{ORT_LOGGING_LEVEL_WARNING, "sam2"};
+    std::unique_ptr<Ort::Session> encoder_;
+    std::unique_ptr<Ort::Session> decoder_;
+};
+#endif
 
 // ---------------------------------------------------------------------------
 // YOLO detector (bowl-only, headless)
@@ -241,8 +384,10 @@ static bool depthTo3DTask(
     const Eigen::Matrix4d& T_task_cam,
     Eigen::Vector3d& out_base_task)
 {
-    int hw = std::max(2, box.width / 6);
-    int hh = std::max(2, box.height / 6);
+    // Match bottle detector: wide horizontal patch, tight vertical band —
+    // reduces mixing rim/background depth when the camera is oblique.
+    int hw = std::max(4, box.width / 4);
+    int hh = std::max(2, box.height / 8);
     int W = depth.get_width(), H = depth.get_height();
 
     std::vector<float> ds;
@@ -265,6 +410,23 @@ static bool depthTo3DTask(
     out_base_task = pt_task.head<3>();
     // out_base_task.y() = out_base_task.y() + 0.05;
     out_base_task.z() = 0.0;  // snap to table surface
+    return true;
+}
+
+static bool taskToPixel(
+    const Eigen::Vector3d& p_task,
+    const Eigen::Matrix4d& T_task_cam,
+    const rs2_intrinsics& intr,
+    cv::Point& out_px)
+{
+    Eigen::Matrix4d T_cam_task = T_task_cam.inverse();
+    Eigen::Vector4d p_task_h(p_task.x(), p_task.y(), p_task.z(), 1.0);
+    Eigen::Vector4d p_cam_h = T_cam_task * p_task_h;
+    if (p_cam_h.z() <= 1e-6) return false;
+    float p_cam[3] = {(float)p_cam_h.x(), (float)p_cam_h.y(), (float)p_cam_h.z()};
+    float pix[2] = {0.0f, 0.0f};
+    rs2_project_point_to_pixel(pix, &intr, p_cam);
+    out_px = cv::Point((int)std::lround(pix[0]), (int)std::lround(pix[1]));
     return true;
 }
 
@@ -346,6 +508,13 @@ static void save_annotated_frame(
     const cv::Rect& box, float conf,
     const Eigen::Vector3d& base_task,
     const Eigen::Vector3d& rim_task,
+    const cv::Mat& sam_mask,
+    const cv::Point& sam_centroid_px,
+    bool sam_used,
+    const cv::Point& planned_grasp_px,
+    const cv::Point& planned_pregrasp_px,
+    bool planned_grasp_ok,
+    bool planned_pregrasp_ok,
     bool detected,
     const std::string& save_path)
 {
@@ -359,7 +528,31 @@ static void save_annotated_frame(
     };
 
     if (detected) {
+        if (sam_used && !sam_mask.empty()) {
+            cv::Mat green(disp.size(), disp.type(), cv::Scalar(0, 180, 0));
+            cv::Mat blended;
+            cv::addWeighted(disp, 0.65, green, 0.35, 0.0, blended);
+            blended.copyTo(disp, sam_mask);
+            cv::circle(disp, sam_centroid_px, 5, cv::Scalar(255, 0, 255), 2);
+            put("SAM2 segmentation: ON (depth @ mask)", 2, cv::Scalar(255, 160, 0));
+        } else {
+            put("SAM2 segmentation: OFF (YOLO bbox depth)", 2, cv::Scalar(80, 180, 255));
+        }
+
         cv::rectangle(disp, box, cv::Scalar(0,255,0), 2);
+        if (planned_grasp_ok) {
+            cv::circle(disp, planned_grasp_px, 6, cv::Scalar(0, 0, 255), 2);
+            cv::putText(disp, "grasp", planned_grasp_px + cv::Point(8, -6),
+                        cv::FONT_HERSHEY_SIMPLEX, 0.45, cv::Scalar(0, 0, 255), 2);
+        }
+        if (planned_pregrasp_ok) {
+            cv::circle(disp, planned_pregrasp_px, 6, cv::Scalar(255, 255, 0), 2);
+            cv::putText(disp, "pregrasp", planned_pregrasp_px + cv::Point(8, -6),
+                        cv::FONT_HERSHEY_SIMPLEX, 0.45, cv::Scalar(255, 255, 0), 2);
+            if (planned_grasp_ok) {
+                cv::line(disp, planned_pregrasp_px, planned_grasp_px, cv::Scalar(255, 255, 0), 1);
+            }
+        }
 
         std::ostringstream ct; ct<<std::fixed; ct.precision(2);
         ct<<"bowl  conf="<<conf;
@@ -374,7 +567,7 @@ static void save_annotated_frame(
         r<<"rim_task  [m]: "<<rim_task[0] <<", "<<rim_task[1] <<", "<<rim_task[2];
         put(b.str(), 0);
         put(r.str(), 1);
-        put("BOWL DETECTED", 2, cv::Scalar(0,200,255));
+        put("BOWL DETECTED", 3, cv::Scalar(0,200,255));
     } else {
         put("No bowl detected", 0, cv::Scalar(0,80,255));
     }
@@ -394,8 +587,13 @@ int main(int argc, char** argv) {
     std::string classes_path = "../../../../212_Perception/build/coco-classes.txt";
     std::string save_image   = "/tmp/bowl_detection_preview.jpg";
     std::string camera_serial = "";
+    std::string sam_encoder_path = "";
+    std::string sam_decoder_path = "";
+    double grasp_angle_deg = 180.0;
+    double approach_tilt_deg = 10.0;
     float conf_threshold     = 0.40f;
     bool  headless           = false;
+    bool  no_sam             = false;
     int warmup_frames        = DEFAULT_N_WARMUP;
     int detect_frames        = DEFAULT_N_FRAMES;
 
@@ -408,6 +606,11 @@ int main(int argc, char** argv) {
         else if (a=="--conf"    && i+1<argc) { conf_threshold = std::stof(argv[++i]); }
         else if (a=="--save-image" && i+1<argc) { save_image = argv[++i]; }
         else if (a=="--serial"  && i+1<argc) { camera_serial = argv[++i]; }
+        else if (a=="--no-sam")             { no_sam = true; }
+        else if (a=="--sam-encoder" && i+1<argc) { sam_encoder_path = argv[++i]; }
+        else if (a=="--sam-decoder" && i+1<argc) { sam_decoder_path = argv[++i]; }
+        else if (a=="--grasp-angle-deg" && i+1<argc) { grasp_angle_deg = std::stod(argv[++i]); }
+        else if (a=="--approach-tilt-deg" && i+1<argc) { approach_tilt_deg = std::stod(argv[++i]); }
         else if (a=="--warmup"  && i+1<argc) { warmup_frames = std::max(0, std::stoi(argv[++i])); }
         else if (a=="--frames"  && i+1<argc) { detect_frames = std::max(1, std::stoi(argv[++i])); }
         else if (a=="--headless")             { headless = true; }
@@ -422,6 +625,32 @@ int main(int argc, char** argv) {
 
     std::cerr<<"[INFO] T_task_camera:\n"<<T_task_cam<<"\n";
     std::cerr<<"[INFO] Mode: "<<(headless?"headless":"preview (saves JPEG)")<<"\n";
+
+#if defined(HAVE_ONNXRUNTIME)
+    Sam2Segmenter sam2;
+    bool sam2_loaded = false;
+    const bool want_sam = !no_sam && !sam_encoder_path.empty() && !sam_decoder_path.empty();
+    if (want_sam) {
+        try {
+            sam2_loaded = sam2.load(sam_encoder_path, sam_decoder_path);
+            if (sam2_loaded) std::cerr << "[INFO] SAM2 ONNX loaded — segmentation refines YOLO box\n";
+            else std::cerr << "[WARN] SAM2 load failed — using YOLO bbox geometry only\n";
+        } catch (const std::exception& e) {
+            std::cerr << "[WARN] SAM2 init failed (" << e.what() << ") — YOLO-only fallback\n";
+            sam2_loaded = false;
+        }
+    } else if (!no_sam && (sam_encoder_path.empty() ^ sam_decoder_path.empty())) {
+        std::cerr << "[WARN] Provide both --sam-encoder and --sam-decoder, or neither. SAM disabled.\n";
+    } else if (!no_sam && sam_encoder_path.empty()) {
+        std::cerr << "[INFO] SAM2 paths not passed — YOLO-only geometry (pass encoder+decoder to enable SAM)\n";
+    }
+#else
+    bool sam2_loaded = false;
+    if (!no_sam && !sam_encoder_path.empty() && !sam_decoder_path.empty()) {
+        std::cerr << "[WARN] SAM2 ONNX paths passed but this binary was built without ONNX Runtime. "
+                  << "Rebuild with -DONNXRUNTIME_ROOT=...  YOLO-only geometry.\n";
+    }
+#endif
 
     YOLODetector detector;
     if (!detector.loadModel(model_path, classes_path)) return 1;
@@ -491,7 +720,7 @@ int main(int argc, char** argv) {
     // transform to task frame.  This uses the actual depth reading rather
     // than tracing a ray to an assumed z=0 plane, so calibration angular
     // errors are not amplified by the camera-to-table distance.
-    Eigen::Vector3d bowl_base_task, bowl_rim_task;
+    Eigen::Vector3d bowl_base_task(0,0,0), bowl_rim_task(0,0,BOWL_RIM_Z_OFFSET_M);
     Eigen::Vector3d pos_cam(0,0,0);  // kept for JSON completeness only
     if (found) {
         std::cerr<<"[INFO] Bowl detected  conf="<<best_conf
@@ -499,8 +728,33 @@ int main(int argc, char** argv) {
                  <<" "<<best_box.width<<"x"<<best_box.height<<"]\n";
 
         int cx = best_box.x + best_box.width / 2;
-        int cy = best_box.y + best_box.height / 2;
-        if (!depthTo3DTask(best_box, cx, cy, best_depth, intr, T_task_cam, bowl_base_task)) {
+        cv::Mat sam_mask;
+        cv::Point2f sam_centroid((float)cx, (float)(best_box.y + best_box.height / 2));
+        bool sam_refined = false;
+#if defined(HAVE_ONNXRUNTIME)
+        if (sam2_loaded) {
+            if (sam2.refineByBox(best_frame, best_box, sam_mask, sam_centroid)) {
+                sam_refined = true;
+                cx = std::clamp((int)std::lround(sam_centroid.x), 0, best_frame.cols - 1);
+            } else {
+                std::cerr << "[WARN] SAM2 refine failed; using YOLO bbox for XY depth sample.\n";
+            }
+        }
+#endif
+        int cy_bot = best_box.y + best_box.height - std::max(1, best_box.height / 10);
+        int cy_ctr = best_box.y + best_box.height / 2;
+        int cy_sam = std::clamp((int)std::lround(sam_centroid.y), 0, best_frame.rows - 1);
+        int cy_sample = sam_refined ? cy_sam : cy_bot;
+        bool ok3d = depthTo3DTask(best_box, cx, cy_sample, best_depth, intr, T_task_cam, bowl_base_task);
+        if (!ok3d && sam_refined) {
+            std::cerr << "[WARN] Depth at SAM centroid failed; trying YOLO bottom edge.\n";
+            ok3d = depthTo3DTask(best_box, cx, cy_bot, best_depth, intr, T_task_cam, bowl_base_task);
+        }
+        if (!ok3d) {
+            std::cerr<<"[WARN] Bottom-edge depth sample failed, trying bbox centre.\n";
+            ok3d = depthTo3DTask(best_box, cx, cy_ctr, best_depth, intr, T_task_cam, bowl_base_task);
+        }
+        if (!ok3d) {
             std::cerr<<"[WARN] Depth-to-3D failed (no valid depth readings). "
                      <<"Check camera range and scene coverage.\n";
             found = false;
@@ -509,15 +763,40 @@ int main(int argc, char** argv) {
             bowl_rim_task.z() = BOWL_RIM_Z_OFFSET_M;
             std::cerr<<"[INFO] Bowl base task ("<<bowl_base_task.transpose()<<") m\n";
             std::cerr<<"[INFO] Bowl rim  task ("<<bowl_rim_task.transpose()<<") m\n";
+
+            // Save annotated JPEG (unless headless)
+            if (!headless && !best_frame.empty()) {
+                const double angle_rad = grasp_angle_deg * M_PI / 180.0;
+                const double tilt_rad = approach_tilt_deg * M_PI / 180.0;
+                Eigen::Vector3d rim(
+                    BOWL_RIM_OUTER_RADIUS_M * std::cos(angle_rad),
+                    BOWL_RIM_OUTER_RADIUS_M * std::sin(angle_rad),
+                    BOWL_RIM_Z_OFFSET_M);
+                Eigen::Vector3d grasp_task = bowl_base_task + rim;
+                Eigen::Matrix3d Rg = hook_rim_rotation(angle_rad, tilt_rad);
+                Eigen::Vector3d pregrasp_task = grasp_task - HOOK_RIM_PREGRASP_OFFSET * Rg.col(2);
+                cv::Point grasp_px, pregrasp_px;
+                bool grasp_ok = taskToPixel(grasp_task, T_task_cam, intr, grasp_px);
+                bool pregrasp_ok = taskToPixel(pregrasp_task, T_task_cam, intr, pregrasp_px);
+                save_annotated_frame(
+                    best_frame, best_box, best_conf,
+                    bowl_base_task, bowl_rim_task,
+                    sam_mask, cv::Point((int)std::lround(sam_centroid.x), (int)std::lround(sam_centroid.y)),
+                    sam_refined,
+                    grasp_px, pregrasp_px, grasp_ok, pregrasp_ok,
+                    true, save_image
+                );
+            }
         }
     } else {
         std::cerr<<"[WARN] No bowl detected (conf≥"<<conf_threshold<<").\n";
-    }
-
-    // Save annotated JPEG (unless headless)
-    if (!headless && !best_frame.empty()) {
-        save_annotated_frame(best_frame, best_box, best_conf,
-                             bowl_base_task, bowl_rim_task, found, save_image);
+        if (!headless && !best_frame.empty()) {
+            save_annotated_frame(best_frame, best_box, best_conf,
+                                 bowl_base_task, bowl_rim_task,
+                                 cv::Mat(), cv::Point(), false,
+                                 cv::Point(), cv::Point(), false, false,
+                                 false, save_image);
+        }
     }
 
     // Emit JSON

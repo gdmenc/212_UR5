@@ -108,6 +108,9 @@ def bowl_hook_grasp(
     X_task_bowl: Pose,
     angle_rad: float = 0.0,
     approach_tilt_rad: float = 0.0,
+    *,
+    rim_outer_radius_m: float | None = None,
+    rim_z_offset_m: float | None = None,
 ) -> Grasp:
     """Hook-gripper rim grasp at the bowl's outer rim.
 
@@ -121,11 +124,17 @@ def bowl_hook_grasp(
     around tool +Y. Positive values "dive" the gripper into the bowl
     from above-and-outward, lifting the wrist away from the table — see
     ``hook_rim_rotation`` for the full sign convention.
+
+    ``rim_outer_radius_m`` / ``rim_z_offset_m`` override the lab defaults
+    (``BOWL_RIM_OUTER_RADIUS_M``, ``BOWL_RIM_Z_OFFSET_M``) when the physical
+    bowl or bench calibration differs.
     """
+    r = float(rim_outer_radius_m) if rim_outer_radius_m is not None else BOWL_RIM_OUTER_RADIUS_M
+    z_rim = float(rim_z_offset_m) if rim_z_offset_m is not None else BOWL_RIM_Z_OFFSET_M
     rim_xyz = np.array([
-        BOWL_RIM_OUTER_RADIUS_M * np.cos(angle_rad),
-        BOWL_RIM_OUTER_RADIUS_M * np.sin(angle_rad),
-        BOWL_RIM_Z_OFFSET_M,
+        r * np.cos(angle_rad),
+        r * np.sin(angle_rad),
+        z_rim,
     ])
     X_bowl_grasp = Pose(
         translation=rim_xyz,

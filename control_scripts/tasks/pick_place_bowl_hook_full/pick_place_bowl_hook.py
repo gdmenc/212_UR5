@@ -1,46 +1,17 @@
 """End-to-end pick-and-place of a bowl using the HOOK arm (ur_left).
 
-Parallel of ``pick_place_plate.py`` but using the welded hook on ur_left
-to engage the bowl by its outer rim. The hook descends vertically at the
-selected rim angle, the moving finger threads inside the rim while the
-fixed jaw stays outside, and the rim wall is clamped between them.
+Parallel of ``pick_place_cup_full`` / ``pick_place_plate``: uses Drake motion
+planning for free-space transits when enabled, then the standard ``pick`` /
+``place`` contact primitives.
 
-Hardware assumptions
---------------------
-  - The arm named ``ARM`` has the welded hook gripper attached and a
-    pre-calibrated ``TCP_OFFSET_HOOK = [0, 0, 0.10275, 0, +π/2, 0]``
-    (calibration.py).
-  - A bowl matching ``grasps/bowl.py`` geometry sitting at task-frame
-    ``BOWL_PICK_POSE_TASK`` with bowl +z pointing up.
-  - Task-frame ``BOWL_PLACE_POSE_TASK`` is the intended bowl center
-    after placement.
-
-Running
--------
-Standalone:
-    python -m control_scripts.tasks.pick_place_bowl_hook [--dry]
-
-Caveats
--------
-This grasp does NOT yet compensate for the bowl's sidewall slant. The
-rim is treated as a horizontal circle; the wrist descends straight down.
-A tilted-rim variant (mirroring ``plate_rim_grasp_edge``) is left for a
-future pass when the simple version is known-good on the rig.
-
-First-run checklist
--------------------
-1. Verify ``transit_z`` clears the suspended bowl (7.2 cm hangs below
-   the TCP at the rim grasp) plus a margin.
-2. Use ``--dry`` to print the grasp/place TCP poses without commanding
-   any motion.
-3. Watch the home → pregrasp transit on first run — at angle π the
-   commanded rotvec is at the 180° boundary; if the wrist takes the
-   long way, switch ``GRASP_ANGLE_RAD`` from ``np.pi`` to ``-np.pi``.
+Hardware assumptions and running notes match the non-full
+``pick_place_bowl_hook`` task; see that module's docstring for checklist.
 """
 
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 
 import numpy as np
 
@@ -49,55 +20,49 @@ from ...config import PickPlaceConfig
 from ...grasps.bowl import bowl_hook_grasp
 from ...pick import pick
 from ...place import place
-from ...session import default_session
-from ...util.poses import Pose
+from ...session import Session, default_session
+from ...moves import transit_xy
+from ...util.poses import Pose, pose_at_altitude
+from ...util.rtde_convert import rtde_to_pose
+from ...world import World
 
 
 # --- Tunables (edit to match your physical layout) ------------------------
-# Note: ascend 1 cm above nominal rim z to not hit the ground
 BOWL_PICK_POSE_TASK = Pose(translation=[0.1, 0, 0.01])
-"""Bowl center at PICK location, expressed in task frame. Identity
-rotation is correct for any free-standing bowl on the table."""
-
-# Note: ascend 1 cm above nominal rim z to not hit the ground
 BOWL_PLACE_POSE_TASK = Pose(translation=[-0.1, 0.2, 0.01])
-"""Bowl center at PLACE location, task frame. Same as pickup by default."""
 
 GRASP_ANGLE_RAD = float(np.radians(180))
-"""Bowl-frame angle at which to grasp the rim. At angle π the hook
-approaches from the −X side of the bowl. Matches the recorded teaching
-pose used to verify TCP_OFFSET_HOOK; equivalent to -np.pi modulo 2π."""
-
-PLACE_ANGLE_RAD = float(np.radians(180+45))
-"""Same orientation at the place location — keeps the wrist consistent
-between pick and place."""
-
+PLACE_ANGLE_RAD = float(np.radians(180 + 45))
 APPROACH_TILT_RAD = float(np.radians(10))
-"""Tilt of the descent off pure-vertical, around tool +Y. Positive value
-"dives" the gripper into the bowl from above-and-outward — front
-(throat/finger) tips down, back (flange/wrist) lifts up. At 15° the
-wrist sits ~2.7 cm higher in task z than the no-tilt grasp, which buys
-forearm clearance from the table at the bowl's low rim height (7.2 cm).
-Set to 0 to fall back to pure vertical descent. See
-``grasps._hook_rim.hook_rim_rotation`` for the full sign convention."""
 
 ARM = "ur_left"
 
+WORLD = World(
+    include_microwave=True,
+    include_objects=False,
+    robotiq_mode="closed",
+    microwave_door_open_rad=0.0,
+)
+
+USE_MOTION_PLANNING = True
+MOTION_PLAN_PRE_PICK_APPROACH = True
+MOTION_PLAN_RRT_FALLBACK = True
+MOTION_PLAN_AUTO_FALLBACK = True
+CARRY_MIN_CLEARANCE_M = 0.005
+MOTION_PLAN_N_WAYPOINTS = 30
+MOTION_PLAN_BLEND_R_M = 0.005
+
 CONFIG = PickPlaceConfig(
     transit_z=0.3,
-    place_use_contact_descent=False,  # open-loop descent to the place pose
+    place_use_contact_descent=False,
     transit_speed=0.1,
     transit_accel=0.2,
     approach_speed=0.05,
     approach_accel=0.2,
     retract_speed=0.1,
     retract_accel=0.2,
-
-    # Hook has no continuous aperture. ``None`` makes ``prepare_for_grasp``
-    # dispatch to ``gripper.open()`` (extend the finger) before descent.
     release_aperture_mm=None,
-
-    gripper_open_speed_pct=40,   # no-op for the hook; kept for symmetry
+    gripper_open_speed_pct=40,
     gripper_close_speed_pct=30,
 )
 
@@ -111,9 +76,6 @@ def plan_pick():
 
 
 def plan_place() -> Pose:
-    """TCP pose at release. Uses the same rim-grasp factory at the place
-    location so the gripper's orientation stays consistent between pick
-    and place."""
     grasp_at_dest = bowl_hook_grasp(
         BOWL_PLACE_POSE_TASK,
         angle_rad=PLACE_ANGLE_RAD,
@@ -129,29 +91,152 @@ def _print_plan(grasp, place_pose: Pose) -> None:
     print("  Place location :", BOWL_PLACE_POSE_TASK.translation, "(task frame)")
     print("  Grasp angle    :", f"{np.degrees(GRASP_ANGLE_RAD):+.0f}°")
     print("  Place angle    :", f"{np.degrees(PLACE_ANGLE_RAD):+.0f}°")
-    print("  Approach tilt  :", f"{np.degrees(APPROACH_TILT_RAD):+.1f}°"
-          " (positive = wrist UP, gripper dives in from above-and-outward)")
+    print("  Approach tilt  :", f"{np.degrees(APPROACH_TILT_RAD):+.1f}°")
     print("  Grasp pose     :", grasp.grasp_pose.translation, "(task frame)")
     print("  Place pose     :", place_pose.translation, "(task frame)")
-    print("  Pregrasp offset:", f"{grasp.pregrasp_offset*100:.1f} cm "
-          "(along tool -Z, follows the tilt)")
+    print("  Pregrasp offset:", f"{grasp.pregrasp_offset*100:.1f} cm")
     print("  Transit Z      :", CONFIG.transit_z, "m")
     print("=" * 60)
 
 
+def _current_q(session: Session) -> dict[str, np.ndarray]:
+    return {
+        name: np.asarray(arm.receive.getActualQ(), dtype=float)
+        for name, arm in session.arms.items()
+    }
+
+
+def _current_tcp_pose_task(arm: ArmHandle) -> Pose:
+    return arm.to_task(rtde_to_pose(arm.receive.getActualTCPPose()))
+
+
+def _hover_before_pick(grasp, config: PickPlaceConfig) -> Pose:
+    return pose_at_altitude(grasp.grasp_pose, config.transit_z)
+
+
+def _hover_before_place(place_pose: Pose, config: PickPlaceConfig) -> Pose:
+    return pose_at_altitude(place_pose, config.transit_z)
+
+
+def _build_planning_context(*, attached_bowl: bool):
+    leg_world = (
+        replace(WORLD, in_hand={ARM: ("bowl", None)})
+        if attached_bowl else WORLD
+    )
+    diagram, plant, _, _ = leg_world.build_planning_scene()
+    root_context = diagram.CreateDefaultContext()
+    plant_context = plant.GetMyMutableContextFromRoot(root_context)
+    return diagram, plant, plant_context
+
+
+def _planned_or_linear_transit(
+    session: Session,
+    arm: ArmHandle,
+    label: str,
+    waypoints: list,
+    config: PickPlaceConfig,
+    *,
+    attached_bowl: bool,
+) -> bool:
+    print(f"\n→ planned transit: {label}")
+    for i, wp in enumerate(waypoints):
+        print(f"  wp {i}: xyz={np.round(wp.translation, 3)}")
+
+    def _run_movel_fallback(reason: str) -> bool:
+        print(f"  ➜ moveL fallback ({reason}); routing through sequential transit_xy")
+        for wp in waypoints[1:]:
+            transit_xy(
+                arm, wp, config.transit_z,
+                config.transit_speed, config.transit_accel,
+            )
+        return True
+
+    if not USE_MOTION_PLANNING:
+        return _run_movel_fallback("USE_MOTION_PLANNING=False")
+
+    from ...planning.execute import execute_plan
+    from ...planning.transit import (
+        InfeasiblePlanError, make_rtde_ik, plan_transit,
+    )
+
+    diagram, plant, plant_context = _build_planning_context(
+        attached_bowl=attached_bowl,
+    )
+    try:
+        plan = plan_transit(
+            plant=plant,
+            arm=ARM,
+            waypoints=waypoints,
+            plant_context=plant_context,
+            current_q=_current_q(session),
+            use_rrt_fallback=MOTION_PLAN_RRT_FALLBACK,
+            rrt_diagram=diagram,
+            min_clearance_m=CARRY_MIN_CLEARANCE_M if attached_bowl else 0.01,
+            rtde_ik=make_rtde_ik(arm),
+        )
+    except InfeasiblePlanError as exc:
+        print(f"  ✗ motion plan infeasible: {exc}")
+        if MOTION_PLAN_AUTO_FALLBACK:
+            return _run_movel_fallback("planner raised InfeasiblePlanError")
+        return False
+
+    print(f"  planner={plan.metadata.get('planner')}  "
+          f"duration={plan.duration_s:.2f}s  "
+          f"clearance={plan.min_clearance_m * 1000:.1f}mm")
+
+    result = execute_plan(
+        plan, session,
+        method="moveJ_path",
+        n_waypoints=MOTION_PLAN_N_WAYPOINTS,
+        blend_r_m=MOTION_PLAN_BLEND_R_M,
+    )
+    if not result.success:
+        print(f"  ✗ planned transit execution failed: {result.reason}")
+        if MOTION_PLAN_AUTO_FALLBACK:
+            return _run_movel_fallback(f"execute_plan failed: {result.reason}")
+        return False
+    print("  ✓ planned transit reached.")
+    return True
+
+
 def run_on_arm(
+    session: Session,
     arm: ArmHandle,
     grasp,
     place_pose: Pose,
     config: PickPlaceConfig = CONFIG,
+    *,
+    pick_only: bool = False,
 ) -> bool:
-    """Execute the pick + place on a live ArmHandle. Returns True on success."""
+    if MOTION_PLAN_PRE_PICK_APPROACH:
+        if not _planned_or_linear_transit(
+            session, arm,
+            "pre-pick approach to grasp hover",
+            [_current_tcp_pose_task(arm), _hover_before_pick(grasp, config)],
+            config,
+            attached_bowl=False,
+        ):
+            return False
+
     print(f"\n→ pick: {grasp.description}")
     pick_result = pick(arm, grasp, config)
     if not pick_result.success:
         print(f"  ✗ pick FAILED: {pick_result.reason}")
         return False
     print("  ✓ pick succeeded.")
+
+    if pick_only:
+        print("\nDone — pick only (no place).")
+        return True
+
+    if not _planned_or_linear_transit(
+        session, arm,
+        "post-pick carry to place hover",
+        [_current_tcp_pose_task(arm), _hover_before_place(place_pose, config)],
+        config,
+        attached_bowl=True,
+    ):
+        return False
 
     print(f"\n→ place @ {BOWL_PLACE_POSE_TASK.translation}")
     place_result = place(arm, place_pose, config)
@@ -164,7 +249,12 @@ def run_on_arm(
     return True
 
 
-def main(dry: bool = False) -> int:
+def main(dry: bool = False, motion_planning: bool = True) -> int:
+    if not motion_planning:
+        global USE_MOTION_PLANNING
+        USE_MOTION_PLANNING = False
+        print("[CLI] motion planning DISABLED — transits use sequential moveL.")
+
     grasp = plan_pick()
     place_pose = plan_place()
     _print_plan(grasp, place_pose)
@@ -177,15 +267,19 @@ def main(dry: bool = False) -> int:
     right = ARM == "ur_right"
     with default_session(left=left, right=right) as session:
         arm = session.arms[ARM]
-        return 0 if run_on_arm(arm, grasp, place_pose, CONFIG) else 1
+        return 0 if run_on_arm(session, arm, grasp, place_pose, CONFIG) else 1
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
+    ap.add_argument("--dry", action="store_true")
     ap.add_argument(
-        "--dry",
+        "--no-motion-planning",
         action="store_true",
-        help="Plan and print the grasp/place poses without connecting to RTDE.",
+        help="Disable Drake planning; use moveL transits only.",
     )
     args = ap.parse_args()
-    raise SystemExit(main(dry=args.dry))
+    raise SystemExit(main(
+        dry=args.dry,
+        motion_planning=not args.no_motion_planning,
+    ))

@@ -383,6 +383,7 @@ def run(
     pose_samples: int = POSE_SAMPLES_DEFAULT,
     warmup_frames: int = CXX_WARMUP_FRAMES,
     detect_frames: int = CXX_DETECT_FRAMES,
+    skip_obs_move: bool = False,
     zero_camera: bool = False,
     reference_center_task: np.ndarray | None = None,
     mode: str = "real",
@@ -400,11 +401,17 @@ def run(
         if cam == "arm":
             T_ee_cam = _load_T_ee_camera(_CALIB_JSON)
             print(f"[calib] t_ee_camera = {np.round(T_ee_cam[:3, 3], 4)}")
-            print("[1/6]  Moving to observation pose (candidate3) ...")
-            arm.control.moveJ(OBS_Q_RAD, speed=0.3, acceleration=0.2)
-            time.sleep(0.3)
-            print("  Reached observation pose.  Hook tip -> +X, camera faces table.")
-            _confirm("Arm at obs pose. Run perception and open detection image?", auto)
+            if skip_obs_move:
+                q_live = np.asarray(arm.receive.getActualQ(), dtype=float)
+                print("[1/6]  Observation move SKIPPED (--skip-obs-move).")
+                print(f"  Using current joints q [rad] = {np.round(q_live, 4)}")
+                _confirm("Arm is in a safe view. Run perception and open detection image?", auto)
+            else:
+                print("[1/6]  Moving to observation pose (candidate3) ...")
+                arm.control.moveJ(OBS_Q_RAD, speed=0.3, acceleration=0.2)
+                time.sleep(0.3)
+                print("  Reached observation pose.  Hook tip -> +X, camera faces table.")
+                _confirm("Arm at obs pose. Run perception and open detection image?", auto)
             print(f"[2/6]  Reading TCP -> T_task_camera (pose samples: {pose_samples}) ...")
             T_task_cam = _compute_T_task_camera_stable(arm, T_ee_cam, samples=pose_samples)
             cam_serial = ARM_CAM_SERIAL
@@ -521,6 +528,14 @@ def main() -> None:
                         help="Perception attempts (default 1 for mac stability).")
     parser.add_argument("--pose-samples", type=int, default=POSE_SAMPLES_DEFAULT,
                         help="TCP samples for T_task_camera averaging (default 1).")
+    parser.add_argument(
+        "--skip-obs-move",
+        action="store_true",
+        help=(
+            "Do not move to the hard-coded observation joint pose (OBS_Q_RAD). "
+            "Use the current arm pose instead (safer if the rig/table/tool has changed)."
+        ),
+    )
     parser.add_argument("--warmup-frames", type=int, default=CXX_WARMUP_FRAMES,
                         help="C++ RealSense warmup frames (default 1 for mac stability).")
     parser.add_argument("--detect-frames", type=int, default=CXX_DETECT_FRAMES,
@@ -568,6 +583,7 @@ def main() -> None:
             pose_samples=max(1, args.pose_samples),
             warmup_frames=max(0, args.warmup_frames),
             detect_frames=max(1, args.detect_frames),
+            skip_obs_move=bool(args.skip_obs_move),
             zero_camera=args.zero_camera,
             reference_center_task=np.array(args.ref_center, dtype=float),
             mode=args.mode,

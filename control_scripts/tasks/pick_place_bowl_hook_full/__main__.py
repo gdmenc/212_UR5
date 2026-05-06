@@ -6,7 +6,8 @@ Pipeline
 --------
 1. Move left arm to observation pose (candidate3).
 2. Read live TCP → compute T_task_camera.
-3. Run C++ perception (YOLOv11 + RealSense) → bowl position in task frame.
+3. Run C++ perception (YOLO bowl prompt + SAM2 mask when ONNX models present,
+   librealsense2) → bowl position in task frame.
    Saves an annotated JPEG to /tmp/bowl_detection_preview.jpg and opens it
    in Preview.app so you can verify the detection before continuing.
 4. Print detected position + grasp plan, wait for confirmation.
@@ -52,12 +53,12 @@ import numpy as np
 from ...arm import ArmHandle
 from ...config import PickPlaceConfig
 from ...grasps.bowl import bowl_hook_grasp
-from ...pick import pick
-from ...place import place
 from ...session import default_session
 from ...util.poses import Pose
 from ...util.rotations import Rotation
 from ...util.rtde_convert import rtde_to_pose
+from ...util.se3_average import average_se3
+from . import pick_place_bowl_hook as _bowl_exec
 
 
 # ---------------------------------------------------------------------------
@@ -73,6 +74,8 @@ _OFFSETS_JSON   = _REPO_ROOT / "calibration" / "build" / "perception_offsets.jso
 _YOLO_MODEL     = _PERCEPTION_DIR / "yolo11n.onnx"
 _COCO_CLASSES   = _PERCEPTION_DIR / "coco-classes.txt"
 _PREVIEW_IMAGE  = Path("/tmp/bowl_detection_preview.jpg")
+_SAM2_ENCODER_DEFAULT = _REPO_ROOT / "sam2_hiera_tiny" / "sam2_hiera_tiny.encoder.onnx"
+_SAM2_DECODER_DEFAULT = _REPO_ROOT / "sam2_hiera_tiny" / "sam2_hiera_tiny.decoder.onnx"
 
 
 # ---------------------------------------------------------------------------
@@ -88,12 +91,12 @@ APPROACH_TILT_RAD = float(np.radians(10))
 
 # Observation pose "candidate3" (2026-05-01): hook tip points +X, camera sees table.
 OBS_Q_RAD = [
-    0.6895843744277954,
-    -0.8284762662700196,
-    1.2472832838641565,
-    -0.17453940332446294,
-    -1.0418575445758265,
-    -4.834977690373556
+    0.6497170329093933,
+    0.2708507019230346,
+    -0.8138680458068848,
+    0.761660023326538,
+    -0.9829977194415491,
+    -4.845102612172262
 ]
 
 ARM = "ur_left"
@@ -235,9 +238,18 @@ def _compute_T_task_camera_stable(
     for _ in range(samples):
         Ts.append(_compute_T_task_camera(arm, T_ee_cam))
         time.sleep(sample_dt_s)
-    out = Ts[-1].copy()
-    out[:3, 3] = np.mean([T[:3, 3] for T in Ts], axis=0)
-    return out
+    return average_se3(Ts)
+
+
+def _sam_cpp_args(no_sam: bool, enc: Path, dec: Path) -> list[str]:
+    """Pass SAM ONNX paths to C++ whenever both exist and --no-sam was not set."""
+    if no_sam:
+        return []
+    if enc.exists() and dec.exists():
+        return ["--sam-encoder", str(enc), "--sam-decoder", str(dec)]
+    print(f"[perception] SAM2 ONNX not found (encoder={enc.exists()}, "
+          f"decoder={dec.exists()}) — C++ will use YOLO-only geometry.")
+    return []
 
 
 def _run_perception_best(
@@ -249,6 +261,9 @@ def _run_perception_best(
     pose_samples: int = POSE_SAMPLES_DEFAULT,
     warmup_frames: int = CXX_WARMUP_FRAMES,
     detect_frames: int = CXX_DETECT_FRAMES,
+    no_sam: bool = False,
+    sam_encoder: Path = _SAM2_ENCODER_DEFAULT,
+    sam_decoder: Path = _SAM2_DECODER_DEFAULT,
 ) -> tuple[dict, np.ndarray]:
     best = None
     for i in range(attempts):
@@ -260,6 +275,9 @@ def _run_perception_best(
             serial=serial,
             warmup_frames=warmup_frames,
             detect_frames=detect_frames,
+            no_sam=no_sam,
+            sam_encoder=sam_encoder,
+            sam_decoder=sam_decoder,
         )
         if not result.get("detected", False):
             continue
@@ -290,9 +308,15 @@ def _run_perception(T_task_cam: np.ndarray,
                     auto: bool = False,
                     serial: str = "",
                     warmup_frames: int = CXX_WARMUP_FRAMES,
-                    detect_frames: int = CXX_DETECT_FRAMES) -> dict:
+                    detect_frames: int = CXX_DETECT_FRAMES,
+                    no_sam: bool = False,
+                    sam_encoder: Path = _SAM2_ENCODER_DEFAULT,
+                    sam_decoder: Path = _SAM2_DECODER_DEFAULT,
+                    preview_image: Path | None = None) -> dict:
     """Run C++ binary.  In interactive mode saves annotated JPEG and opens it."""
     _check_paths()
+
+    save_preview = preview_image if preview_image is not None else _PREVIEW_IMAGE
 
     T_str = " ".join(f"{v:.10f}" for v in T_task_cam.flatten())
     cmd = [
@@ -302,10 +326,15 @@ def _run_perception(T_task_cam: np.ndarray,
         "--classes",        str(_COCO_CLASSES),
         "--conf",           str(conf),
         "--T-task-camera",  T_str,
-        "--save-image",     str(_PREVIEW_IMAGE),
+        "--save-image",     str(save_preview),
+        "--grasp-angle-deg", f"{np.degrees(GRASP_ANGLE_RAD):.3f}",
+        "--approach-tilt-deg", f"{np.degrees(APPROACH_TILT_RAD):.3f}",
     ]
     if serial:
         cmd.extend(["--serial", serial])
+    cmd.extend(_sam_cpp_args(no_sam, sam_encoder, sam_decoder))
+    if no_sam:
+        cmd.append("--no-sam")
     cmd.extend(["--warmup", str(max(0, warmup_frames))])
     cmd.extend(["--frames", str(max(1, detect_frames))])
     if auto:
@@ -325,9 +354,9 @@ def _run_perception(T_task_cam: np.ndarray,
         raise RuntimeError(f"Perception binary exited {result.returncode}")
 
     # Open the annotated image in Preview.app so the user can inspect it
-    if not auto and _PREVIEW_IMAGE.exists():
-        print(f"\n  [preview] Opening annotated frame: {_PREVIEW_IMAGE}")
-        subprocess.Popen(["open", str(_PREVIEW_IMAGE)])   # non-blocking
+    if not auto and save_preview.exists():
+        print(f"\n  [preview] Opening annotated frame: {save_preview}")
+        subprocess.Popen(["open", str(save_preview)])   # non-blocking
 
     try:
         return json.loads(result.stdout)
@@ -397,7 +426,14 @@ def run(
     detect_frames: int = CXX_DETECT_FRAMES,
     zero_camera: bool = False,
     reference_center_task: np.ndarray | None = None,
+    motion_planning: bool = True,
+    no_sam: bool = False,
+    sam_encoder: Path = _SAM2_ENCODER_DEFAULT,
+    sam_decoder: Path = _SAM2_DECODER_DEFAULT,
 ) -> int:
+    if not motion_planning:
+        _bowl_exec.USE_MOTION_PLANNING = False
+        print("[CLI] motion planning DISABLED — bowl transits use sequential moveL.")
     print(f"[debug] executing module: {__file__}")
     print(
         "[debug] config "
@@ -431,12 +467,13 @@ def run(
 
         # ── Phase 3: perception ────────────────────────────────────────────
         print("\n" + "─" * 62)
-        print("[3/5]  Running C++ bowl detection ...")
+        print("[3/5]  Running C++ bowl perception (YOLO + SAM2 when available) ...")
         if cam == "arm":
             try:
                 result, T_task_cam = _run_perception_best(
                     arm, T_ee_cam, auto=auto, serial=cam_serial, attempts=attempts,
-                    pose_samples=pose_samples, warmup_frames=warmup_frames, detect_frames=detect_frames
+                    pose_samples=pose_samples, warmup_frames=warmup_frames, detect_frames=detect_frames,
+                    no_sam=no_sam, sam_encoder=sam_encoder, sam_decoder=sam_decoder,
                 )
             except RuntimeError as exc:
                 print(f"\n[FAIL] {exc}")
@@ -448,6 +485,9 @@ def run(
                 serial=cam_serial,
                 warmup_frames=warmup_frames,
                 detect_frames=detect_frames,
+                no_sam=no_sam,
+                sam_encoder=sam_encoder,
+                sam_decoder=sam_decoder,
             )
 
         if not result.get("detected", False):
@@ -500,25 +540,16 @@ def run(
         _print_plan(bowl_base_pose, grasp, place_pose)
         _confirm("Grasp plan looks correct? Execute PICK?", auto)
 
-        # ── Phase 5a: pick ─────────────────────────────────────────────────
+        # ── Phase 5: pick + place (optional Drake-planned transits) ───────
         print("\n" + "─" * 62)
-        print(f"[5/5]  Picking ({grasp.description}) ...")
-        pick_result = pick(arm, grasp, CONFIG)
-        if not pick_result.success:
-            print(f"  ✗ pick FAILED: {pick_result.reason}")
+        _confirm(
+            f"Execute PICK and PLACE ({grasp.description}) "
+            f"→ place @ {np.round(BOWL_PLACE_POSE_TASK.translation, 3)} m?",
+            auto,
+        )
+        print(f"[5/5]  Pick & place ({grasp.description}) ...")
+        if not _bowl_exec.run_on_arm(session, arm, grasp, place_pose, CONFIG):
             return 1
-        print("  ✓ pick succeeded.")
-
-        # ── Phase 5b: place ────────────────────────────────────────────────
-        _confirm(f"Pick done. Execute PLACE at "
-                 f"{np.round(BOWL_PLACE_POSE_TASK.translation, 3)} m?", auto)
-
-        print(f"  Placing at {BOWL_PLACE_POSE_TASK.translation} ...")
-        place_result = place(arm, place_pose, CONFIG)
-        if not place_result.success:
-            print(f"  ✗ place FAILED: {place_result.reason}")
-            return 1
-        print("  ✓ place succeeded.")
 
     print("\n✓ Bowl pick-and-place complete.")
     return 0
@@ -530,7 +561,7 @@ def run(
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Autonomous bowl pick-and-place — YOLOv11 + RealSense + UR5."
+        description="Autonomous bowl pick-and-place — YOLO + SAM2 + RealSense + UR5."
     )
     ap.add_argument("--auto", action="store_true",
                     help="Skip all interactive checkpoints (fully autonomous).")
@@ -553,11 +584,27 @@ def main() -> None:
     ap.add_argument("--ref-center", type=float, nargs=3, default=[0.0, 0.0, 0.0],
                     metavar=("X", "Y", "Z"),
                     help="Known task-frame reference center used with --zero-camera.")
+    ap.add_argument("--no-sam", action="store_true",
+                    help="Disable SAM2 in C++ (YOLO bbox only for depth sampling).")
+    ap.add_argument("--sam-encoder", type=Path, default=_SAM2_ENCODER_DEFAULT,
+                    help="Path to SAM2 encoder ONNX (passed to C++ when file exists).")
+    ap.add_argument("--sam-decoder", type=Path, default=_SAM2_DECODER_DEFAULT,
+                    help="Path to SAM2 decoder ONNX.")
+    ap.add_argument("--onnxruntime-root", type=Path, default=None,
+                    help="When used with --build, pass -DONNXRUNTIME_ROOT to cmake.")
+    ap.add_argument(
+        "--no-motion-planning",
+        action="store_true",
+        help="Disable Drake free-space transits; use moveL only (see pick_place_bowl_hook).",
+    )
     args = ap.parse_args()
 
     if args.build:
         import subprocess as sp
-        sp.run(["cmake", "-B", "build", "-DCMAKE_BUILD_TYPE=Release"],
+        cmake_cfg = ["cmake", "-B", "build", "-DCMAKE_BUILD_TYPE=Release"]
+        if args.onnxruntime_root is not None:
+            cmake_cfg.append(f"-DONNXRUNTIME_ROOT={args.onnxruntime_root}")
+        sp.run(cmake_cfg,
                cwd=str(_HERE), check=True)
         sp.run(["cmake", "--build", "build"], cwd=str(_HERE), check=True)
         print("[build] done →", _PERCEPTION_BIN)
@@ -576,6 +623,10 @@ def main() -> None:
             detect_frames=max(1, args.detect_frames),
             zero_camera=args.zero_camera,
             reference_center_task=np.array(args.ref_center, dtype=float),
+            motion_planning=not args.no_motion_planning,
+            no_sam=args.no_sam,
+            sam_encoder=args.sam_encoder,
+            sam_decoder=args.sam_decoder,
         )
     )
 
