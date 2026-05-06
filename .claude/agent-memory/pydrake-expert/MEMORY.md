@@ -1,0 +1,3 @@
+- [Drake scene context wiring](context_wiring.md) — Must use diagram context routed through GetMyMutableContextFromRoot, not plant.CreateDefaultContext()
+- [Joint mapping RTDE↔Drake](joint_mapping.md) — getActualQ() maps directly to Drake joint positions; welded at `base` frame not `base_link`
+- [Planning stack architecture](planning_stack.md) — build_scene → plan_transit → execute_plan flow and key parameters
